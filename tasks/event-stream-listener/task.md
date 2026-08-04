@@ -36,6 +36,10 @@ main deliverable here, because every downstream consumer keys off them.
       session error, tool call start/end.
 - [ ] Write the observed names into this repo as documentation. Do not guess
       them from the endpoint list.
+- [ ] **`session.idle` is already confirmed**, carrying
+      `event.properties.sessionID` — `rdk-template`'s `auto-check.ts` handles it in
+      production. The plugin API and the observer read the same bus, so existing
+      plugins are a free partial spec for this task. Start by reading them.
 - [ ] Handle reconnect: a TUI exits when its task ends, and the listener must not
       die or spin when the socket closes.
 - [ ] Multiplex many TUIs into one stream of `(port, worktree, event)`.

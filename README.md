@@ -3,17 +3,32 @@
 Tooling that dispatches opencode agents into git worktrees and reports on their
 live state.
 
+**Read `docs/architecture.md` first.** It defines the component split, the state
+model, and the flows. This README is only an entry point.
+
+## What this is
+
+`orch` is a **globally installed tool** — one CLI and one daemon per machine. It
+is not a repo that projects clone, submodule, or vendor. Projects keep a small
+tracked `.orchestration/` directory holding only what that project knows, and
+`orch init` installs a generic event router into their `.opencode/`.
+
+That shape is chosen for one reason: it is the only option that can be handed to a
+machine that is not yours. Dotfiles are personal, an infra repo is one box, and a
+copied script diverges.
+
 ## Why this repo exists
 
-The dispatcher (`task-runner.sh`) and the five lifecycle hooks were living in
-`/home/sagi/stuff/rdk-template/` — the *parent* directory that contains the bare
-repo. That directory is not a git repository, so this machinery was unversioned,
-unbacked-up, and impossible to share with a second project. It is now here.
+The dispatcher (`task-runner.sh`) and five lifecycle hooks were living in
+`/home/sagi/stuff/rdk-template/` — the *parent* directory containing the bare
+repo, which is not a git repository. The component that dispatches every agent had
+no history and no backup.
 
-`bin/task-runner.sh` and `hooks/` are **copies**. The originals are still in
-place and still authoritative for `rdk-template`. Cutting `rdk-template` over to
-consume this repo is a task, not a side effect — see
-`tasks/version-the-orchestrator/task.md`.
+`bin/task-runner.sh` and `examples/hooks-reeeally/` are **copies taken for
+safety**, not a design. The generic half is being replaced by `orch`; the
+project-specific half belongs in `rdk-template`'s own tracked
+`.orchestration/`. Until `tasks/migrate-rdk-template/task.md` lands there are two
+divergent copies, which is worse than one unversioned copy.
 
 ## The workflow this serves
 

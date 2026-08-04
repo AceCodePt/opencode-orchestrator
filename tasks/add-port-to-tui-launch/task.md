@@ -24,11 +24,17 @@ doing this task first.
 
 ## Requirements
 
-- [ ] Add `--port 0` to the opencode invocation in `bin/task-runner.sh` (the
-      `tmux send-keys` line that launches the agent).
+- [ ] The launch lives in `orch`, **not** in project scripts. This is the whole
+      point: if a project owns the launch, every project can independently forget
+      the flag and the observer goes blind with no error. Owning the launch
+      centrally deletes the failure class instead of detecting it.
 - [ ] Add `--port 0` to the interactive alias used for hand-opened TUIs, so
       manually started sessions are observable too. Note that `iopencode` is not
       a command — it is `i` (nvim terminal insert) followed by `opencode`.
+- [ ] `orch doctor` must verify the launch line carries `--port`.
+- [ ] The observer must report "tmux session alive, no reachable port" as a
+      **distinct alarm**. Silence there means this contract broke, and that must
+      not look like an idle agent.
 - [ ] Discovery must require no registry file: `ss -ltnp | grep opencode` yields
       port and pid; `readlink /proc/<pid>/cwd` and `GET /api/location` map the
       port to a worktree.
