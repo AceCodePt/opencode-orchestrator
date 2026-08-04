@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# session-idle — what "verify" means for this project.
+#
+# Fired by the router plugin when a child agent goes idle AND the files declared
+# in ../config.json have actually changed. Named after the event, not the action.
+#
+# Provided by the dispatcher:
+#   TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME
+#
+# Contract: exit 0 = gate passed. Non-zero = failed, and everything written to
+# stdout/stderr is fed back to the agent as a prompt. Keep failure output useful
+# and bounded; it becomes the agent's instructions.
+
+set -uo pipefail
+cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
+
+status=0
+
+# Syntax-check every tracked shell script. Real gate, not a placeholder: this
+# repo is shell and markdown today.
+mapfile -t scripts < <(git ls-files -z 'bin/*' '*.sh' '.orchestration/hooks/*' | tr '\0' '\n' | grep -v '^$')
+
+for f in "${scripts[@]}"; do
+  [ -f "$f" ] || continue
+  if ! out=$(bash -n "$f" 2>&1); then
+    echo "syntax error in $f:"
+    echo "$out"
+    status=1
+  fi
+done
+
+if command -v shellcheck >/dev/null 2>&1 && [ "${#scripts[@]}" -gt 0 ]; then
+  if ! out=$(shellcheck -S warning "${scripts[@]}" 2>&1); then
+    echo "shellcheck findings:"
+    echo "$out"
+    status=1
+  fi
+else
+  echo "note: shellcheck not installed, syntax-only gate" >&2
+fi
+
+# TODO(orch-cli-skeleton): once the CLI's language is chosen, add its real
+# typecheck/test command here. Until then this gate is honest about covering only
+# shell — it does not claim to verify code that does not exist yet.
+
+exit "$status"

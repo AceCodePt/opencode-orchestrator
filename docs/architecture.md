@@ -196,6 +196,10 @@ The loop that makes a finished branch trustworthy.
    `prompt_async`, increment the retry counter, and let the agent fix it.
 7. Retry cap exceeded → halt and escalate as `stuck`. This loop is self-inflicted
    and therefore bounded on purpose.
+8. **No hook of that name exists** → outcome `no-gate-configured`. Not `passed`.
+   Routing decides whether an ungated project is acceptable, and `orch doctor`
+   reports it. A gate that silently approves unchecked work is worse than no gate,
+   because it manufactures confidence.
 
 Inject via `prompt_async`, **not** `tui.appendPrompt` + `submitPrompt`. Driving
 the TUI text box destroys whatever a human was typing, requires a TUI at all, and
@@ -234,8 +238,8 @@ seconds within a single unit of work.
 ## Flow D — routing, and the human switch
 
 An outcome reaches the daemon: `passed`, `failed`, `stuck`, `stalled`,
-`blocked-on-approval`. The daemon routes it to the parent agent (via
-`prompt_async`), to the human (phone over tailnet), or to nobody.
+`blocked-on-approval`, `no-gate-configured`. The daemon routes it to the parent
+agent (via `prompt_async`), to the human (phone over tailnet), or to nobody.
 
 This is why there is no `report_back` message. **A child produces a result; the
 orchestrator decides who needs to know.** The child never knows whether a human
@@ -261,11 +265,21 @@ and tested is cheaper to review.
 
 ## Flow E — development, including recursion
 
-`orch` is developed in its own repo and `orch init` can scaffold `orch` itself.
-The rule that keeps that safe:
+`orch` is developed in its own repo — bare repo plus worktrees, the same ceremony
+it dispatches for everyone else — and its own `.orchestration/` lives **inside**
+`orch-main`, tracked. That is the point of recursion: if `orch` cannot orchestrate
+`orch`, the contract is wrong.
 
-> The **installed** version dispatches. A worktree copy is invoked explicitly,
-> under test, and never becomes the thing dispatching its own fix.
+The ceremony creates one ambiguity that has to be closed deliberately. With
+several worktrees of `orch` checked out, *which* one is on `PATH`? Answer:
+
+> **`PATH` points at an installed release, never at a worktree.** The installed
+> version dispatches. A worktree copy is invoked by explicit path, under test, and
+> never becomes the thing dispatching its own fix.
+
+Without that rule a broken change to the dispatcher removes your ability to
+dispatch the fix — the same discipline as editing a shell config in a shell that
+sources it.
 
 Scaffolded files are owned by the consuming project after `init` — the shadcn
 model. Upgrades are a diff you review, which is why `.orchestration/` carries a
@@ -296,6 +310,16 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
 5. Auto-abort only when definitely dead. Suspected loops alert.
 6. Every project-specific decision is a hook or config value, never CLI or plugin
    code.
+7. **Hook definitions live inside a worktree and are tracked.** Never beside the
+   bare repo. A bare repo has no working tree, so anything placed next to it is
+   outside version control by construction — which is exactly how
+   `rdk-template`'s dispatcher and hooks ended up with no history and no backup.
+   Tracked-in-a-worktree also makes hooks differ per branch, so changing how
+   checks run is an ordinary reviewable change.
+8. **Absence of a gate is not a pass.** A missing hook yields
+   `no-gate-configured`, never `passed`. Otherwise every unconfigured project
+   receives automatic green lights — the same silent blindness as a TUI launched
+   without `--port`.
 
 ## Verified vs assumed
 

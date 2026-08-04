@@ -1,0 +1,10 @@
+{
+  "$comment": "Project knowledge only. Anything here that every project would copy verbatim belongs in orch instead.",
+  "baseBranch": "main",
+  "gate": {
+    "$comment": "Files that matter for the diff gate. Hash contents, not mtimes. Markdown is excluded because this repo is documentation-heavy and prose changes must not trigger check runs.",
+    "include": ["bin/**", "src/**", "**/*.sh", ".orchestration/hooks/**"],
+    "exclude": ["**/*.md", "docs/**", "tasks/**", "examples/**"],
+    "retryCap": 3
+  }
+}

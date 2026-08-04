@@ -40,6 +40,13 @@ The payoff is that new events cost configuration, not code.
 - [ ] Acquire a concurrency slot from the daemon before running a hook.
 - [ ] Report the outcome to the orchestrator. The plugin does not decide who is
       told.
+- [ ] A **missing** hook yields `no-gate-configured`, never `passed`. An
+      unconfigured project must not receive automatic green lights, and
+      `orch doctor` must report it. Same failure shape as a TUI without `--port`:
+      silence that reads as health.
+- [ ] Resolve hooks from the worktree, tracked — never from a path beside the bare
+      repo. A bare repo has no working tree, so anything next to it is unversioned
+      by construction.
 
 ## Verification
 
