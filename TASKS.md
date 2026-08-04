@@ -46,18 +46,20 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 **Foundations**
 
-- [ ] [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`](tasks/orch-cli-skeleton/task.md)
+- [-] [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`](tasks/orch-cli-skeleton/task.md) — observe/doctor/init/events/version done; `task start` outstanding
 - [ ] [Add `--port` to Every TUI Launch So Agents Are Observable](tasks/add-port-to-tui-launch/task.md)
-- [ ] [Claims, Leases and the Intent/Runtime Split in SQLite](tasks/claims-and-leases/task.md)
+- [x] [Claims, Leases and the Intent/Runtime Split in SQLite](tasks/claims-and-leases/task.md) — src/orch/store.py, 9 tests green
 
 **Sensing**
 
-- [ ] [Subscribe to the Event Stream and Capture the Event Vocabulary](tasks/event-stream-listener/task.md) 🔒 Blocked by: [Add `--port` to Every TUI Launch So Agents Are Observable]
+- [x] [Subscribe to the Event Stream and Capture the Event Vocabulary](tasks/event-stream-listener/task.md) — 93 types + 2 undocumented, see docs/events.md
 - [ ] [Watchdog for a TUI That Has Gone Silent Too Long](tasks/silence-watchdog/task.md) 🔒 Blocked by: [Subscribe to the Event Stream and Capture the Event Vocabulary]
 
 **Acting**
 
-- [ ] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) 🔒 Blocked by: [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`]
+- [ ] [Route Plugin State Through the Daemon Instead of `.orchestration/.state/`](tasks/plugin-state-via-daemon/task.md) 🔒 Blocked by: [Phone-Facing Server: Read Status and Answer Approvals Over the Tailnet]
+
+- [-] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — plugin/orch-router.ts written, untested against a live agent
 - [ ] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) 🔒 Blocked by: [Generic Event→Hook Router Plugin]
 - [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) 🔒 Blocked by: [Claims, Leases and the Intent/Runtime Split in SQLite]
 - [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) 🔒 Blocked by: [Subscribe to the Event Stream and Capture the Event Vocabulary]
@@ -67,7 +69,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 **Measurement and migration**
 
 - [ ] [Measure Concurrent Check Runs and Decide the Semaphore Limit](tasks/concurrency-semaphore/task.md) 🔒 Blocked by: [Generic Event→Hook Router Plugin]
-- [ ] [Test Whether `parentID` Works Across Differing `directory`](tasks/parentid-cross-directory/task.md)
+- [x] [Test Whether `parentID` Works Across Differing `directory`](tasks/parentid-cross-directory/task.md) — both intra- and cross-project parentage work; prediction falsified
 - [ ] [Migrate `rdk-template` to `.orchestration/` and Delete the Untracked Originals](tasks/migrate-rdk-template/task.md) 🔒 Blocked by: [Generic Event→Hook Router Plugin]
 
 **Deferred**

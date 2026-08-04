@@ -5,7 +5,7 @@
 # in ../config.json have actually changed. Named after the event, not the action.
 #
 # Provided by the dispatcher:
-#   TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME
+#   TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME  ORCH_EVENT  ORCH_SESSION_ID
 #
 # Contract: exit 0 = gate passed. Non-zero = failed, and everything written to
 # stdout/stderr is fed back to the agent as a prompt. Keep failure output useful
@@ -16,31 +16,84 @@ cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
 
 status=0
 
-# Syntax-check every tracked shell script. Real gate, not a placeholder: this
-# repo is shell and markdown today.
-mapfile -t scripts < <(git ls-files -z 'bin/*' '*.sh' '.orchestration/hooks/*' | tr '\0' '\n' | grep -v '^$')
+# `-co --exclude-standard` lists tracked AND untracked-but-not-ignored files.
+# Plain `git ls-files` lists only tracked ones, which means brand-new work is
+# silently unchecked until it is committed — a gate that passes because it looked
+# at nothing is worse than no gate.
+mapfile -t candidates < <(git ls-files -co --exclude-standard)
 
-for f in "${scripts[@]}"; do
+is_shell() {
+  case "$1" in
+    *.sh) return 0 ;;
+  esac
+  # Otherwise trust the shebang. This directory holds Python too, and `bash -n`
+  # on a Python file reports nonsense.
+  [ -f "$1" ] || return 1
+  head -c 80 "$1" 2>/dev/null | head -1 | grep -qE '^#!.*(\bsh|bash|zsh)\b'
+}
+
+is_python() {
+  case "$1" in
+    *.py) return 0 ;;
+  esac
+  [ -f "$1" ] || return 1
+  head -c 80 "$1" 2>/dev/null | head -1 | grep -qE '^#!.*python'
+}
+
+shells=()
+pys=()
+for f in "${candidates[@]}"; do
   [ -f "$f" ] || continue
+  if is_shell "$f"; then
+    shells+=("$f")
+  elif is_python "$f"; then
+    pys+=("$f")
+  fi
+done
+
+# --- shell -------------------------------------------------------------------
+for f in "${shells[@]:-}"; do
+  [ -n "$f" ] || continue
   if ! out=$(bash -n "$f" 2>&1); then
-    echo "syntax error in $f:"
+    echo "shell syntax error in $f:"
     echo "$out"
     status=1
   fi
 done
 
-if command -v shellcheck >/dev/null 2>&1 && [ "${#scripts[@]}" -gt 0 ]; then
-  if ! out=$(shellcheck -S warning "${scripts[@]}" 2>&1); then
+if [ "${#shells[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
+  if ! out=$(shellcheck -S warning "${shells[@]}" 2>&1); then
     echo "shellcheck findings:"
     echo "$out"
     status=1
   fi
-else
-  echo "note: shellcheck not installed, syntax-only gate" >&2
+elif [ "${#shells[@]}" -gt 0 ]; then
+  # Deliberate degradation: a gate that fails because a linter is absent gets
+  # disabled by the first person it annoys. `orch doctor` reports the weakened
+  # coverage instead.
+  echo "note: shellcheck not installed, shell coverage is syntax-only" >&2
 fi
 
-# TODO(orch-cli-skeleton): once the CLI's language is chosen, add its real
-# typecheck/test command here. Until then this gate is honest about covering only
-# shell — it does not claim to verify code that does not exist yet.
+# --- python ------------------------------------------------------------------
+if [ "${#pys[@]}" -gt 0 ]; then
+  if ! out=$(python3 -m py_compile "${pys[@]}" 2>&1); then
+    echo "python compile errors:"
+    echo "$out"
+    status=1
+  fi
+  find . -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null
+fi
 
+# --- tests -------------------------------------------------------------------
+if [ -f tests/test_store.py ]; then
+  if ! out=$(python3 tests/test_store.py 2>&1); then
+    echo "store tests failed:"
+    echo "$out"
+    status=1
+  fi
+fi
+
+if [ "$status" -eq 0 ]; then
+  echo "gate passed: ${#shells[@]} shell, ${#pys[@]} python, tests green"
+fi
 exit "$status"

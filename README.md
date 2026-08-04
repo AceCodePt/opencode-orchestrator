@@ -73,6 +73,30 @@ Caveats found the hard way:
 - `/experimental/*` is unstable by name, and opencode's own worktree list has
   already drifted from `git worktree list`.
 
+## Usage today
+
+Stdlib-only Python, no install step:
+
+```bash
+bin/orch observe          # live state of every TUI (read-only, exits 1 if you're needed)
+bin/orch observe -w       # redraw continuously
+bin/orch observe --json   # machine-readable
+bin/orch events -d 30 -v  # tail one TUI's SSE stream, then print a type histogram
+bin/orch doctor           # verify the contracts that fail silently
+bin/orch init             # scaffold .orchestration/ + install the router plugin
+bin/orch version
+```
+
+`observe` exits non-zero when something needs a human or when the machinery itself
+is wrong, so it composes in a shell.
+
+What works: `observe`, `events`, `doctor`, `init`, `version`, the claims/leases
+store (`src/orch/store.py`, 9 tests), and the router plugin
+(`plugin/orch-router.ts`, written but not yet exercised by a live agent).
+
+What does not exist yet: `orch task start` — dispatch is still manual — and the
+daemon, so there is no watchdog, no notification routing, and no phone server.
+
 ## Layout
 
 - `bin/` — dispatcher

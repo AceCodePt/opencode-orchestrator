@@ -4,7 +4,7 @@
 
 - **Complexity:** Low
 - **Priority:** Low
-- **Status:** Ready for Handoff — ten minutes of work
+- **Status:** DONE — result recorded below
 - **Dependencies:** None
 
 ## Context
@@ -31,6 +31,24 @@ at the project boundary. Run the test to know, not to unblock.
 - [ ] Confirm via `GET /session/{parent}/children` whether the relationship holds.
 - [ ] Repeat across two different bare repos and record the failure mode.
 - [ ] Write the result into `docs/architecture.md` under verified vs assumed.
+
+## Result (measured)
+
+Run in an isolated lab: one bare repo, two worktrees, a single server on an
+ephemeral port.
+
+| Child created with | Outcome |
+| --- | --- |
+| `?directory=` the other worktree, same bare repo | parentage **accepted**, same `projectID` |
+| `?directory=` a worktree of a **different** bare repo | parentage **accepted**, *different* `projectID` |
+
+Both children carried `parentID` in their own record, and
+`GET /session/{parent}/children` returned each one with its differing `directory`.
+
+**The prediction in the Context above was wrong.** Cross-project parentage was
+expected to fail and does not. Two further facts fell out: a single server can
+create a session in any directory on the machine, and `projectID` is derived from
+the target directory rather than from the server's own location.
 
 ## Verification
 

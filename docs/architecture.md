@@ -149,12 +149,27 @@ Two traps: never `flock` a tracked file — git replaces inodes, so the lock sto
 referring to the file everyone else sees. And git's own `index.lock` **fails**
 rather than queueing, so concurrent commits produce errors, not serialization.
 
-Parent↔child is owned by `orch` because opencode's parentage is scoped to one
-project: `GET /project/current` reports the **bare repo** as `worktree` and lists
-worktrees as `sandboxes`, and worktrees of one bare repo share a session list
-(verified: `reeeally-main` and `reeeally-preview` return identical sessions,
-`cloud-agent-infra` differs). So parentage may work across worktrees of one repo
-and will not work across projects. Treat it as cosmetic.
+Parent↔child is owned by `orch`, but **not** for the reason this document
+previously gave. That reason was tested and turned out to be wrong.
+
+Measured in an isolated lab — one bare repo, two worktrees, a single server:
+
+| Child created with | Result |
+| --- | --- |
+| `?directory=` another worktree of the **same** bare repo | parentage **accepted**, same `projectID` |
+| `?directory=` a worktree of a **different** bare repo | parentage **accepted**, *different* `projectID` |
+
+In both cases the child's own record carried the `parentID`, and
+`GET /session/{parent}/children` returned it. The earlier prediction — that
+cross-project parentage "almost certainly" would not work — was false. Harness
+parentage spans projects, and one server can create a session in any directory on
+the machine, which is a capability worth knowing about rather than a limitation to
+route around.
+
+`orch` still owns the mapping, for the reasons that survive the test: lease rows
+need worktree, port, pid and tmux regardless, and orchestration truth should not
+rest on harness internals that can change between versions. But that is now a
+deliberate choice, not a forced one.
 
 ## Flow A — dispatch
 
@@ -213,6 +228,14 @@ declare success alone.
 1. Observer streams `/event` and polls `/session/status` for every known port.
    Both are required: SSE catches transitions, polling catches **absence**, and
    absence is not an event.
+
+   The harness helps more than expected here. `server.heartbeat` arrives roughly
+   every 8-10 seconds, which separates **"stream alive, agent quiet"** from
+   **"stream dead"** — two situations that are otherwise indistinguishable and
+   demand opposite responses. Missing heartbeats mean the transport broke; quiet
+   with heartbeats means the agent genuinely has nothing to say. Neither
+   `server.heartbeat` nor `server.connected` appears in the OpenAPI schema list;
+   both were found by watching the wire.
 2. The daemon applies per-state budgets — one global timeout is wrong, because it
    either fires during every legitimate test run or misses real stalls:
 
@@ -365,10 +388,15 @@ makes hand-opened TUIs observable. This is why invariant 1 exists and why
 `orch doctor` checks the launch line — the failure is silent, and an unobservable
 agent is indistinguishable from an idle one.
 
-**Assumed, not tested:** the rest of the event vocabulary beyond `session.idle`;
-that `parentID` is accepted when the child's `directory` differs; concurrency
-limits for N simultaneous check runs; whether the TASKS.md-as-rendered-view
-decision is acceptable.
+**Verified since:** the full event vocabulary (93 schema types plus two
+undocumented ones — see `docs/events.md`); `parentID` is accepted across differing
+`directory`, both within one bare repo and across two; `/api/health` omits the
+version while `/global/health` carries it; `--help` misreports `--port` as
+defaulting to 0 when omitting it starts no server at all.
+
+**Assumed, not tested:** concurrency limits for N simultaneous check runs; whether
+a TS plugin runs under the box's pinned opencode; whether the
+TASKS.md-as-rendered-view decision is acceptable.
 
 **Known skew:** local opencode is 1.18.13, the box is pinned 1.18.11. Endpoint
 calls need a declared minimum version and must degrade rather than lie.
