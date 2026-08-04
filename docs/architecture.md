@@ -321,6 +321,27 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
    receives automatic green lights — the same silent blindness as a TUI launched
    without `--port`.
 
+## Language and distribution
+
+**Decided: Python/bash for the CLI and daemon, TypeScript for the router plugin.**
+
+The plugin has no choice — the opencode plugin API is TypeScript. So the real
+question was never "avoid TS", it was one language or two, and two was chosen to
+keep dispatch free of a node dependency.
+
+The cost of two languages is duplicated harness knowledge, and the mitigation
+falls out of the component split: **all HTTP knowledge of the harness lives on the
+Python side.** The observer and CLI own `/session/status`, `/permission`,
+`/question`, `/event`, `/api/location`, and version negotiation. The TS plugin
+stays deliberately thin — receive an event, apply the diff gate, invoke a hook,
+POST the outcome to the daemon. It needs no endpoint vocabulary beyond the
+daemon's own, so there is nothing to keep in sync.
+
+Open check before relying on this on the box: plugins execute inside opencode's
+runtime, but the observed plugin subprocess used a mise-managed system node
+(`~/.local/share/mise/installs/node/latest/bin/node`). Whether a plugin runs on the
+box's deliberately pinned-binary install is unverified.
+
 ## Verified vs assumed
 
 **Verified against a live TUI:** portless TUIs are unobservable (no socket, no
@@ -329,6 +350,20 @@ only in TUI memory); `--port` turns a TUI into a queryable server; `/permission`
 `/question`, `/session/status` report real state; `session.idle` is a real event
 name carrying `event.properties.sessionID`; `--port 0` does not collide;
 worktrees of one bare repo share a session list.
+
+**`--help` lies about `--port`.** It reports `--port [default: 0]`, which suggests
+a server always starts. It does not. Verified on 1.18.13 by launching a TUI two
+ways in a scratch repo:
+
+| Launch | Listener |
+| --- | --- |
+| `opencode` | **none** |
+| `opencode --port 0` | `127.0.0.1:39243` (4096 was taken) |
+
+So the flag must be passed explicitly, and a shell wrapper is the only thing that
+makes hand-opened TUIs observable. This is why invariant 1 exists and why
+`orch doctor` checks the launch line — the failure is silent, and an unobservable
+agent is indistinguishable from an idle one.
 
 **Assumed, not tested:** the rest of the event vocabulary beyond `session.idle`;
 that `parentID` is accepted when the child's `directory` differs; concurrency

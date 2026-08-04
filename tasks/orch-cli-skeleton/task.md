@@ -16,6 +16,11 @@ are personal, an infra repo is one box, and a copied script diverges.
 See `docs/architecture.md` for the component split. This task builds the shell of
 the CLI, not the daemon and not the observer's policy.
 
+**Language is decided:** Python/bash for the CLI and daemon, TypeScript for the
+router plugin (forced by the plugin API). All harness HTTP knowledge lives on the
+Python side so there is nothing to keep in sync between the two. See
+`docs/architecture.md`.
+
 ## Requirements
 
 - [ ] `orch init` — scaffold `.orchestration/` (hooks directory, config, version
