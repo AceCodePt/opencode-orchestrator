@@ -249,6 +249,17 @@ declare success alone.
 
 3. **Definitely dead** — lease expired *and* port unreachable *and* tmux gone.
    Reclaim automatically; there is nothing left to preserve.
+
+   Teardown is **not atomic**, and the predicate has to tolerate that. Observed
+   while tearing down a lab TUI: after `tmux kill-session` the process outlived its
+   pane by a few seconds and *lost its listener before it exited*. So a sample taken
+   mid-teardown shows "process alive, no port" — which is byte-for-byte
+   indistinguishable from "started without `--port`".
+
+   Two different causes, one symptom, opposite responses: one is a dying process to
+   be reaped, the other is a live agent that will run unobserved forever. A single
+   sample cannot tell them apart, so `unobservable` must be corroborated — by
+   process age, by tmux presence, or by a second look — before anything acts on it.
 4. **Maybe looping** — busy, events flowing, cost climbing, todos static. Alert
    only. Auto-abort on a guessed threshold will eventually kill a legitimate long
    run, after which the automation stops being trusted.

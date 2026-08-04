@@ -95,14 +95,28 @@ def _describe_question(q: dict) -> Blocked:
 def look(tui: Tui) -> Fact:
     """Read one TUI. Never raises for an absent or dying server."""
     if not tui.observable:
+        # KNOWN AMBIGUITY: this state is also what a *dying* TUI looks like.
+        # Teardown is not atomic - after `tmux kill-session` a process outlives its
+        # pane by seconds and loses its listener before it exits, so "alive, no port"
+        # is indistinguishable from "launched without --port" in a single sample.
+        # One is a corpse to reap, the other is an agent that will run unobserved
+        # forever. The daemon must corroborate before acting; a `(deleted)` cwd or a
+        # missing tmux session is a hint that this is the former.
+        dying = bool(tui.cwd and tui.cwd.endswith("(deleted)"))
+        note = (
+            "started without --port, so it has no HTTP server and cannot be "
+            "inspected; only relaunching helps"
+        )
+        if dying:
+            note = (
+                "cwd is deleted and there is no listener - probably shutting down "
+                "rather than launched without --port; confirm before acting"
+            )
         return Fact(
             tui=tui,
             state=UNOBSERVABLE,
             worktree=tui.cwd,
-            notes=[
-                "started without --port, so it has no HTTP server and cannot be "
-                "inspected; only relaunching helps"
-            ],
+            notes=[note],
         )
 
     port = tui.port
