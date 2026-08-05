@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from orch import daemon, observe  # noqa: E402
+from orch import server  # noqa: E402
 from orch.store import RUNNING, Store, Task  # noqa: E402
 
 NOW = 1_700_000_000
@@ -397,6 +398,65 @@ def test_systemd_unit_survives_logout_and_keeps_children() -> None:
     assert "daemon run --interval 10" in text
     assert Path(text.split("ExecStart=")[1].split()[0]).name == "orch"
     print("ok: the unit restarts always and does not kill the server it supervises")
+
+
+def test_uninstall_removes_config_but_never_touches_project() -> None:
+    tmp = Path(tempfile.mkdtemp())
+    unit = tmp / "systemd" / "user" / daemon.UNIT_NAME
+    unit.parent.mkdir(parents=True)
+    unit.write_text("x")
+    state = tmp / "state" / "orch"
+    state.mkdir(parents=True)
+    (state / "orch.db").write_text("x")
+
+    real_unit_path, real_run = daemon.unit_path, daemon.subprocess.run
+    real_state_dir, real_current = server.state_dir, server.current
+    daemon.unit_path = lambda: unit  # type: ignore[method-assign]
+    daemon.subprocess.run = (  # type: ignore[method-assign]
+        lambda cmd, capture_output=None, text=None, timeout=None: real_run(
+            ["true"], capture_output=True, text=True))
+    server.state_dir = lambda: state  # type: ignore[method-assign]
+    server.current = lambda: None  # type: ignore[method-assign]
+    try:
+        out = daemon.uninstall()
+    finally:
+        daemon.unit_path, daemon.subprocess.run = real_unit_path, real_run
+        server.state_dir, server.current = real_state_dir, real_current
+
+    assert not unit.exists(), "the systemd unit is gone"
+    assert not state.exists(), "the state dir is gone by default"
+    assert any("disable-linger" in l and l.startswith("ok") for l in out)
+    assert any("left every project's" in l for l in out)
+    print("ok: uninstall removes the unit, linger and state, leaves projects alone")
+
+
+def test_uninstall_keep_state_preserves_database() -> None:
+    tmp = Path(tempfile.mkdtemp())
+    unit = tmp / "systemd" / "user" / daemon.UNIT_NAME
+    unit.parent.mkdir(parents=True)
+    unit.write_text("x")
+    state = tmp / "state" / "orch"
+    state.mkdir(parents=True)
+    (state / "orch.db").write_text("x")
+
+    real_unit_path, real_run = daemon.unit_path, daemon.subprocess.run
+    real_state_dir, real_current = server.state_dir, server.current
+    daemon.unit_path = lambda: unit  # type: ignore[method-assign]
+    daemon.subprocess.run = (  # type: ignore[method-assign]
+        lambda cmd, capture_output=None, text=None, timeout=None: real_run(
+            ["true"], capture_output=True, text=True))
+    server.state_dir = lambda: state  # type: ignore[method-assign]
+    server.current = lambda: None  # type: ignore[method-assign]
+    try:
+        out = daemon.uninstall(wipe_state=False)
+    finally:
+        daemon.unit_path, daemon.subprocess.run = real_unit_path, real_run
+        server.state_dir, server.current = real_state_dir, real_current
+
+    assert not unit.exists(), "the systemd unit is gone"
+    assert state.exists() and (state / "orch.db").exists(), "state kept with --keep-state"
+    assert any("kept state" in l for l in out)
+    print("ok: --keep-state stops the daemon but preserves the database")
 
 
 def main() -> int:

@@ -84,6 +84,8 @@ bin/orch gate                    # can this project's gates be trusted at all
 bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart
+bin/orch task add <name...>      # scaffold tasks/<name>/task.md + a `[ ]` TASKS.md entry
+bin/orch task add <name> -C DIR  # ...into that worktree instead of this one
 bin/orch task start <name>       # claim, create the worktree, run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list
@@ -94,8 +96,9 @@ bin/orch observe -w --json
 bin/orch attach                  # open a TUI onto the shared server, close it freely
 bin/orch events -d 30 -v         # tail SSE, then print a histogram of event types
 
-bin/orch daemon install          # systemd user unit, enabled, with linger
-bin/orch daemon status           # is anything actually supervising
+bin/orch install                 # systemd user unit, enabled, with linger
+bin/orch uninstall                # remove config-level traces, keep projects alone
+bin/orch daemon status            # is anything actually supervising
 bin/orch daemon run --once --dry-run # decide and print, change nothing
 ```
 
@@ -115,13 +118,20 @@ machinery itself is wrong, so they compose in a shell.
 
 ### Two things worth knowing before dispatching
 
-**Commit the gate, the task file and the router.** A worktree is created *from* the
-base branch, so anything uncommitted is invisible to the agent. Each of these was
-observed failing silently: an uncommitted task file gave an agent no instructions
-and it quietly stopped; an uncommitted hook degraded to `no-gate-configured`; a
-worktree created before the router was committed ran with no gate at all while
-`orch gate` reported fine. `orch task start` now refuses all three, and
-`orch gate` explains which one is wrong.
+**Commit the gate, the task file and the router — on the base branch.** A worktree is
+created *from* the base branch, so anything uncommitted, or committed on some other
+branch, is invisible to the agent. Each of these was observed failing silently: an
+uncommitted task file gave an agent no instructions and it quietly stopped; an
+uncommitted hook degraded to `no-gate-configured`; a worktree created before the
+router was committed ran with no gate at all while `orch gate` reported fine.
+`orch task start` now refuses all three, and `orch gate` explains which one is wrong.
+
+The branch half of that is easy to miss, because **a task is project-wide but a task
+file is not.** `orch task add` writes into the worktree you are in — `-C` puts it
+elsewhere — and warns when that worktree is not on the base branch, naming the one that
+is. Found by doing it wrong: a task added in a feature worktree and committed there was
+still refused by `task start`, after `task add` had told the user to commit it. Where
+the file goes is your call; being told it is undispatchable is not optional.
 
 **The dispatch process exiting is not the task finishing.** Measured: a run exited
 0 and its session then did 24 more tool calls over 36 seconds, because the router
@@ -130,7 +140,7 @@ injected a follow-up prompt. Watch `orch observe`, not the exit code.
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
-`task start`/`list`/`reset`, `observe`, `attach`, `events`, the claims/leases store,
+`task add`/`start`/`list`/`reset`, `observe`, `attach`, `events`, the claims/leases store,
 and the router plugin — including the full loop of event → hook → failure → prompt
 injection → agent fix → pass, with a bounded retry cap.
 
@@ -169,7 +179,7 @@ Not built yet: outcome routing, the phone-facing server over the tailnet, and
 SSE-driven absence detection (the watchdog is poll-only, so `server.heartbeat` is
 still unused).
 
-62 tests: `for t in tests/test_*.py; do python3 "$t"; done`, plus `bun test`
+110 tests: `for t in tests/test_*.py; do python3 "$t"; done`, plus `bun test`
 
 ## Layout
 

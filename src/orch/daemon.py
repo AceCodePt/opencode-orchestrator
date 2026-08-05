@@ -437,6 +437,18 @@ def unit_text(interval: float = 10.0) -> str:
     return UNIT.format(orch=server.orch_bin(), interval=interval)
 
 
+def _run_config_cmd(cmd: list[str], out: list[str]) -> None:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if p.returncode == 0:
+            out.append(f"ok: {' '.join(cmd)}")
+        else:
+            out.append(f"FAILED: {' '.join(cmd)}: "
+                       f"{(p.stderr or p.stdout).strip()[:200]}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        out.append(f"FAILED: {' '.join(cmd)}: {e}")
+
+
 def install(interval: float = 10.0, enable: bool = True) -> list[str]:
     out: list[str] = []
     path = unit_path()
@@ -456,15 +468,53 @@ def install(interval: float = 10.0, enable: bool = True) -> list[str]:
         ["systemctl", "--user", "enable", "--now", UNIT_NAME],
         ["loginctl", "enable-linger", os.environ.get("USER") or ""],
     ):
+        _run_config_cmd(cmd, out)
+    return out
+
+
+def uninstall(wipe_state: bool = True) -> list[str]:
+    """Remove every config-level trace of orch. Never touches a project's
+    tracked `.orchestration/` or the router plugin in a project's `.opencode/`;
+    those belong to the project, and only the project removes them."""
+    out: list[str] = []
+    path = unit_path()
+
+    if path.exists():
+        out.append(f"removing {path}")
+        for cmd in (
+            ["systemctl", "--user", "stop", UNIT_NAME],
+            ["systemctl", "--user", "disable", UNIT_NAME],
+            ["systemctl", "--user", "daemon-reload"],
+        ):
+            _run_config_cmd(cmd, out)
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if p.returncode == 0:
-                out.append(f"ok: {' '.join(cmd)}")
-            else:
-                out.append(f"FAILED: {' '.join(cmd)}: "
-                           f"{(p.stderr or p.stdout).strip()[:200]}")
-        except (OSError, subprocess.TimeoutExpired) as e:
-            out.append(f"FAILED: {' '.join(cmd)}: {e}")
+            path.unlink()
+            out.append(f"removed {path}")
+        except OSError as e:
+            out.append(f"FAILED: remove {path}: {e}")
+    else:
+        out.append(f"no unit at {path}")
+
+    _run_config_cmd(["loginctl", "disable-linger", os.environ.get("USER") or ""], out)
+
+    if server.current() is not None:
+        killed = server.stop()
+        out.append("stopped the shared server" if killed else "no shared server running")
+    else:
+        out.append("no shared server running")
+
+    state = server.state_dir()
+    if wipe_state and state.exists():
+        import shutil
+
+        shutil.rmtree(state)
+        out.append(f"removed state {state}")
+    elif state.exists():
+        out.append(f"kept state {state} (--keep-state)")
+    else:
+        out.append("no state to remove")
+
+    out.append("left every project's .orchestration/ and router plugin alone")
     return out
 
 

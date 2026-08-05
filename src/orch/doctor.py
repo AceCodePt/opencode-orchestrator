@@ -153,7 +153,7 @@ def check_daemon() -> list[Check]:
         return [Check(
             FAIL, "no supervisor installed",
             "nothing renews leases or verifies stopped agents, so no task will ever "
-            "reach done. `orch daemon install`",
+            "reach done. `orch install`",
         )]
     out: list[Check] = []
     if info.get("ActiveState") != "active":

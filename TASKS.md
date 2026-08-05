@@ -28,10 +28,22 @@ This file is managed via **Optimistic Concurrency**.
 
 ### Adding New Tasks
 
+`orch task add <name...>` does steps 1 and 3 and scaffolds the template for step 2.
+It never overwrites an existing `task.md` and never commits — the sections it leaves
+as placeholders are the whole point, and an uncommitted task file is refused by
+`orch task start`.
+
+It writes into the worktree you run it from, or the one `-C` names. When that worktree
+is not on the base branch it says so: a task is project-wide, and a spec committed on a
+feature branch cannot be dispatched and dies with the branch.
+
 1. Create a directory in `tasks/` named after the task (kebab-case).
 2. Write a `task.md`: Context, Requirements, Verification, Prohibited Patterns.
+   A scaffolded Verification section still says nothing, and a task nothing can
+   judge is a task that cannot reach `done`.
 3. Add a `[ ]` entry **at the top** of the Backlog, linking to it. Append
-   `🔒 Blocked by: [Task Name]` where there is a dependency.
+   `🔒 Blocked by: [Task Name]` where there is a dependency — `task add` does not
+   infer dependencies.
 
 ## Status Legend
 

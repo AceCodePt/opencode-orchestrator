@@ -30,7 +30,7 @@ and supervises nothing for any project nobody started.
 
 ## Outcome
 
-`orch daemon install` writes `~/.config/systemd/user/orch-daemon.service`, reloads,
+`orch install` writes `~/.config/systemd/user/orch-daemon.service`, reloads,
 enables, starts, and turns on linger. `orch daemon status` reports unit state and
 linger separately.
 

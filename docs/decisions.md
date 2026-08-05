@@ -356,6 +356,45 @@ in one source file has one place to check.
 - **`by_worktree` is the only join a plugin can make.** A plugin knows the directory it
   was loaded for and nothing else — not the task name, not the project.
 
+## `tasks.py`
+
+- **`task add` writes where you are, and warns when that is not the base branch.**
+  `task start` reads specs with `git show <base>:tasks/<name>/task.md`, so a spec added
+  on a feature branch is not dispatchable and is lost outright if the branch is
+  abandoned. Found by doing it: a task added in a feature worktree and committed there
+  was still refused, after `task add` had reported success and said to commit it.
+  Silently redirecting the write to the base worktree was tried and rejected — a command
+  that creates files in a directory you did not name is worse than one that tells you
+  the truth about the directory you did. So placement is `-C` or the cwd, and the note
+  names the worktree that holds base. The defect was the silence, not the location.
+- **`task list` syncs intent from the base branch before listing.** Previously the store
+  only learned a task existed when it was dispatched, so a project's declared backlog was
+  invisible until someone started it — "what work exists" answered by neither authority.
+  Reading `git ls-tree <base> -- tasks/` keeps the answer on the base branch, which is
+  the same ref the dispatcher and the gate trust.
+- **`task add` scaffolds intent, it does not commit it.** Same reasoning as `init`: the
+  base branch is what a worktree is created from, so committing is the act that makes a
+  task real, and doing it silently would hide the one step whose omission was observed
+  giving an agent no instructions at all. `task start` already refuses an uncommitted
+  task file, so the honest division is scaffold here, refuse there.
+- **An existing `task.md` is never overwritten, and `--force` is not offered.** A task
+  spec is hand-written prose that nothing can regenerate, which is the same argument that
+  took hooks out of `init --force`'s reach. Re-running is therefore idempotent and safe
+  by construction rather than by flag discipline.
+- **Placeholders are left visibly unfilled.** A template that reads as complete invites
+  dispatching a task whose Verification section says nothing — and a task with no
+  verifiable claim cannot reach `done`, so it would fail late instead of obviously.
+- **The backlog entry is inserted, the file is never parsed for state.** `insert_backlog`
+  finds the `## Backlog` heading and places entries above the first existing item or
+  group, preserving the order given. Checkboxes stay a rendered view: nothing here reads
+  `[ ]`/`[x]` back, because intent lives in `tasks/*/task.md` and runtime lives in
+  SQLite.
+- **`--title`/`--desc` with several names is refused rather than applied to each.** One
+  description silently attached to three tasks is worse than an error, and the fix — run
+  it once per task — is a single line.
+- **Names go through `dispatch.slug`**, so the directory, the branch and the entry cannot
+  disagree about what the task is called.
+
 ## Router plugin (`plugin/orch-router.ts`)
 
 - **Named after mechanism, not policy.** An event arrives; if

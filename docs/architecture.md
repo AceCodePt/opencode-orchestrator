@@ -185,7 +185,7 @@ per-project daemon would have to be remembered once per project and would silent
 supervise nothing for any project nobody started. Actions therefore carry their
 project, because task names are unique only within one.
 
-`orch daemon install` writes a **user** unit — the daemon runs the same gates a human
+`orch install` writes a **user** unit — the daemon runs the same gates a human
 runs, against worktrees in a home directory, and needs no privilege beyond the account
 that owns them. Three settings are load-bearing:
 
@@ -243,7 +243,7 @@ opencode. Accepted — harness independence is explicitly not a goal.
 
 | Question | Authority |
 | --- | --- |
-| What work exists, and what does it mean? | **git** — `TASKS.md`, `tasks/*/task.md` |
+| What work exists, and what does it mean? | **the base branch** — `tasks/*/task.md` as committed there |
 | What is running, since when, where, on which port? | **SQLite** — one global DB per machine |
 | Who is this agent's parent? | **SQLite**, not opencode's session parentage |
 | What is checked, and how? | **the base branch** — the committed hook and config |
@@ -265,6 +265,17 @@ route by which a gate passes. The requirement was one authority, not one server.
 `- [-]` in `TASKS.md` is a **rendered convenience**: written back best-effort for
 human readability, never read as authority. That kills two problems at once — the
 stale `[-]` left by a dispatch that died, and two files disagreeing about state.
+
+"git" was too loose for the first row, because a working tree is not a ref. A task is
+**project-wide, and its authority is the base branch** — the same ref the gate is read
+from, for the same reason. `task start` resolves a spec with
+`git show <base>:tasks/<name>/task.md`, so a spec that exists only in some worktree, or
+only on a feature branch, is not work this system can see: it is undispatchable and it
+dies with the branch. `orch task add` therefore names the base worktree whenever it is
+writing somewhere else — placement stays the caller's (`-C`, else the cwd), because a
+tool that writes into a directory nobody named trades one silent surprise for another.
+`orch task list` seeds itself from `git ls-tree <base> -- tasks/` rather than waiting for
+a dispatch to reveal that a task existed at all.
 
 Claiming is one atomic statement, so no file lock is needed:
 

@@ -107,6 +107,56 @@ def plan(
                 model=model, agent=agent), None
 
 
+def current_branch(start: Path) -> str | None:
+    code, out = _git(start, "symbolic-ref", "--short", "HEAD")
+    if code == 0 and out:
+        return out
+    return None
+
+
+def worktrees(start: Path) -> list[tuple[Path, str | None]]:
+    code, out = _git(start, "worktree", "list", "--porcelain")
+    if code != 0:
+        return []
+    found: list[tuple[Path, str | None]] = []
+    path: Path | None = None
+    branch: str | None = None
+    bare = False
+    for line in [*out.splitlines(), ""]:
+        if line.startswith("worktree "):
+            path, branch, bare = Path(line[len("worktree "):]), None, False
+        elif line.startswith("branch "):
+            branch = line[len("branch "):]
+            if branch.startswith("refs/heads/"):
+                branch = branch[len("refs/heads/"):]
+        elif line.strip() == "bare":
+            bare = True
+        elif not line.strip():
+            if path is not None and not bare:
+                found.append((path, branch))
+            path, branch, bare = None, None, False
+    return found
+
+
+def worktree_on_branch(start: Path, branch: str) -> Path | None:
+    for path, br in worktrees(start):
+        if br == branch and path.is_dir():
+            return path
+    return None
+
+
+def declared_names(start: Path, base: str) -> list[str]:
+    code, out = _git(start, "ls-tree", "-r", "--name-only", base, "--", "tasks/")
+    if code != 0:
+        return []
+    names = set()
+    for line in out.splitlines():
+        parts = line.strip().split("/")
+        if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "task.md":
+            names.add(parts[1])
+    return sorted(names)
+
+
 def task_names(dispatcher: Path) -> list[str]:
     root = dispatcher / "tasks"
     if not root.is_dir():

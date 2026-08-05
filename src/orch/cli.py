@@ -11,6 +11,7 @@ from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import gate as gate_mod
 from . import harness, init as init_mod, observe, server as server_mod
+from . import tasks as tasks_mod
 from .discovery import discover
 from . import doctor as doctor_mod
 from .store import Store
@@ -211,12 +212,14 @@ def cmd_task_start(args: argparse.Namespace) -> int:
 
 def cmd_task_list(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    _, project, err = dispatch_mod.project_of(start)
-    if err or project is None:
+    top, project, err = dispatch_mod.project_of(start)
+    if err or project is None or top is None:
         print(err or "not in a worktree", file=sys.stderr)
         return 2
     st = Store()
     try:
+        base = gate_mod.base_branch(top)
+        st.sync_intent(str(project), dispatch_mod.declared_names(top, base))
         rows = st.tasks(str(project))
         if args.json:
             print(json.dumps([vars(t) for t in rows], indent=2))
@@ -262,6 +265,13 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
         return 0
     finally:
         st.close()
+
+
+def cmd_task_add(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    r = tasks_mod.add_many(start, args.name, title=args.title, desc=args.desc)
+    print(tasks_mod.render(r))
+    return 0 if r.ok else 2
 
 
 def cmd_task_merge(args: argparse.Namespace) -> int:
@@ -377,17 +387,24 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
         st.close()
 
 
+def cmd_install(args: argparse.Namespace) -> int:
+    for line in daemon_mod.install(interval=args.interval,
+                                   enable=not args.no_enable):
+        print(line)
+    print("\nlogs: journalctl --user -u orch-daemon -f")
+    return 0
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    for line in daemon_mod.uninstall(wipe_state=not args.keep_state):
+        print(line)
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action is None:
         args._dparser.print_help()
         return 0
-    if args.action == "install":
-        for line in daemon_mod.install(interval=args.interval,
-                                       enable=not args.no_enable):
-            print(line)
-        print("\nlogs: journalctl --user -u orch-daemon -f")
-        return 0
-
     if args.action == "status":
         info = daemon_mod.unit_status()
         if args.json:
@@ -395,7 +412,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             return 0
         if not info.get("installed"):
             print("not installed under systemd - nothing supervises tasks across a "
-                  "reboot. `orch daemon install` fixes that.")
+                  "reboot. `orch install` fixes that.")
             return 1
         print(f"unit    {info['unit']}")
         print(f"state   {info.get('ActiveState')}/{info.get('SubState')} "
@@ -535,6 +552,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="reset even a task recorded as running")
     tr.set_defaults(func=cmd_task_reset)
 
+    ta = tsub.add_parser("add",
+                         help="scaffold task.md specs and list them in TASKS.md")
+    ta.add_argument("name", nargs="+")
+    ta.add_argument("-C", "--directory",
+                    help="write into this worktree instead of the current one")
+    ta.add_argument("--title", help="entry title (default: derived from the name)")
+    ta.add_argument("--desc", help="one-line description for the TASKS.md entry")
+    ta.set_defaults(func=cmd_task_add)
+
     tm = tsub.add_parser("merge",
                          help="merge a done task into base and clean up")
     tm.add_argument("name")
@@ -569,8 +595,6 @@ def build_parser() -> argparse.ArgumentParser:
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")
     dr = da.add_parser("run",
                        help="run the supervision loop (foreground; Ctrl-C stops)")
-    di = da.add_parser("install",
-                       help="write and enable the systemd user unit")
     ds = da.add_parser("status",
                        help="report what systemd says is supervising")
     dm.add_argument("-C", "--directory",
@@ -581,8 +605,6 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--once", action="store_true", help="one pass, then exit")
     dm.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
-    dm.add_argument("--no-enable", action="store_true",
-                    help="write the systemd unit but do not enable it")
     dm.add_argument("--json", action="store_true")
     # The run flags exist on both the parent and the `run` subparser so
     # `orch daemon <flag> run` and `orch daemon run <flag>` both work, matching
@@ -595,11 +617,25 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--once", action="store_true", help="one pass, then exit")
     dr.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
-    di.add_argument("-n", "--interval", type=float, default=10.0)
-    di.add_argument("--no-enable", action="store_true",
-                    help="write the systemd unit but do not enable it")
     ds.add_argument("--json", action="store_true")
     dm.set_defaults(func=cmd_daemon, _dparser=dm)
+
+    inst = sub.add_parser(
+        "install",
+        help="write and enable the systemd user unit supervising every project")
+    inst.add_argument("-n", "--interval", type=float, default=10.0)
+    inst.add_argument("--no-enable", action="store_true",
+                      help="write the systemd unit but do not enable it")
+    inst.set_defaults(func=cmd_install)
+
+    un = sub.add_parser(
+        "uninstall",
+        help="remove every config-level trace of orch (never a project's "
+             ".orchestration/ or router plugin)")
+    un.add_argument("--keep-state", action="store_true",
+                    help="stop the daemon and server but keep the database and "
+                         "task history in ~/.local/state/orch")
+    un.set_defaults(func=cmd_uninstall)
 
     v = sub.add_parser("version", help="show orch and harness versions")
     v.set_defaults(func=cmd_version)
