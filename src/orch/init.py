@@ -45,6 +45,12 @@ TEMPLATE_SESSION_IDLE = """#!/usr/bin/env bash
 # output useful and bounded.
 #
 # Absence of this file is reported as `no-gate-configured`, never as a pass.
+#
+# IMPORTANT: the version that runs is the one COMMITTED on the base branch, not
+# the copy in your working tree. Editing this file mid-task changes nothing about
+# how the task is judged - you must commit it. That is deliberate: a dispatched
+# agent was observed rewriting this very file to make its own gate pass, and an
+# agent that can edit its own gate can always pass it.
 
 set -uo pipefail
 cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
@@ -189,6 +195,12 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     notes.append(
         "the scaffolded session-idle hook exits non-zero on purpose: an unconfigured "
         "gate must not report success. Edit it before dispatching real work."
+    )
+    notes.append(
+        "COMMIT the hook before dispatching. The router runs the version committed on "
+        "the base branch, not the working-tree copy, so an uncommitted gate counts as "
+        "no gate at all. A dispatched agent was observed rewriting its own gate to "
+        "make it pass, which is why the committed version is the only authority."
     )
     return InitResult(created, skipped, notes)
 

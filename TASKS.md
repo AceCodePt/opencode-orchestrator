@@ -19,9 +19,9 @@ This file is managed via **Optimistic Concurrency**.
 4. **Execute**: Follow the task's own `task.md`. Everything here is tooling; there
    is no schema/registry pipeline in this repo.
 5. **Verify**: A task is done when the behaviour is observed against a **live
-   opencode TUI**, in the way the task's Verification section describes. Code that
-   exists is not a completed task, and an endpoint that was never exercised is not
-   evidence.
+   headless `opencode serve`**, in the way the task's Verification section
+   describes. Code that exists is not a completed task, and an endpoint that was
+   never exercised is not evidence.
 6. **Commit**: Commit to the feature branch. Do **not** merge to `main` and do
    **not** delete the worktree.
 7. **Complete**: Set the status to `[x]`.
@@ -37,7 +37,7 @@ This file is managed via **Optimistic Concurrency**.
 
 - `[ ]` **Todo**: available to be picked up.
 - `[-]` **In Progress**: currently being executed.
-- `[x]` **Done**: completed and verified against a live TUI.
+- `[x]` **Done**: completed and verified against a live agent.
 - `[?]` **Indeterminate**: blocked or needs review.
 
 ## Backlog
@@ -46,8 +46,10 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 **Foundations**
 
+- [ ] [Dispatch Headlessly via `run --attach`, and Derive Completion From the Session](tasks/headless-dispatch/task.md) — decided and partly verified; `orch task start` is the remaining half
+- [ ] [Survive Death of the Shared Server by Re-Dispatching From Leases](tasks/shared-server-recovery/task.md) 🔒 Blocked by: [Dispatch Headlessly via `run --attach`, and Derive Completion From the Session]
 - [-] [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`](tasks/orch-cli-skeleton/task.md) — observe/doctor/init/events/version done; `task start` outstanding
-- [ ] [Add `--port` to Every TUI Launch So Agents Are Observable](tasks/add-port-to-tui-launch/task.md)
+- [x] [Add `--port` to Every TUI Launch So Agents Are Observable](tasks/add-port-to-tui-launch/task.md) — superseded: agents are headless servers, which always have a port. The zshrc wrapper stays as a convenience for hand-opened TUIs.
 - [x] [Claims, Leases and the Intent/Runtime Split in SQLite](tasks/claims-and-leases/task.md) — src/orch/store.py, 9 tests green
 
 **Sensing**
@@ -59,8 +61,9 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 - [ ] [Route Plugin State Through the Daemon Instead of `.orchestration/.state/`](tasks/plugin-state-via-daemon/task.md) 🔒 Blocked by: [Phone-Facing Server: Read Status and Answer Approvals Over the Tailnet]
 
-- [-] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — plugin/orch-router.ts written, untested against a live agent
-- [ ] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) 🔒 Blocked by: [Generic Event→Hook Router Plugin]
+- [x] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — verified end to end against a live headless agent: event → hook → fail → prompt injection → agent fix → pass
+- [x] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) — observed `failed: attempt 1/3` → `passed` with the counter reset, and `stuck: gave up after 1 attempts` at the cap
+- [ ] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — router now runs the committed base-branch gate and config; remaining work is `doctor` reporting uncommitted gates and a review path for `gate-modified`
 - [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) 🔒 Blocked by: [Claims, Leases and the Intent/Runtime Split in SQLite]
 - [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) 🔒 Blocked by: [Subscribe to the Event Stream and Capture the Event Vocabulary]
 - [ ] [Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall](tasks/preseed-always-permissions/task.md)

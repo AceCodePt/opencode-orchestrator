@@ -26,39 +26,58 @@ project knowledge, so `.orchestration/`.
 
 ## Separation of concerns
 
+**Headless, not TUI.** Agents run as one shared `opencode serve`; tasks are
+dispatched into it with `--dir`. The TUI is demoted to an optional *viewer* you
+launch with `opencode attach <url>` when you want to look, and close without
+affecting the agent. This deleted three problems rather than solving them:
+discovery, the `--port` contract, and the entire `unobservable` state.
+
 ```
-                        ┌──────────────────────────────┐
+                         ┌──────────────────────────────┐
    phone / tailnet ─────│  orchestrator daemon         │
-                        │  policy + authority + server │
-                        └───────┬──────────────┬───────┘
-                                │ facts        │ actions
-                        ┌───────▼──────┐       │  approve / deny
-                        │   observer   │       │  abort / reclaim
-                        │  read-only   │       │
-                        └───────┬──────┘       │
-                                │ HTTP + SSE   │
+                         │  policy + authority + server │
+                         └───────┬──────────────┬───────┘
+                                 │ facts        │ actions
+                         ┌───────▼──────┐       │  approve / deny
+                         │   observer   │       │  abort / reclaim
+                         │  read-only   │       │
+                         └───────┬──────┘       │
+                                 │ HTTP + SSE   │
    ┌────────────────────────────▼──────────────▼────────────────────┐
-   │  opencode TUIs, one per worktree, each with --port             │
-   │  each loads the router plugin from its branch's .opencode/     │
+   │  ONE `opencode serve` per machine (headless, always a port)    │
+   │  per-directory: loads each worktree's own .opencode/ plugins   │
    └───────────────────────────────┬────────────────────────────────┘
                                    │ events → hooks
-                        ┌──────────▼───────────┐
-                        │  .orchestration/     │  project knowledge
-                        │  hooks/<event-name>  │
-                        └──────────────────────┘
+                         ┌──────────▼───────────┐
+                         │  .orchestration/     │  project knowledge
+                         │  hooks/<event-name>  │
+                         └──────────────────────┘
 
-   orch CLI ── claims tasks, creates worktrees, launches TUIs, writes leases
-   SQLite   ── runtime truth (claims, leases, ports, retries, alert state)
-   git      ── intent truth (TASKS.md, tasks/*/task.md)
+   dispatch  ── `opencode run --attach URL --dir <worktree> --format json`
+   viewing   ── `opencode attach URL`  (ephemeral, optional, stateless)
+   SQLite    ── runtime truth (claims, leases, pids, retries, alert state)
+   git       ── intent truth (TASKS.md, tasks/*/task.md)
 ```
+
+One shared server is viable because plugin loading is **per-directory and lazy**:
+verified by starting a server in one directory and creating a session in another,
+whereupon the second directory's plugin was imported and its factory received
+`directory`/`worktree` pointing at that second directory. So each worktree still
+runs its own hooks, from one 362 MB process instead of 947 MB per task.
+
+The cost is a single failure domain: if that server dies, every running task dies
+with it. The daemon must therefore treat server death as a first-class event and
+re-dispatch from leases, which it can already do because leases are in SQLite.
 
 ### 1. Observer — sensing only
 
 Discovers and reads. Holds no policy and takes no action.
 
-- **Discovery, no registry file.** `ss -ltnp | grep opencode` yields port and pid;
-  `readlink /proc/<pid>/cwd` and `GET /api/location` map a port to a worktree.
-  The kernel is the registry, so nothing goes stale.
+- **No discovery needed for orchestrated agents.** The daemon spawns the server,
+  so it *knows* the port; `serve` also announces it on stdout
+  (`opencode server listening on http://127.0.0.1:35283`). Scanning with
+  `ss -ltnp` remains only to spot **stray hand-started TUIs**, which is a
+  courtesy, not a mechanism.
 - **Reads:** `/session/status` (`{}` = idle, populated = busy), `/permission`,
   `/question`, and the `/event` SSE stream.
 - **Emits facts, not verdicts:** "session X busy since T", "blocked on
@@ -80,8 +99,14 @@ Consumes observer facts, decides, and is the only component permitted to act.
 
 - **Policy:** per-state silence budgets, retry caps, alert dedup by permission id,
   burst coalescing, concurrency limits.
-- **Authority:** approve/deny permissions, `POST /session/{id}/abort`, kill a tmux
-  session, reclaim an expired lease.
+- **Authority:** approve/deny permissions, `POST /session/{id}/abort`, kill a
+  **recorded pid**, reclaim an expired lease.
+
+  Kill by pid, never by pattern. `pkill -f 'opencode serve'` matches the very
+  shell that invokes it, so it kills the command mid-flight; it did exactly that
+  here, and the same pattern would have killed an unrelated live task had the
+  string matched. tmux needs no separate teardown: killing the process ends the
+  session on its own (verified — pane process killed, session gone).
 - **Server:** faces the phone over the tailnet. Read status *and* take action —
   approving an approval from your phone is the point, not a bonus.
 - **Routing:** decides who learns about an outcome — parent agent, human, or
@@ -95,9 +120,9 @@ Consumes observer facts, decides, and is the only component permitted to act.
 | Command | Does |
 | --- | --- |
 | `orch init` | Install the router plugin into `.opencode/`, scaffold `.orchestration/`, write a version marker |
-| `orch task start <name…>` | Claim, create worktree, run hooks, launch TUI with `--port`, write the lease |
+| `orch task start <name…>` | Claim, create worktree, run hooks, dispatch `opencode run --attach … --dir <worktree>`, write the lease |
 | `orch observe` | Standalone observer output |
-| `orch doctor` | Verify the launch line carries `--port`, hooks resolve, version marker matches, list emitted events |
+| `orch doctor` | Verify the shared server is up, hooks are **committed** and resolve, version marker matches, list emitted events |
 | `orch upgrade` | shadcn-style diff of scaffolded files against the current template |
 
 The CLI is what agents call, via a tool. It **refuses to create an agent it
@@ -183,17 +208,37 @@ deliberate choice, not a forced one.
    `git worktree prune`.
 6. CLI runs `hooks/post-task-create` **from the new worktree's checkout** —
    database, `.env` rewrite.
-7. CLI starts tmux and launches opencode **with `--port 0`**, carrying the task
-   prompt. Strictly after step 6, or the agent boots against the wrong database.
-8. CLI records port, pid, tmux name, and parent session in the lease row.
-9. Best-effort: flip `[ ]` → `[-]` in `TASKS.md` and commit.
+7. CLI **commits the gate** if `.orchestration/hooks/*` is uncommitted — the router
+   only honours the committed version, so dispatching with a dirty gate silently
+   yields `no-gate-configured`.
+8. CLI dispatches into the shared server, strictly after step 6 or the agent boots
+   against the wrong database:
+
+   ```
+   opencode run --attach $URL --dir <worktree> --format json [-m model] "<prompt>"
+   ```
+
+9. CLI records pid, session id, `--dir`, and parent session in the lease row.
+10. Best-effort: flip `[ ]` → `[-]` in `TASKS.md` and commit.
 
 Steps 4 and 6 necessarily run different refs' hooks. Not a bug — but it means a
 task branch can change its own post-create behaviour and not its pre-create
 behaviour.
 
-`--port 0` binds 4096 when free and an ephemeral port otherwise (verified: a
-second instance took 37395), so concurrent worktrees never collide.
+### The dispatch process exiting does not mean the task is done
+
+Measured, not assumed. A dispatched run exited **0 at 07:25:53** with its final
+`step_finish` on stdout — and the session then performed **24 further tool calls**
+until **07:26:29**, because the router injected a follow-up prompt after the gate
+failed. The verdict flipped `failed → passed` 36 seconds after the process that
+started the work had already gone.
+
+So the exit code answers "did my dispatch command finish", never "is the task
+finished". Anything that can inject a prompt — the router, the daemon, a human on
+a phone — extends a session past its dispatcher's lifetime. Completion is a
+property of the **session**, observed over SSE and confirmed by a `session.idle`
+with no gate work outstanding. `run --format json` is a convenient way to *start*
+work and stream its first leg; it is not a completion signal.
 
 ## Flow B — the event gate
 
@@ -202,10 +247,11 @@ The loop that makes a finished branch trustworthy.
 1. The child's router plugin receives `session.idle`. Skip if `session.parentID`
    is set (a subagent) or the session errored.
 2. Plugin fingerprints the project-declared file set — **content hashes**, and
-   **persisted**, so a TUI restart does not silently re-baseline.
+   **persisted**, so a restart does not silently re-baseline.
 3. No difference → stop. Nothing happened worth checking.
-4. Difference → acquire a concurrency slot from the daemon, then run
-   `hooks/session-idle`.
+4. Difference → acquire a concurrency slot from the daemon, then run the gate —
+   **the version committed on the base branch**, staged to a temp dir outside the
+   worktree, never the working-tree copy. See below for why.
 5. Exit 0 → outcome `passed`, with a summary, handed to the daemon.
 6. Exit non-zero → inject the failure output into the child session via
    `prompt_async`, increment the retry counter, and let the agent fix it.
@@ -222,6 +268,43 @@ races with the user.
 
 The agent may **assert** it is done; the gate **verifies**. Neither side can
 declare success alone.
+
+### An agent must not be able to edit its own gate
+
+The sharpest thing this design got wrong, caught by running it.
+
+A dispatched agent was given a task, wrote the deliverable, and went idle. The
+router ran the fail-closed scaffold, which failed by design, and fed the failure
+back. The agent then read `.orchestration/`, **rewrote `hooks/session-idle`** into
+a gate tailored to the task, went idle again — and the router reported `passed`.
+
+The loop worked exactly as designed. That is the problem. The agent authored the
+criterion it was then judged by, and a human reading `session.idle -> passed`
+would have no reason to doubt it. This particular rewrite was honest — it really
+did check the deliverable — but nothing structurally prevented `exit 0`. An agent
+that can edit its own gate can always pass it, and "it happened to behave" is not
+a security property.
+
+Fix, now implemented in the router:
+
+- The gate that runs is `git show <baseBranch>:.orchestration/hooks/<event>`,
+  staged to a temp dir **outside** the worktree so it is neither fingerprinted nor
+  visible to `git status`.
+- Not committed on the base branch → `no-gate-configured`. An uncommitted gate is
+  not a gate.
+- Working-tree copy differs from the committed one → additionally report
+  `gate-modified`, naming it for review. It does not overturn the verdict, since
+  the committed gate is what ran, but an agent editing its own gate is precisely
+  what a human should see.
+
+Improving a gate therefore costs a commit to the base branch, which is reviewable.
+Editing it mid-task buys nothing. Same reason `--auto` is refused: the point is
+that some judgements are not the agent's to make.
+
+Full disclosure, because the same hole applies to this repository: `orch`'s own
+`.orchestration/hooks/session-idle` was written by me, and my earlier report of
+"gate passed: 7 shell, 10 python, tests green" was produced by a gate I authored.
+Read it as a self-report, not an independent check.
 
 ## Flow C — observation and fallback
 
@@ -250,16 +333,18 @@ declare success alone.
 3. **Definitely dead** — lease expired *and* port unreachable *and* tmux gone.
    Reclaim automatically; there is nothing left to preserve.
 
-   Teardown is **not atomic**, and the predicate has to tolerate that. Observed
-   while tearing down a lab TUI: after `tmux kill-session` the process outlived its
-   pane by a few seconds and *lost its listener before it exited*. So a sample taken
-   mid-teardown shows "process alive, no port" — which is byte-for-byte
-   indistinguishable from "started without `--port`".
+   Teardown is **not atomic**: a process losing its listener slightly before it
+   exits means a mid-teardown sample reads "alive, no port". Under the headless
+   model this is no longer ambiguous — a server that is a server always has a
+   port, so "alive, no port" simply means *dying*, and the reaper can wait one
+   more sample rather than reason about it.
 
-   Two different causes, one symptom, opposite responses: one is a dying process to
-   be reaped, the other is a live agent that will run unobserved forever. A single
-   sample cannot tell them apart, so `unobservable` must be corroborated — by
-   process age, by tmux presence, or by a second look — before anything acts on it.
+   An earlier revision of this document framed the above as `tmux kill-session`
+   leaving an orphan, and treated tmux as the way to stop an agent. Both were
+   wrong. **The process is the unit.** Kill the recorded pid; the tmux session
+   ends by itself because its pane command exited (verified directly: killed a
+   pane's process, the session disappeared). tmux is a place to host a process,
+   never a handle on its lifetime.
 4. **Maybe looping** — busy, events flowing, cost climbing, todos static. Alert
    only. Auto-abort on a guessed threshold will eventually kill a legitimate long
    run, after which the automation stops being trusted.
@@ -335,8 +420,10 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
 
 ## Invariants
 
-1. No agent is created that cannot be observed — `--port` always, daemon
-   reachable.
+1. No agent is created that cannot be observed. Now **structural rather than
+   enforced**: agents are headless servers, and a server always has a port. This
+   invariant used to require a `--port` contract, a wrapper script and a `doctor`
+   check, all of which existed only because a TUI can be started blind.
 2. The observer never writes. The daemon holds all authority.
 3. One authority per question: git for intent, SQLite for runtime.
 4. A child is never trusted for state. It may assert; gates verify; observation
@@ -352,8 +439,14 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
    checks run is an ordinary reviewable change.
 8. **Absence of a gate is not a pass.** A missing hook yields
    `no-gate-configured`, never `passed`. Otherwise every unconfigured project
-   receives automatic green lights — the same silent blindness as a TUI launched
-   without `--port`.
+   receives automatic green lights.
+9. **The gate is not part of the agent's writable surface.** The committed
+   base-branch version is what runs; an uncommitted gate counts as no gate; a
+   diverging working-tree copy is reported as `gate-modified`. Learned by watching
+   a dispatched agent rewrite its own gate and then be told it passed.
+10. **Kill by recorded pid, never by pattern.** `pkill -f` matches the invoking
+    shell and neighbouring processes. tmux sessions end on their own when their
+    process dies, so they need no separate teardown.
 
 ## Language and distribution
 
@@ -378,6 +471,27 @@ box's deliberately pinned-binary install is unverified.
 
 ## Verified vs assumed
 
+**Verified headless (2026-08-05, 1.18.13), the run that reshaped this design:**
+
+| Claim | Evidence |
+| --- | --- |
+| `serve` announces its own port | prints `opencode server listening on http://127.0.0.1:35283` on stdout, so discovery is unnecessary |
+| Headless is far cheaper | `serve` 362 MB vs TUI 947 MB RSS — 2.6×, so memory stops being the concurrency ceiling on an 8 GB box |
+| One server serves every worktree | server started in dir A, session created with `?directory=B` → B's plugin imported, factory got `directory=B worktree=B` |
+| Both plugin dir spellings load | `.opencode/plugin/` and `.opencode/plugins/` each worked |
+| A TUI can be attached on demand | `opencode attach <url>` exists, so headless is not blind |
+| Dispatch works end to end | `opencode run --attach URL --dir W --format json` → exit 0, JSON event stream, `cost: 0` on a `-free` model |
+| **Exit code ≠ completion** | run exited 0 at 07:25:53; session did 24 more tool calls until 07:26:29 after the router injected a prompt |
+| **An agent will rewrite its own gate** | fail-closed scaffold → failure injected → agent rewrote `hooks/session-idle` → reported `passed` |
+| The retry loop is genuinely bounded | `failed: attempt 1/3` then `passed`, and the retry counter reset to 0 |
+| Killing a process ends its tmux session | killed a pane's process; session gone without `kill-session` |
+| `pkill -f` is dangerous | `pkill -f 'opencode serve'` killed its own invoking shell mid-command |
+| Free models exist | `opencode/deepseek-v4-flash-free` et al. report `cost: 0`, so mechanism tests need not cost money |
+| Basic auth is available | `serve` warns `OPENCODE_SERVER_PASSWORD is not set; server is unsecured`; `run`/`attach` take `-u`/`-p` — relevant to the tailnet server |
+
+**Superseded but kept for the record** — the following concerned TUIs and no longer
+constrains the design, since orchestrated agents are headless:
+
 **Verified against a live TUI:** portless TUIs are unobservable (no socket, no
 lock file, and the `permission` table holds zero rows — pending approvals live
 only in TUI memory); `--port` turns a TUI into a queryable server; `/permission`,
@@ -395,9 +509,10 @@ ways in a scratch repo:
 | `opencode --port 0` | `127.0.0.1:39243` (4096 was taken) |
 
 So the flag must be passed explicitly, and a shell wrapper is the only thing that
-makes hand-opened TUIs observable. This is why invariant 1 exists and why
-`orch doctor` checks the launch line — the failure is silent, and an unobservable
-agent is indistinguishable from an idle one.
+makes hand-opened TUIs observable. The wrapper is still worth keeping for TUIs you
+open by hand — it demonstrably works, and made a real `--agent team-lead` task
+observable without anyone thinking about it — but it is no longer load-bearing for
+orchestration.
 
 **Verified since:** the full event vocabulary (93 schema types plus two
 undocumented ones — see `docs/events.md`); `parentID` is accepted across differing
@@ -407,7 +522,16 @@ defaulting to 0 when omitting it starts no server at all.
 
 **Assumed, not tested:** concurrency limits for N simultaneous check runs; whether
 a TS plugin runs under the box's pinned opencode; whether the
-TASKS.md-as-rendered-view decision is acceptable.
+TASKS.md-as-rendered-view decision is acceptable; how a shared server behaves when
+one hosted worktree's plugin throws; whether `run` blocks indefinitely or gives up
+when a permission is genuinely withheld.
+
+**A caution about "block and notify":** the chosen policy is never `--auto`, and
+that stands. But the dispatch above wrote a file **without any prompt** — the
+default resolved to `action=allow` for `write` and `bash`. So blocking is not the
+default behaviour that policy assumes; it only happens where a project's
+permission config actually demands it. Getting agents to stop and ask is a
+configuration job, not something the absence of `--auto` achieves by itself.
 
 **Known skew:** local opencode is 1.18.13, the box is pinned 1.18.11. Endpoint
 calls need a declared minimum version and must degrade rather than lie.

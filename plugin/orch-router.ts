@@ -18,7 +18,7 @@ import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
-type Outcome = 'passed' | 'failed' | 'stuck' | 'no-gate-configured';
+type Outcome = 'passed' | 'failed' | 'stuck' | 'no-gate-configured' | 'gate-modified';
 
 interface GateConfig {
   include?: string[];
@@ -40,23 +40,100 @@ function hookName(eventType: string): string {
   return eventType.replace(/\./g, '-');
 }
 
-async function readConfig(worktree: string): Promise<OrchConfig> {
+/**
+ * Read config from the committed base branch, not the working tree.
+ *
+ * The config is as security-critical as the gate itself: `gate.include: []` makes
+ * the fingerprint match everything and nothing, `exclude: ["**"]` means no change
+ * ever looks worth checking, and a large `retryCap` turns a bounded loop into a
+ * billable one. Trusting the working-tree copy would leave the agent able to
+ * neuter its own gate without ever touching the hook.
+ *
+ * `baseBranch` is the one setting that must come from the working tree, because it
+ * is the thing that tells us which committed ref to read.
+ */
+async function readConfig($: any, worktree: string): Promise<OrchConfig> {
+  const rel = `${ORCH_DIR}/config.json`;
+  let working: OrchConfig = {};
   try {
-    const raw = await fs.readFile(path.join(worktree, ORCH_DIR, 'config.json'), 'utf8');
-    return JSON.parse(raw) as OrchConfig;
+    working = JSON.parse(
+      await fs.readFile(path.join(worktree, rel), 'utf8'),
+    ) as OrchConfig;
   } catch {
-    return {};
+    /* absent or malformed; defaults below */
+  }
+  const base = working.baseBranch ?? 'main';
+
+  try {
+    const committed = JSON.parse(
+      await $`git -C ${worktree} show ${base}:${rel}`.text(),
+    ) as OrchConfig;
+    return { ...committed, baseBranch: base };
+  } catch {
+    // Not committed: fall back to defaults, NOT to the working copy. An
+    // uncommitted config carries no authority, and `resolveGate` will report
+    // `no-gate-configured` for the uncommitted hook anyway.
+    return { baseBranch: base };
   }
 }
 
-async function hookPath(worktree: string, event: string): Promise<string | null> {
-  const p = path.join(worktree, ORCH_DIR, 'hooks', hookName(event));
+interface Gate {
+  /** Executable copy of the *committed* gate, staged outside the worktree. */
+  exec: string;
+  /** True when the working tree's copy differs from the committed one. */
+  diverged: boolean;
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Resolve the gate from the base branch, never from the working tree.
+ *
+ * Observed on 2026-08-05: a dispatched agent hit the fail-closed scaffold, was
+ * handed the failure, and *rewrote the hook that judges it* - then reported
+ * `passed`. The rewrite happened to be honest, but nothing structurally stopped
+ * it from writing `exit 0`. An agent that can edit its own gate can always pass.
+ *
+ * So the committed version is the authority. Evolving a gate then costs a commit
+ * to the base branch, which is reviewable; editing it mid-task buys nothing.
+ *
+ * Staged in a temp dir *outside* the worktree so it is neither fingerprinted nor
+ * visible to `git status`.
+ */
+async function resolveGate(
+  $: any,
+  worktree: string,
+  event: string,
+  base: string,
+): Promise<Gate | null> {
+  const rel = `${ORCH_DIR}/hooks/${hookName(event)}`;
+
+  let committed: string;
   try {
-    await fs.access(p, (await import('fs')).constants.X_OK);
-    return p;
+    committed = await $`git -C ${worktree} show ${base}:${rel}`.text();
   } catch {
+    // Not committed on the base branch. An uncommitted gate is not a gate:
+    // reporting a pass off the working tree is what we are preventing.
     return null;
   }
+  if (!committed.trim()) return null;
+
+  let diverged = false;
+  try {
+    diverged = (await fs.readFile(path.join(worktree, rel), 'utf8')) !== committed;
+  } catch {
+    diverged = true; // deleted or unreadable in the worktree is itself divergence
+  }
+
+  const { tmpdir } = await import('os');
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'orch-gate-'));
+  const exec = path.join(dir, hookName(event));
+  await fs.writeFile(exec, committed, { mode: 0o755 });
+
+  return {
+    exec,
+    diverged,
+    cleanup: () => fs.rm(dir, { recursive: true, force: true }),
+  };
 }
 
 /**
@@ -128,7 +205,7 @@ async function writeState(worktree: string, key: string, value: string): Promise
 
 export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => {
   const root = worktree ?? directory;
-  const cfg = await readConfig(root);
+  const cfg = await readConfig($, root);
   const gate = cfg.gate ?? {};
   const retryCap = gate.retryCap ?? 3;
 
@@ -152,13 +229,28 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
   async function runHook(event: string, sessionID: string) {
     if (running) return;
 
-    const hook = await hookPath(root, event);
-    if (!hook) {
+    const gate = await resolveGate($, root, event, cfg.baseBranch ?? 'main');
+    if (!gate) {
       // Absence of a gate is NOT a pass. Reporting `passed` here would manufacture
-      // confidence in work nothing checked - the same silent blindness as a TUI
-      // launched without --port.
-      await report('no-gate-configured', event, `no ${hookName(event)} hook`);
+      // confidence in work that nothing checked.
+      await report(
+        'no-gate-configured',
+        event,
+        `no ${hookName(event)} committed on ${cfg.baseBranch ?? 'main'}`,
+      );
       return;
+    }
+
+    if (gate.diverged) {
+      // Surfaced, not silenced, and it does not change the verdict: the committed
+      // gate is what ran, so its result still means something. But an agent
+      // editing its own gate is exactly what a human should look at.
+      await report(
+        'gate-modified',
+        event,
+        'the worktree copy differs from the committed gate; the committed one was ' +
+          'used. Review the diff before trusting this task.',
+      );
     }
 
     const fpKey = `fingerprint-${hookName(event)}`;
@@ -172,7 +264,8 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
     running = true;
     try {
       const started = Date.now();
-      const result = await $`${hook}`
+      const result = await $`${gate.exec}`
+        .cwd(root)
         .env({
           ...process.env,
           WORKTREE_PATH: root,
@@ -228,6 +321,7 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
           await report('failed', event, 'could not inject prompt into session');
         });
     } finally {
+      await gate.cleanup().catch(() => undefined);
       running = false;
     }
   }
