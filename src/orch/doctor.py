@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import harness
+from . import gate, harness, server
 from .discovery import discover
 
 OK = "ok"
@@ -131,19 +131,129 @@ def check_project(cwd: Path) -> list[Check]:
     return out
 
 
+def check_server() -> list[Check]:
+    """The one shared headless server every task depends on."""
+    out: list[Check] = []
+    st = server.status()
+    if not st.get("running"):
+        out.append(Check(
+            WARN, "no shared server",
+            f"{st.get('reason')}. `orch server start`, or let `orch task start` "
+            f"bring one up",
+        ))
+        return out
+
+    if st.get("unresponsive"):
+        # The failure a `kill -0` check calls healthy. Every task on the machine
+        # runs inside this process, so a live-but-deaf server is worse than a dead
+        # one: dispatch appears to succeed and nothing can be observed afterwards.
+        out.append(Check(
+            FAIL, f"shared server pid {st['pid']} is alive but answers nothing",
+            f"port {st['port']} does not respond to /global/health. "
+            f"`orch server restart`, then re-dispatch anything that was running",
+        ))
+        return out
+
+    out.append(Check(
+        OK, f"shared server pid {st['pid']}",
+        f"{st['url']} version {st.get('version') or '?'} up {st.get('uptime_s')}s",
+    ))
+    return out
+
+
+def check_gates(cwd: Path) -> list[Check]:
+    """Whether a verdict from this project's gate would mean anything.
+
+    Separate from the hook-existence checks below, because existence is not the
+    question. A hook can be present, correct and completely inert - which is what
+    happened when a worktree predated the router plugin's commit.
+    """
+    out: list[Check] = []
+    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if code.returncode != 0:
+        return out
+    top = Path(code.stdout.strip())
+    findings = gate.inspect(top)
+    if not findings:
+        out.append(Check(
+            FAIL, "no gate configured",
+            "nothing verifies work in this project, so every task would finish as "
+            "`no-gate-configured` - which reads like a note and means nothing was "
+            "checked",
+        ))
+        return out
+    for f in findings:
+        if f.state == gate.OK:
+            out.append(Check(OK, f"gate {f.name}", f.detail))
+        elif f.state == gate.DIVERGED:
+            out.append(Check(WARN, f"gate {f.name} diverges from the base branch",
+                             f.detail))
+        else:
+            out.append(Check(FAIL, f"gate {f.name}: {f.state}", f.detail))
+    return out
+
+
+def check_router_drift(cwd: Path) -> list[Check]:
+    """Is the installed router the one this `orch` ships?
+
+    Scaffolded files are owned by the consuming project - the shadcn model - so
+    drift is expected and allowed. It still has to be visible, because a router from
+    an older orch may not implement the guarantees this one documents. The committed
+    gate rule, for instance, only exists in routers newer than 2026-08-05.
+    """
+    out: list[Check] = []
+    template = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
+    if not template.exists():
+        return out
+    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if code.returncode != 0:
+        return out
+    top = Path(code.stdout.strip())
+    installed = None
+    for rel in gate.ROUTER_RELS:
+        if (top / rel).exists():
+            installed = top / rel
+            break
+    if installed is None:
+        return out  # already reported by check_gates
+    try:
+        if installed.read_text() == template.read_text():
+            out.append(Check(OK, "router matches the shipped template", str(installed)))
+        else:
+            out.append(Check(
+                WARN, "installed router differs from the shipped template",
+                f"{installed} is not what this orch ships. Intended under the shadcn "
+                f"model, but an older router may silently lack guarantees this "
+                f"version documents - notably running the committed gate rather than "
+                f"the working-tree copy",
+            ))
+    except OSError:
+        pass
+    return out
+
+
 def check_launch() -> list[Check]:
-    """Is every running TUI observable, and will new ones be?"""
+    """Stray hand-started TUIs.
+
+    No longer a contract, only a courtesy: orchestrated agents are headless servers
+    and always have a port. These checks concern TUIs a human opened, where being
+    blind is merely inconvenient rather than a broken invariant.
+    """
     out: list[Check] = []
     tuis = discover()
     if not tuis:
-        out.append(Check(OK, "no TUIs running", ""))
+        out.append(Check(OK, "no hand-started TUIs", ""))
     for t in tuis:
         if t.observable:
             out.append(Check(OK, f"pid {t.pid} observable", f"port {t.port} {t.cwd}"))
         else:
             out.append(
-                Check(FAIL, f"pid {t.pid} has no --port",
-                      f"{t.cwd} cannot be inspected at all; only relaunching helps")
+                Check(WARN, f"hand-started pid {t.pid} has no --port",
+                      f"{t.cwd} cannot be inspected. Not an orchestration problem "
+                      f"any more - dispatched agents are headless servers and always "
+                      f"listen - but you cannot see this one without relaunching it")
             )
 
     # The wrapper is what stops new hand-opened TUIs from being born blind.
@@ -195,8 +305,8 @@ def check_tooling() -> list[Check]:
     """
     out: list[Check] = []
     for tool, why in (("shellcheck", "session-idle degrades to syntax-only without it"),
-                      ("tmux", "required to dispatch task worktrees"),
-                      ("ss", "required for TUI discovery"),
+                      ("tmux", "optional now: dispatch is headless, tmux only hosts TUIs you open"),
+                      ("ss", "only needed to spot stray hand-started TUIs now"),
                       ("git", "required for everything")):
         found = shutil.which(tool)
         out.append(Check(OK if found else WARN, tool, found or why))
@@ -207,6 +317,9 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     cwd = cwd or Path.cwd()
     checks: list[Check] = []
     checks += check_harness()
+    checks += check_server()
+    checks += check_gates(cwd)
+    checks += check_router_drift(cwd)
     checks += check_launch()
     checks += check_tooling()
     checks += check_project(cwd)

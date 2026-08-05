@@ -75,27 +75,58 @@ Caveats found the hard way:
 
 ## Usage today
 
-Stdlib-only Python, no install step:
+Stdlib-only Python, no install step. Agents run **headless**: one shared
+`opencode serve` hosts every worktree, and the TUI is an optional viewer.
 
 ```bash
-bin/orch observe          # live state of every TUI (read-only, exits 1 if you're needed)
-bin/orch observe -w       # redraw continuously
-bin/orch observe --json   # machine-readable
-bin/orch events -d 30 -v  # tail one TUI's SSE stream, then print a type histogram
-bin/orch doctor           # verify the contracts that fail silently
-bin/orch init             # scaffold .orchestration/ + install the router plugin
-bin/orch version
+bin/orch init                    # scaffold .orchestration/ + install the router plugin
+bin/orch gate                    # can this project's gates be trusted at all
+bin/orch doctor                  # verify the contracts that fail silently
+
+bin/orch server start|status|stop|restart
+bin/orch task start <name>       # claim, create the worktree, run hooks, dispatch
+bin/orch task start <name> --dry-run
+bin/orch task list
+bin/orch task reset <name>       # return a task to available (deliberately manual)
+
+bin/orch observe                 # live state, read-only, exits 1 if you are needed
+bin/orch observe -w --json
+bin/orch attach                  # open a TUI onto the shared server, close it freely
+bin/orch events -d 30 -v         # tail SSE, then print a histogram of event types
 ```
 
-`observe` exits non-zero when something needs a human or when the machinery itself
-is wrong, so it composes in a shell.
+`observe` and `doctor` exit non-zero when something needs a human or when the
+machinery itself is wrong, so they compose in a shell.
 
-What works: `observe`, `events`, `doctor`, `init`, `version`, the claims/leases
-store (`src/orch/store.py`, 9 tests), and the router plugin
-(`plugin/orch-router.ts`, written but not yet exercised by a live agent).
+### Two things worth knowing before dispatching
 
-What does not exist yet: `orch task start` — dispatch is still manual — and the
-daemon, so there is no watchdog, no notification routing, and no phone server.
+**Commit the gate, the task file and the router.** A worktree is created *from* the
+base branch, so anything uncommitted is invisible to the agent. Each of these was
+observed failing silently: an uncommitted task file gave an agent no instructions
+and it quietly stopped; an uncommitted hook degraded to `no-gate-configured`; a
+worktree created before the router was committed ran with no gate at all while
+`orch gate` reported fine. `orch task start` now refuses all three, and
+`orch gate` explains which one is wrong.
+
+**The dispatch process exiting is not the task finishing.** Measured: a run exited
+0 and its session then did 24 more tool calls over 36 seconds, because the router
+injected a follow-up prompt. Watch `orch observe`, not the exit code.
+
+## What works, and what does not
+
+Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
+`task start`/`list`/`reset`, `observe`, `attach`, `events`, the claims/leases store,
+and the router plugin — including the full loop of event → hook → failure → prompt
+injection → agent fix → pass, with a bounded retry cap.
+
+Not built yet: **the daemon**. So nothing renews leases, nothing notices an agent
+that went quiet, nothing reclaims a dead one, nothing routes an outcome anywhere,
+and there is no phone server. A task therefore stays `running` in `orch task list`
+even after it is done — completion has to come from session state, and the
+component that would watch for it does not exist.
+
+35 tests: `python3 tests/test_store.py` and the same for `test_gate`,
+`test_server`, `test_dispatch`.
 
 ## Layout
 

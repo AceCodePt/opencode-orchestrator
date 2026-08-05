@@ -108,15 +108,27 @@ if [ "${#tsfiles[@]}" -gt 0 ]; then
 fi
 
 # --- tests -------------------------------------------------------------------
-if [ -f tests/test_store.py ]; then
-  if ! out=$(python3 tests/test_store.py 2>&1); then
-    echo "store tests failed:"
+# Discovered, not listed. A hardcoded list means a new test file is silently never
+# run, and a gate that skips tests still reports success - the same class of
+# blindness as the gate that only looked at tracked files.
+ran=0
+shopt -s nullglob
+for t in tests/test_*.py; do
+  ran=$((ran + 1))
+  if ! out=$(python3 "$t" 2>&1); then
+    echo "FAILED: $t"
     echo "$out"
     status=1
   fi
+done
+shopt -u nullglob
+
+if [ "$ran" -eq 0 ]; then
+  echo "no test files found under tests/ - refusing to call that green" >&2
+  status=1
 fi
 
 if [ "$status" -eq 0 ]; then
-  echo "gate passed: ${#shells[@]} shell, ${#pys[@]} python, ${#tsfiles[@]} ts, tests green"
+  echo "gate passed: ${#shells[@]} shell, ${#pys[@]} python, ${#tsfiles[@]} ts, $ran test files green"
 fi
 exit "$status"

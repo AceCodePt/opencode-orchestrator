@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import harness
+from . import harness, server
 from .discovery import Tui, discover
 
 # States are mutually exclusive and ordered by how much they demand attention.
@@ -25,6 +25,10 @@ BLOCKED_PERMISSION = "blocked-on-permission"
 BLOCKED_QUESTION = "blocked-on-question"
 BUSY = "busy"
 IDLE = "idle"
+# The orchestrator's own shared server. It listens like an agent and would
+# otherwise be counted as one - an idle agent nobody dispatched, whose worktree is
+# a state directory. Naming it separately keeps the agent counts honest.
+SHARED_SERVER = "shared-server"
 
 
 @dataclass
@@ -54,6 +58,11 @@ class Fact:
     def is_alarm(self) -> bool:
         """States that mean the machinery itself is wrong, not the agent."""
         return self.state in (UNOBSERVABLE, UNREACHABLE)
+
+    @property
+    def is_agent(self) -> bool:
+        """Whether this process is something doing work, as opposed to plumbing."""
+        return self.state != SHARED_SERVER
 
 
 def _describe_permission(p: dict) -> Blocked:
@@ -161,10 +170,23 @@ def look(tui: Tui) -> Fact:
 
 
 def look_all() -> list[Fact]:
-    return [look(t) for t in discover()]
+    facts = [look(t) for t in discover()]
+    # Relabel the shared server by pid rather than by guessing from its cwd. The
+    # daemon spawned it and recorded the pid, so this is knowledge, not inference.
+    info = server.read_state()
+    if info is not None and info.alive:
+        for f in facts:
+            if f.tui.pid == info.pid:
+                f.state = SHARED_SERVER
+                f.notes.append(
+                    "the orchestrator's shared server: it hosts every dispatched "
+                    "task, so its death takes them all with it"
+                )
+    return facts
 
 
 _ICON = {
+    SHARED_SERVER: "==",
     UNOBSERVABLE: "??",
     UNREACHABLE: "!!",
     BLOCKED_PERMISSION: ">>",
@@ -203,7 +225,10 @@ def render(facts: list[Fact], verbose: bool = False) -> str:
 
     blind = [f for f in facts if f.state == UNOBSERVABLE]
     waiting = [f for f in facts if f.needs_human]
-    summary = [f"{len(facts)} TUI(s)"]
+    agents = [f for f in facts if f.is_agent]
+    summary = [f"{len(agents)} agent(s)"]
+    if len(agents) != len(facts):
+        summary.append("1 shared server")
     if waiting:
         summary.append(f"{len(waiting)} waiting on you")
     if blind:
