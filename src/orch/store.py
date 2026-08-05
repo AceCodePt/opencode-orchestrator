@@ -46,6 +46,7 @@ MIN_HARNESS = (1, 18, 11)
 TODO = "todo"
 RUNNING = "running"
 DONE = "done"
+MERGED = "merged"
 STUCK = "stuck"
 # The agent stopped and the work was not established to be good. Either the daemon's
 # own gate run said no, or there was no committed gate to run - which is not the same

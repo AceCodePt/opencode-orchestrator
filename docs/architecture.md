@@ -18,6 +18,7 @@ Three words that are easy to use interchangeably and must not be:
 | **stopped** | The session is idle and its dispatch has exited. | Observation. Says nothing about the work. |
 | **finished** | Stopped, **and the in-loop gate loop has terminated.** Nothing further will happen on its own. | The router's last outcome: `passed`, or the retry cap spent. |
 | **done** | Finished, and a gate the daemon ran itself passed. | The daemon, out-of-loop. |
+| **merged** | Done, and the branch was folded into base, worktree + branch removed. | The daemon, automatically after `done`. |
 
 `finished` is a property of the **loop**, not of the agent's opinion, and that is what
 makes it observable. Going idle is what *fires* the gate; a failing gate injects a
@@ -30,6 +31,21 @@ can no longer move it:
 | `stuck` | finished — retry cap spent, the agent gave up | run its own gate, but never `done` |
 | `failed` | **not** finished — a moment between attempts | renew; escalate if it stays idle past the budget |
 | nothing recorded | **not** finished — no gate ever fired here | `needs-review`, and do not verify |
+
+### Task lifecycle
+
+```
+todo  ->  running  ->  done  ->  merged
+                     ->  needs-review
+                     ->  stuck
+```
+
+`done` means the daemon ran the committed gate itself and it passed. `merged`
+means the branch was folded into base and the worktree + branch were removed.
+The daemon does this automatically on its next loop after `done`; the merge is
+`--no-ff` so the task's commits land as a distinct merge commit, and a conflict
+leaves everything in place for a human to resolve. `orch task merge <name>`
+re-runs the merge manually after a conflict.
 
 Two consequences worth stating, because both were wrong before.
 
@@ -683,7 +699,13 @@ warning.
 **Deferred, with nothing built on either:**
 
 - What happens to a branch that passed — merge, PR, or nothing — pending a decision on
-  whether a human belongs in that loop. `done` is currently a terminus.
+  whether a human belongs in that loop. **Resolved: `done` merges automatically.** The
+  daemon folds the task's branch into base (`--no-ff`), removes the worktree, and deletes
+  the branch. The status moves to `merged`. A merge conflict leaves everything in place
+  and the task stays `done` for a human to resolve and re-run `orch task merge <name>`.
+  The lifecycle hooks `pre-task-cleanup`, `pre-branch-delete`, and `post-task-cleanup`
+  bracket the teardown, and either of the first two can block to preserve the worktree
+  or branch for review.
 - Notification routing and the phone-facing server. Recorded as
   `tasks/outcome-routing`, `tasks/permission-burst-keying` and `tasks/phone-server`.
 - Concurrency limits. Known and accepted; nothing caps parallel agents or gate runs.

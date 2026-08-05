@@ -285,6 +285,31 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
         st.close()
 
 
+def cmd_task_merge(args: argparse.Namespace) -> int:
+    """Merge a done task's branch into base and clean up the worktree + branch.
+
+    The daemon does this automatically, but the command exists for when it is not
+    running, or a merge failed and a human resolved the conflict.
+    """
+    from . import merge as merge_mod
+    start = Path(args.directory) if args.directory else Path.cwd()
+    _, project, err = dispatch_mod.project_of(start)
+    if err or project is None:
+        print(err or "not in a worktree", file=sys.stderr)
+        return 2
+    st = Store()
+    try:
+        r = merge_mod.merge_and_cleanup(st, str(project), args.name)
+        for s in r.steps:
+            print(f"  {s}")
+        sys.stdout.flush()
+        for p in r.problems:
+            print(f"  ! {p}", file=sys.stderr)
+        return 0 if r.ok else 1
+    finally:
+        st.close()
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Report whether this project's gates can be trusted."""
     start = Path(args.directory) if args.directory else Path.cwd()
@@ -544,6 +569,12 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--force", action="store_true",
                     help="reset even a task recorded as running")
     tr.set_defaults(func=cmd_task_reset)
+
+    tm = tsub.add_parser("merge",
+                         help="merge a done task into base and clean up")
+    tm.add_argument("name")
+    tm.add_argument("-C", "--directory")
+    tm.set_defaults(func=cmd_task_merge)
 
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")

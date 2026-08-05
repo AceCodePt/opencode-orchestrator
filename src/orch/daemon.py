@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gate, observe, server
+from . import gate, merge, observe, server
 from .store import DONE, NEEDS_REVIEW as ST_NEEDS_REVIEW, RUNNING, Store, Task
 
 # Per-state silence budgets. A blocked agent is not "quiet", it is waiting on a
@@ -84,6 +84,9 @@ NOTE = "note"
 # performed, because `decide` must stay pure - and because that keeps "when do we
 # check" testable separately from "what did the check say".
 VERIFY = "verify"
+# Merge a done task's branch into base and clean up the worktree + branch.
+# Emitted rather than performed, same reason as VERIFY: keeps decide() pure.
+MERGE = "merge"
 
 
 @dataclass
@@ -119,6 +122,10 @@ class Snapshot:
     # drives an idle agent back to work, so its last word says whether anything more
     # was ever going to happen.
     router_outcome: dict[str, str | None] = field(default_factory=dict)
+    # Tasks that are `done` and waiting to be merged. The daemon verifies them; it
+    # also folds them into base, because leaving a verified branch in a worktree
+    # forever is just unbounded accumulation.
+    done_tasks: list[Task] = field(default_factory=list)
 
 
 def source_fingerprint() -> str:
@@ -339,6 +346,16 @@ def decide(snap: Snapshot) -> list[Action]:
         actions.append(Action(RENEW, t.name, f"state {fact.state}",
                               project=t.project))
 
+    # ------------------------------------------------------------- done tasks
+    # A done task is verified work sitting in a worktree. The merge folds it into
+    # base and removes the worktree + branch — otherwise they accumulate forever.
+    for t in snap.done_tasks:
+        actions.append(Action(
+            MERGE, t.name,
+            "done: merge into base and clean up",
+            project=t.project,
+        ))
+
     return actions
 
 
@@ -364,6 +381,7 @@ class Supervisor:
     def snapshot(self) -> Snapshot:
         st = server.status()
         tasks_all = self.store.tasks(self.project, status=RUNNING)
+        done_tasks = self.store.tasks(self.project, status=DONE)
 
         # Ask about each task's worktree specifically. Enumerating processes cannot
         # work here: one shared server has a single cwd and hosts every worktree, so
@@ -414,6 +432,7 @@ class Supervisor:
             dispatch_alive=alive,
             quiet_for=quiet,
             router_outcome=router,
+            done_tasks=done_tasks,
         )
 
     def apply(self, actions: list[Action]) -> list[str]:
@@ -443,6 +462,12 @@ class Supervisor:
             elif a.kind == VERIFY and a.task and proj:
                 for line in self.verify(a.task, project=proj, why=a.reason):
                     log.append(f"  -> {line}")
+            elif a.kind == MERGE and a.task and proj:
+                r = merge.merge_and_cleanup(self.store, proj, a.task)
+                for s in r.steps:
+                    log.append(f"  -> {s}")
+                for p in r.problems:
+                    log.append(f"  -> ! {p}")
             elif a.kind == RESTART_SERVER:
                 try:
                     info = server.restart()
