@@ -187,29 +187,7 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
         start_ticks=proc_start_ticks(proc.pid),
     )
     write_state(info)
-    record_harness_version(info.port)
     return info
-
-
-def record_harness_version(port: int) -> str | None:
-    try:
-        from .store import MIN_HARNESS, Store
-
-        v = harness.version(port)
-        if not v:
-            return None
-        st = Store()
-        try:
-            previous = st.note_harness(v, below_min=v < MIN_HARNESS)
-        finally:
-            st.close()
-        if previous:
-            return (f"harness changed: {previous} -> {'.'.join(map(str, v))}. "
-                    f"Minor releases are assumed API-compatible; if something "
-                    f"behaves differently, this is when it changed.")
-        return None
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _await_url(log: Path, proc: subprocess.Popen, timeout: float) -> str:

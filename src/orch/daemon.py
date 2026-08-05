@@ -7,30 +7,26 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gate, merge, observe, server
-from .store import DONE, NEEDS_REVIEW as ST_NEEDS_REVIEW, RUNNING, Store, Task
+from . import dispatch, gate, merge, observe, server, state
+from .harness import prompt_async
 
-BUDGET_BUSY_S = 20 * 60
-BUDGET_IDLE_S = 2 * 60
-BUDGET_BLOCKED_S = 60
+SETTLE_BUDGET_S = 30
+STALL_BUDGET_S = 10 * 60
+RETRIGGER_GRACE_S = 30
+REVIEW_BACKOFF_S = 15 * 60
+MERGE_BACKOFF_S = 30 * 60
+GATE_TIMEOUT_S = 20 * 60
+DISPATCH_BACKOFF_S = 60
+MAX_ORCHESTRATED_S = 6 * 3600
 
-FINISHED_COMPLETE = "finished: gate loop settled on a pass"
-FINISHED_GAVE_UP = "finished: retry cap spent"
-STILL_RETRYING = "not finished: the gate loop is still driving it"
-GATE_IN_FLIGHT = "not finished: a gate is running right now"
-NEVER_GATED = "not finished: stopped and no gate ever ran"
-
-GRACE_UNGATED_S = 90
-BUDGET_GATE_S = 20 * 60
-
-RENEW = "renew"
-RECLAIM = "reclaim"
-NEEDS_REVIEW = "needs-review"
-ALERT = "alert"
 RESTART_SERVER = "restart-server"
-NOTE = "note"
-VERIFY = "verify"
+NEEDS_REVIEW = "needs-review"
 MERGE = "merge"
+REMOVE = "remove"
+VERIFY = "verify"
+DISPATCH = "dispatch"
+ALERT = "alert"
+NOTE = "note"
 
 
 @dataclass
@@ -40,6 +36,32 @@ class Action:
     reason: str = ""
     detail: str = ""
     project: str | None = None
+    worktree: str | None = None
+    branch: str | None = None
+    base: str | None = None
+    retry_cap: int = 3
+    port: int | None = None
+    session_ids: list[str] = field(default_factory=list)
+    blocked: list[observe.Blocked] = field(default_factory=list)
+    start: str | None = None
+    model: str | None = None
+    agent: str | None = None
+
+
+@dataclass
+class LoopState:
+    retries: dict[tuple[str, str], int] = field(default_factory=dict)
+    fingerprint: dict[tuple[str, str], str] = field(default_factory=dict)
+    last_fail: dict[tuple[str, str], int] = field(default_factory=dict)
+    injected_at: dict[tuple[str, str], int] = field(default_factory=dict)
+    settled_at: dict[tuple[str, str], int] = field(default_factory=dict)
+    wait_until: dict[tuple[str, str], int] = field(default_factory=dict)
+    gating_until: dict[tuple[str, str], int] = field(default_factory=dict)
+    alerted: set[str] = field(default_factory=set)
+    dispatch_backoff: dict[tuple[str, str], int] = field(default_factory=dict)
+    dispatch_error: dict[tuple[str, str], str] = field(default_factory=dict)
+    dispatch_seen: dict[tuple[str, str], int] = field(default_factory=dict)
+    dispatch_escaped: set[tuple[str, str]] = field(default_factory=set)
 
 
 @dataclass
@@ -48,12 +70,401 @@ class Snapshot:
     now: int
     server_running: bool
     server_unresponsive: bool
-    tasks: list[Task] = field(default_factory=list)
-    facts: dict[str, observe.TaskFact] = field(default_factory=dict)
-    dispatch_alive: dict[int, bool] = field(default_factory=dict)
-    quiet_for: dict[str, int] = field(default_factory=dict)
-    router_outcome: dict[str, str | None] = field(default_factory=dict)
-    done_tasks: list[Task] = field(default_factory=list)
+    port: int | None
+    tasks: list[state.TaskState]
+    mem: LoopState
+    policies: dict[str, state.SchedulerPolicy] = field(default_factory=dict)
+
+
+def project_label(project: str) -> str:
+    p = Path(project)
+    return p.parent.name if p.name == ".git" else p.name
+
+
+def _reset_loop(mem: LoopState, key: tuple[str, str],
+                keep: tuple[str, ...] = ()) -> None:
+    for name in ("settled_at", "fingerprint", "last_fail", "injected_at",
+                 "gating_until"):
+        if name not in keep:
+            getattr(mem, name).pop(key, None)
+
+
+def decide(snap: Snapshot) -> list[Action]:
+    actions: list[Action] = []
+    mem = snap.mem
+
+    if not snap.server_running or snap.server_unresponsive:
+        why = ("is not running" if not snap.server_running
+               else "is alive but answers nothing")
+        actions.append(Action(
+            RESTART_SERVER, None,
+            f"the shared server {why}",
+            "every dispatched task lives inside this one process, so its death "
+            "takes them all with it",
+        ))
+        return actions
+
+    for t in snap.tasks:
+        if not t.claimed:
+            continue
+        key = (t.project, t.name)
+
+        if t.session == state.SESSION_BLOCKED:
+            for b in t.blocked:
+                if b.request_id in mem.alerted:
+                    continue
+                actions.append(Action(
+                    ALERT, t.name, f"blocked on {b.kind}",
+                    f"{b.detail} [{b.request_id}]", project=t.project,
+                    blocked=[b],
+                ))
+            actions.append(Action(NOTE, t.name, "blocked but alive",
+                                  project=t.project))
+            _reset_loop(mem, key)
+            continue
+
+        if t.session == state.SESSION_BUSY:
+            _reset_loop(mem, key)
+            continue
+
+        if t.dispatch_orchestrated:
+            mem.dispatch_seen.setdefault(key, snap.now)
+            if (key not in mem.dispatch_escaped
+                    and snap.now - mem.dispatch_seen[key] < MAX_ORCHESTRATED_S):
+                _reset_loop(mem, key)
+                continue
+            mem.dispatch_escaped.add(key)
+            mem.dispatch_seen.pop(key, None)
+        else:
+            mem.dispatch_seen.pop(key, None)
+            mem.dispatch_escaped.discard(key)
+
+        if not t.worktree or not os.path.isdir(t.worktree):
+            actions.append(Action(
+                NEEDS_REVIEW, t.name, "worktree-gone",
+                "the worktree recorded for this branch does not exist",
+                project=t.project, worktree=t.worktree,
+                branch=t.branch, base=t.base,
+            ))
+            mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+            _reset_loop(mem, key, keep=("wait_until",))
+            continue
+
+        if snap.now < mem.wait_until.get(key, 0):
+            continue
+
+        if key not in mem.settled_at:
+            mem.settled_at[key] = snap.now
+            continue
+        if snap.now - mem.settled_at[key] < SETTLE_BUDGET_S:
+            continue
+
+        if not t.dirty and not t.diff:
+            actions.append(Action(
+                REMOVE, t.name, "no-op: clean branch identical to base",
+                "nothing was produced, so there is nothing to merge or verify",
+                project=t.project, worktree=t.worktree,
+                branch=t.branch, base=t.base,
+            ))
+            _reset_loop(mem, key)
+            continue
+
+        fp = state.fingerprint(t.worktree)
+        if mem.fingerprint.get(key) == fp:
+            last = mem.last_fail.get(key, 0)
+            if snap.now - last > STALL_BUDGET_S:
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name,
+                    f"stalled: unchanged for {snap.now - last}s after a gate failure",
+                    "the agent was told what to fix and nothing changed",
+                    project=t.project, worktree=t.worktree,
+                    branch=t.branch, base=t.base,
+                ))
+                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                _reset_loop(mem, key, keep=("wait_until",))
+            continue
+
+        if snap.now < mem.gating_until.get(key, 0):
+            continue
+
+        actions.append(Action(
+            VERIFY, t.name, "settled: run the committed gate",
+            project=t.project, worktree=t.worktree, branch=t.branch,
+            base=t.base, retry_cap=t.retry_cap, port=snap.port,
+            session_ids=t.session_ids,
+        ))
+        mem.gating_until[key] = snap.now + GATE_TIMEOUT_S
+        mem.settled_at.pop(key, None)
+
+    _schedule(snap, actions)
+    return actions
+
+
+def _schedule(snap: Snapshot, actions: list[Action]) -> None:
+    mem = snap.mem
+    by_project: dict[str, list[state.TaskState]] = {}
+    for t in snap.tasks:
+        by_project.setdefault(t.project, []).append(t)
+
+    for project, tasks in by_project.items():
+        pol = snap.policies.get(project)
+        if not pol or not pol.enabled or not pol.start:
+            continue
+        if pol.max_concurrent <= 0:
+            continue
+        in_flight = sum(1 for t in tasks if t.claimed and not t.archived)
+        for t in tasks:
+            if in_flight >= pol.max_concurrent:
+                break
+            if t.claimed or not t.declared or t.archived:
+                continue
+            key = (project, t.name)
+            if snap.now < mem.dispatch_backoff.get(key, 0):
+                continue
+            actions.append(Action(
+                DISPATCH, t.name, "todo: declared on base, no claim",
+                detail="auto-dispatched by the scheduler",
+                project=project, base=t.base,
+                start=str(pol.start),
+                model=pol.model, agent=pol.agent,
+            ))
+            in_flight += 1
+
+
+class Supervisor:
+    def __init__(self, project: str | None = None, roots: list[str] | None = None,
+                 dry_run: bool = False) -> None:
+        self.project = project
+        self.roots = roots
+        self.dry_run = dry_run
+        self.mem = LoopState()
+        self._projects: dict[str, Path] = {}
+        self._projects_at = 0.0
+        self._verify_log: list[str] = []
+
+    def _discover(self) -> dict[str, Path]:
+        now = time.monotonic()
+        if not self._projects or now - self._projects_at > 60:
+            found = state.discover_projects(self.roots)
+            if self.project:
+                filtered = {k: v for k, v in found.items() if k == self.project}
+                if not filtered:
+                    proj = state.Project.from_common(self.project)
+                    if proj is not None and proj.orch_dir is not None:
+                        filtered = {str(proj.common): proj.orch_dir}
+                found = filtered
+            self._projects = found
+            self._projects_at = now
+        return self._projects
+
+    def snapshot(self) -> Snapshot:
+        st = server.status()
+        port = (st.get("port") if st.get("running")
+                and not st.get("unresponsive") else None)
+
+        tasks: list[state.TaskState] = []
+        policies: dict[str, state.SchedulerPolicy] = {}
+        for common, orch in self._discover().items():
+            proj = state.Project(Path(common), orch,
+                                 state.base_from_config(orch))
+            tasks.extend(proj.scan(port))
+            pol = state.scheduler_from_config(orch)
+            if pol.enabled:
+                pol.start = proj.base_worktree
+            policies[str(common)] = pol
+
+        return Snapshot(
+            now=int(time.time()),
+            server_running=bool(st.get("running")),
+            server_unresponsive=bool(st.get("unresponsive")),
+            port=port,
+            tasks=tasks,
+            mem=self.mem,
+            policies=policies,
+        )
+
+    def _verify(self, a: Action) -> None:
+        key = (a.project or "", a.task or "")
+        self.mem.gating_until.pop(key, None)
+        log: list[str] = []
+        wt = Path(a.worktree or "")
+        sid = a.session_ids[0] if a.session_ids else ""
+
+        v = gate.run(wt, "session-idle", base=a.base or "main",
+                     session_id=sid)
+        log.append(f"gate {v.summary}")
+
+        if v.outcome == gate.NO_GATE:
+            log.append(f"{a.task} -> needs-review (no committed gate, so nothing "
+                       f"verified this work)")
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            _reset_loop(self.mem, key, keep=("wait_until",))
+            self._verify_log = log
+            return
+
+        if v.justifies_done:
+            self.mem.retries.pop(key, None)
+            self.mem.fingerprint.pop(key, None)
+            self.mem.last_fail.pop(key, None)
+            self.mem.settled_at.pop(key, None)
+            if state._dirty(wt):
+                log.append("gate passed but the worktree is still dirty; "
+                           "reviewing rather than merging")
+                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+                self._verify_log = log
+                return
+            if not state._diff(Path(a.project or ""), a.base or "main",
+                               a.branch or ""):
+                r = merge.remove_task(Path(a.project or ""), a.task or "",
+                                      a.branch or "", wt, a.base or "main")
+                for s in r.steps:
+                    log.append(s)
+                for p in r.problems:
+                    log.append(f"! {p}")
+                if not r.ok:
+                    self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+            else:
+                r = merge.merge_and_cleanup(Path(a.project or ""), a.task or "",
+                                            a.branch or "", wt, a.base or "main")
+                for s in r.steps:
+                    log.append(s)
+                for p in r.problems:
+                    log.append(f"! {p}")
+                if not r.ok:
+                    self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+            self._verify_log = log
+            return
+
+        retries = self.mem.retries.get(key, 0) + 1
+        self.mem.retries[key] = retries
+        self.mem.fingerprint[key] = state.fingerprint(wt)
+        self.mem.last_fail[key] = int(time.time())
+        self.mem.injected_at[key] = int(time.time())
+        cap = a.retry_cap or 3
+
+        if retries >= cap:
+            log.append(f"{a.task} -> needs-review (retries-exhausted "
+                       f"{retries}/{cap})")
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self.mem.fingerprint.pop(key, None)
+            self._verify_log = log
+            return
+
+        if not a.session_ids:
+            log.append(f"{a.task} -> needs-review (gate failed, no session left "
+                       f"to retrigger)")
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self._verify_log = log
+            return
+
+        text = (
+            f"The `session-idle` gate failed (attempt {retries}/{cap}). "
+            f"Fix these, then continue:\n\n```\n{v.detail}\n```"
+        )
+        if not a.port:
+            log.append(f"{a.task} -> needs-review (no server to inject into)")
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self._verify_log = log
+            return
+        try:
+            prompt_async(a.port, a.session_ids[0], text)
+            log.append(f"injected failure (attempt {retries}/{cap}) into "
+                       f"session {a.session_ids[0]}")
+        except Exception as e:  # noqa: BLE001
+            log.append(f"could not inject: {e}")
+            self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+        self._verify_log = log
+
+    def _dispatch(self, a: Action) -> list[str]:
+        key = (a.project or "", a.task or "")
+        log: list[str] = []
+        if not a.start:
+            log.append(f"-> {a.task}: no base worktree to dispatch from")
+            self.mem.dispatch_backoff[key] = int(time.time()) + DISPATCH_BACKOFF_S
+            return log
+        r = dispatch.start(Path(a.start), a.task or "",
+                           model=a.model, agent=a.agent)
+        for s in r.steps:
+            log.append(s)
+        if r.ok:
+            self.mem.dispatch_backoff.pop(key, None)
+            self.mem.dispatch_error.pop(key, None)
+        else:
+            for p in r.problems:
+                log.append(f"! {p}")
+            self.mem.dispatch_backoff[key] = int(time.time()) + DISPATCH_BACKOFF_S
+            self.mem.dispatch_error[key] = (r.problems[-1] if r.problems
+                                            else "dispatch failed")
+        return log
+
+    def apply(self, actions: list[Action]) -> list[str]:
+        log: list[str] = []
+        for a in actions:
+            where = f"[{project_label(a.project)}] " if a.project else ""
+            log.append(f"{a.kind}: {where}{a.task or '-'} - {a.reason}"
+                       + (f" ({a.detail})" if a.detail else ""))
+            if self.dry_run:
+                continue
+            if a.kind == RESTART_SERVER:
+                try:
+                    info = server.restart()
+                    log.append(f"  -> restarted shared server pid={info.pid} {info.url}")
+                except (RuntimeError, TimeoutError, OSError) as e:
+                    log.append(f"  -> could not restart the shared server: {e}")
+            elif a.kind == ALERT:
+                for b in a.blocked:
+                    if b.request_id in self.mem.alerted:
+                        continue
+                    self.mem.alerted.add(b.request_id)
+                    log.append(f"  -> alert {b.request_id}: {b.kind} {b.detail} "
+                               f"(would notify)")
+            elif a.kind == NEEDS_REVIEW:
+                log.append(f"  -> {a.task} needs-review ({a.reason})")
+            elif a.kind == DISPATCH and a.project:
+                log.extend(f"  -> {l}" for l in self._dispatch(a))
+            elif a.kind == VERIFY:
+                self._verify(a)
+                log.extend(f"  -> {l}" for l in self._verify_log)
+            elif a.kind == MERGE and a.project:
+                r = merge.merge_and_cleanup(Path(a.project), a.task or "",
+                                            a.branch or "", Path(a.worktree or ""),
+                                            a.base or "main")
+                for s in r.steps:
+                    log.append(f"  -> {s}")
+                for p in r.problems:
+                    log.append(f"  -> ! {p}")
+                if not r.ok:
+                    self.mem.wait_until[(a.project, a.task or "")] = \
+                        int(time.time()) + MERGE_BACKOFF_S
+            elif a.kind == REMOVE and a.project:
+                r = merge.remove_task(Path(a.project), a.task or "",
+                                      a.branch or "", Path(a.worktree or ""),
+                                      a.base or "main")
+                for s in r.steps:
+                    log.append(f"  -> {s}")
+                for p in r.problems:
+                    log.append(f"  -> ! {p}")
+        return log
+
+    def step(self) -> list[str]:
+        return self.apply(decide(self.snapshot()))
+
+
+def run(project: str | None = None, roots: list[str] | None = None,
+        interval: float = 10.0, once: bool = False,
+        dry_run: bool = False) -> int:
+    sup = Supervisor(project=project, roots=roots, dry_run=dry_run)
+    scope = project_label(project) if project else "every discovered project"
+    print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
+    try:
+        while True:
+            for line in sup.step():
+                print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
+            if once:
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
 
 
 def source_fingerprint() -> str:
@@ -67,345 +478,11 @@ def source_fingerprint() -> str:
     return h.hexdigest()[:12]
 
 
-def project_label(project: str) -> str:
-    p = Path(project)
-    return p.parent.name if p.name == ".git" else p.name
-
-
-def stop_reason(outcome: str | None) -> str:
-    if outcome == "running":
-        return GATE_IN_FLIGHT
-    if outcome == "passed":
-        return FINISHED_COMPLETE
-    if outcome == "stuck":
-        return FINISHED_GAVE_UP
-    if outcome in ("failed", "gate-modified"):
-        return STILL_RETRYING
-    return NEVER_GATED
-
-
-def decide(snap: Snapshot) -> list[Action]:
-    actions: list[Action] = []
-
-    if not snap.server_running or snap.server_unresponsive:
-        why = ("is not running" if not snap.server_running
-               else "is alive but answers nothing")
-        actions.append(Action(
-            RESTART_SERVER, None,
-            f"the shared server {why}",
-            "every dispatched task lives inside this one process, so its death "
-            "takes them all with it",
-        ))
-        for t in snap.tasks:
-            if t.status != RUNNING:
-                continue
-            actions.append(Action(
-                NEEDS_REVIEW, t.name,
-                "the shared server died while this task was running",
-                "its worktree may hold partial work; re-dispatch is a decision, "
-                "not a default",
-                project=t.project,
-            ))
-        return actions
-
-    for t in snap.tasks:
-        if t.status != RUNNING:
-            continue
-
-        fact = snap.facts.get(t.worktree or "")
-        alive = snap.dispatch_alive.get(t.pid or -1, False)
-        quiet = snap.quiet_for.get(t.worktree or "", 0)
-
-        if fact is not None and fact.needs_human:
-            for b in fact.blocked:
-                actions.append(Action(
-                    ALERT, t.name,
-                    f"blocked on {b.kind}",
-                    f"{b.detail} [{b.request_id}]",
-                    project=t.project,
-                ))
-            actions.append(Action(RENEW, t.name, "blocked but alive",
-                                  project=t.project))
-            if quiet > BUDGET_BLOCKED_S:
-                actions.append(Action(
-                    NOTE, t.name,
-                    f"waiting on a human for {quiet}s",
-                    "nothing will happen until it is answered",
-                    project=t.project,
-                ))
-            continue
-
-        if fact is not None and fact.state == observe.BUSY:
-            actions.append(Action(RENEW, t.name, "session is busy",
-                                  project=t.project))
-            if quiet > BUDGET_BUSY_S:
-                actions.append(Action(
-                    NOTE, t.name,
-                    f"busy but unchanged for {quiet}s",
-                    "may be looping; a static todo list plus rising cost is the tell",
-                    project=t.project,
-                ))
-            continue
-
-        if alive:
-            actions.append(Action(RENEW, t.name, "dispatch process is alive",
-                                  project=t.project))
-            continue
-
-        if fact is not None and fact.state == observe.IDLE:
-            why = stop_reason(snap.router_outcome.get(t.worktree or ""))
-
-            if why == STILL_RETRYING:
-                actions.append(Action(RENEW, t.name, why, project=t.project))
-                if quiet > BUDGET_IDLE_S:
-                    actions.append(Action(
-                        NEEDS_REVIEW, t.name,
-                        f"stopped mid-retry and idle for {quiet}s",
-                        "the gate failed and nothing drove it back to work - the "
-                        "prompt injection or the router itself has stopped working",
-                        project=t.project,
-                    ))
-                continue
-
-            if why == GATE_IN_FLIGHT:
-                actions.append(Action(RENEW, t.name, why, project=t.project))
-                if quiet > BUDGET_GATE_S:
-                    actions.append(Action(
-                        NEEDS_REVIEW, t.name,
-                        f"a gate has been running for {quiet}s",
-                        "past the gate's own timeout, so the run itself is wedged or "
-                        "the server hosting it died mid-check",
-                        project=t.project,
-                    ))
-                continue
-
-            if why == NEVER_GATED:
-                if quiet <= GRACE_UNGATED_S:
-                    actions.append(Action(
-                        RENEW, t.name,
-                        f"no in-loop verdict yet, {quiet}s into the grace period",
-                        project=t.project,
-                    ))
-                    continue
-                actions.append(Action(
-                    NEEDS_REVIEW, t.name, why,
-                    f"no in-loop verdict after {quiet}s, so the router did not fire "
-                    f"here: check that it is installed and the gate is committed",
-                    project=t.project,
-                ))
-                continue
-
-            actions.append(Action(
-                VERIFY, t.name, why,
-                "verified out-of-loop on purpose: a verdict from the router would be "
-                "the agent's own report",
-                project=t.project,
-            ))
-            continue
-
-        if fact is None:
-            expired = (t.lease_until is not None and t.lease_until < snap.now)
-            if expired:
-                actions.append(Action(
-                    RECLAIM, t.name,
-                    "definitely dead: lease expired, dispatch gone, no session",
-                    project=t.project,
-                ))
-            else:
-                actions.append(Action(
-                    NOTE, t.name,
-                    "dispatch exited and no session is visible, but the lease is "
-                    "still valid",
-                    "waiting for the lease to lapse before reclaiming - an expired "
-                    "lease alone is not proof of death",
-                    project=t.project,
-                ))
-            continue
-
-        actions.append(Action(RENEW, t.name, f"state {fact.state}",
-                              project=t.project))
-
-    for t in snap.done_tasks:
-        actions.append(Action(
-            MERGE, t.name,
-            "done: merge into base and clean up",
-            project=t.project,
-        ))
-
-    return actions
-
-
-class Supervisor:
-    def __init__(self, project: str | None = None, store: Store | None = None,
-                 dry_run: bool = False) -> None:
-        self.project = project
-        self.store = store or Store()
-        self.dry_run = dry_run
-        self._last_state: dict[str, tuple[str, int]] = {}
-
-    def snapshot(self) -> Snapshot:
-        st = server.status()
-        tasks_all = self.store.tasks(self.project, status=RUNNING)
-        done_tasks = self.store.tasks(self.project, status=DONE)
-
-        by_worktree: dict[str, observe.TaskFact] = {}
-        port = st.get("port") if st.get("running") and not st.get("unresponsive") else None
-        if port:
-            for t in tasks_all:
-                if not t.worktree:
-                    continue
-                tf = observe.look_task(int(port), t.worktree)
-                if tf is not None:
-                    by_worktree[t.worktree] = tf
-
-        now = int(time.time())
-        quiet: dict[str, int] = {}
-        for wt, f in by_worktree.items():
-            prev = self._last_state.get(wt)
-            if prev is None or prev[0] != f.state:
-                self._last_state[wt] = (f.state, now)
-                quiet[wt] = 0
-            else:
-                quiet[wt] = now - prev[1]
-
-        alive = {
-            t.pid: server.pid_alive(t.pid)
-            for t in tasks_all if t.pid
-        }
-
-        router: dict[str, str | None] = {}
-        for t in tasks_all:
-            if not t.worktree:
-                continue
-            row = self.store.last_verdict(t.project, t.name, source="router")
-            router[t.worktree] = row["outcome"] if row else None
-
-        return Snapshot(
-            now=now,
-            server_running=bool(st.get("running")),
-            server_unresponsive=bool(st.get("unresponsive")),
-            tasks=tasks_all,
-            facts=by_worktree,
-            dispatch_alive=alive,
-            quiet_for=quiet,
-            router_outcome=router,
-            done_tasks=done_tasks,
-        )
-
-    def apply(self, actions: list[Action]) -> list[str]:
-        log: list[str] = []
-        for a in actions:
-            where = f"[{project_label(a.project)}] " if a.project else ""
-            log.append(f"{a.kind}: {where}{a.task or '-'} - {a.reason}"
-                       + (f" ({a.detail})" if a.detail else ""))
-            if self.dry_run:
-                continue
-            proj = a.project or self.project
-            if a.kind == RENEW and a.task and proj:
-                self.store.renew(proj, a.task)
-            elif a.kind == RECLAIM and a.task and proj:
-                self.store.reclaim(proj, a.task, a.reason)
-            elif a.kind == NEEDS_REVIEW and a.task and proj:
-                self.store.finish(proj, a.task, "needs-review", a.reason)
-            elif a.kind == ALERT and a.task:
-                rid = a.detail.rsplit("[", 1)[-1].rstrip("]") if "[" in a.detail else a.detail
-                if self.store.note_alert(rid, "", a.task, a.reason, a.detail):
-                    log.append(f"  -> new alert {rid} (would notify)")
-            elif a.kind == VERIFY and a.task and proj:
-                for line in self.verify(a.task, project=proj, why=a.reason):
-                    log.append(f"  -> {line}")
-            elif a.kind == MERGE and a.task and proj:
-                r = merge.merge_and_cleanup(self.store, proj, a.task)
-                for s in r.steps:
-                    log.append(f"  -> {s}")
-                for p in r.problems:
-                    log.append(f"  -> ! {p}")
-            elif a.kind == RESTART_SERVER:
-                try:
-                    info = server.restart()
-                    log.append(f"  -> restarted shared server pid={info.pid} {info.url}")
-                except (RuntimeError, TimeoutError, OSError) as e:
-                    log.append(f"  -> could not restart the shared server: {e}")
-        return log
-
-    def verify(self, name: str, event: str = "session-idle",
-               project: str | None = None, why: str = "") -> list[str]:
-        proj = project or self.project
-        if not proj:
-            return [f"cannot verify {name}: no project given"]
-        t = self.store.get(proj, name)
-        if t is None or not t.worktree:
-            return [f"cannot verify {name}: no recorded worktree"]
-        wt = Path(t.worktree)
-        if not wt.exists():
-            self.store.finish(proj, name, ST_NEEDS_REVIEW,
-                              "worktree is gone")
-            return [f"worktree {wt} no longer exists -> needs-review"]
-
-        v = gate.run(wt, event)
-        self.store.record_verdict(
-            proj, name, v.event, v.outcome, v.detail,
-            diverged=v.diverged, seconds=v.seconds, source="daemon",
-        )
-        out = [f"gate {v.summary}"]
-        if v.diverged:
-            out.append("the worktree's gate differs from the committed one; the "
-                       "committed gate ran, but review the diff")
-        if v.justifies_done and why == FINISHED_GAVE_UP:
-            self.store.finish(proj, name, ST_NEEDS_REVIEW,
-                              f"{v.event}: {v.outcome} after the cap was spent")
-            out.append(f"{name} -> needs-review (the gate passes now, but the agent "
-                       f"had already spent its retry cap - suspect flakiness)")
-        elif v.justifies_done:
-            self.store.finish(proj, name, DONE, f"{v.event}: {v.outcome}")
-            out.append(f"{name} -> done")
-        else:
-            self.store.finish(proj, name, ST_NEEDS_REVIEW,
-                              f"{v.event}: {v.outcome}")
-            reason = ("no committed gate, so nothing verified this work"
-                      if v.outcome == gate.NO_GATE else "the gate said no")
-            out.append(f"{name} -> needs-review ({reason})")
-            if v.detail:
-                out.append(v.detail.strip().splitlines()[-1][:200])
-        return out
-
-    def step(self) -> list[str]:
-        return self.apply(decide(self.snapshot()))
-
-    def close(self) -> None:
-        self.store.close()
-
-
-def run(project: str | None = None, interval: float = 10.0, once: bool = False,
-        dry_run: bool = False) -> int:
-    sup = Supervisor(project, dry_run=dry_run)
-    scope = project_label(project) if project else "all projects"
-    print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
-
-    if not dry_run:
-        try:
-            sup.store.set_meta("daemon_running_source", source_fingerprint())
-            sup.store.set_meta("daemon_started_at", str(int(time.time())))
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        while True:
-            for line in sup.step():
-                print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
-            if once:
-                return 0
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        sup.close()
-
-
 UNIT_NAME = "orch-daemon.service"
 
 UNIT = """\
 [Unit]
-Description=orch supervisor - renews leases, verifies stopped agents, restarts the shared server
+Description=orch supervisor - settles tasks, runs gates, retriggers agents, merges and archives
 Documentation=https://github.com/AceCodePt/opencode-orchestrator
 After=network-online.target
 
@@ -474,8 +551,8 @@ def install(interval: float = 10.0, enable: bool = True) -> list[str]:
 
 def uninstall(wipe_state: bool = True) -> list[str]:
     """Remove every config-level trace of orch. Never touches a project's
-    tracked `.orchestration/` or the router plugin in a project's `.opencode/`;
-    those belong to the project, and only the project removes them."""
+    tracked `.orchestration/`; that belongs to the project, and only the
+    project removes it."""
     out: list[str] = []
     path = unit_path()
 
@@ -503,18 +580,18 @@ def uninstall(wipe_state: bool = True) -> list[str]:
     else:
         out.append("no shared server running")
 
-    state = server.state_dir()
-    if wipe_state and state.exists():
+    state_dir = server.state_dir()
+    if wipe_state and state_dir.exists():
         import shutil
 
-        shutil.rmtree(state)
-        out.append(f"removed state {state}")
-    elif state.exists():
-        out.append(f"kept state {state} (--keep-state)")
+        shutil.rmtree(state_dir)
+        out.append(f"removed state {state_dir}")
+    elif state_dir.exists():
+        out.append(f"kept state {state_dir} (--keep-state)")
     else:
         out.append("no state to remove")
 
-    out.append("left every project's .orchestration/ and router plugin alone")
+    out.append("left every project's .orchestration/ alone")
     return out
 
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate
-from .store import DONE, MERGED, NEEDS_REVIEW, Store
+from . import dispatch, gate, state
+
+TASKS_REL = "tasks"
+ARCHIVE_REL = "archive"
 
 
 @dataclass
@@ -34,26 +38,9 @@ def _git(cwd: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
         return 1, str(e)
 
 
-def _find_base_worktree(bare: Path, base: str) -> Path | None:
-    code, out = _git(bare, "worktree", "list", "--porcelain")
-    if code != 0:
-        return None
-    wt: str | None = None
-    for line in out.splitlines():
-        if line.startswith("worktree "):
-            wt = line.split(" ", 1)[1]
-        elif line.startswith("branch "):
-            ref = line.split(" ", 1)[1]
-            name = ref.rsplit("/", 1)[-1]
-            if name == base and wt:
-                return Path(wt)
-    return None
-
-
-def _hook_env(task_name: str, branch: str, worktree: Path,
-              base: str) -> dict[str, str]:
+def _hook_env(name: str, branch: str, worktree: Path, base: str) -> dict[str, str]:
     return {
-        "TASK_NAME": task_name,
+        "TASK_NAME": name,
         "BRANCH_NAME": branch,
         "WORKTREE_PATH": str(worktree),
         "WORKTREE_NAME": worktree.name,
@@ -61,94 +48,183 @@ def _hook_env(task_name: str, branch: str, worktree: Path,
     }
 
 
+def _kill_dispatch(worktree: Path) -> None:
+    pid = state.dispatch_pid(str(worktree))
+    if pid is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if state.dispatch_pid(str(worktree)) is None:
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:
+    steps: list[str] = []
+    src = Path(TASKS_REL) / name / "task.md"
+    if not (base_wt / src).exists():
+        steps.append(f"nothing to archive: {src} is not on {base}")
+        return steps
+    dest = Path(ARCHIVE_REL) / name / "task.md"
+    (base_wt / dest).parent.mkdir(parents=True, exist_ok=True)
+    code, out = _git(base_wt, "mv", str(src), str(dest))
+    if code != 0:
+        steps.append(f"archive mv failed: {out[:200]}")
+        return steps
+    code, out = _git(base_wt, "commit", "-q",
+                     "-m", f"orch: archive {name}")
+    if code != 0:
+        steps.append(f"archive commit failed: {out[:200]}")
+        return steps
+    empty = base_wt / Path(TASKS_REL) / name
+    try:
+        empty.rmdir()
+    except OSError:
+        pass
+    steps.append(f"archived {TASKS_REL}/{name} -> {ARCHIVE_REL}/{name}")
+    return steps
+
+
+def _remove_worktree_and_branch(
+    common: Path, base_wt: Path, name: str, branch: str, worktree: Path,
+    base: str, r: MergeResult, force_delete: bool = False,
+) -> None:
+    _kill_dispatch(worktree)
+    env = _hook_env(name, branch, worktree, base)
+
+    ok, msg = dispatch.run_hook(worktree, "pre-task-cleanup", env)
+    r.step(msg)
+    if not ok:
+        r.fail("pre-task-cleanup blocked the cleanup; worktree survives")
+        return
+
+    code, out = _git(common, "worktree", "remove", str(worktree))
+    if code != 0:
+        code, out = _git(common, "worktree", "remove", "--force", str(worktree))
+    if code != 0:
+        r.fail(f"could not remove worktree {worktree}: {out[:300]}")
+        return
+    r.step(f"removed worktree {worktree}")
+
+    env["WORKTREE_PATH"] = str(worktree)
+    ok, msg = dispatch.run_hook(base_wt, "pre-branch-delete", env)
+    r.step(msg)
+    if not ok:
+        r.fail(f"pre-branch-delete blocked; branch {branch} survives")
+        return
+
+    flag = "-D" if force_delete else "-d"
+    code, out = _git(base_wt, "branch", flag, branch)
+    if code != 0:
+        r.fail(f"could not delete branch {branch}: {out[:300]}")
+        return
+    r.step(f"deleted branch {branch}")
+
+    _git(common, "worktree", "prune")
+    dispatch.run_hook(base_wt, "post-task-cleanup", env)
+
+
 def merge_and_cleanup(
-    store: Store,
-    project: str,
+    common: Path,
     name: str,
+    branch: str,
+    worktree: Path,
+    base: str = "main",
 ) -> MergeResult:
     r = MergeResult()
-    t = store.get(project, name)
-    if t is None:
-        r.fail(f"no task {name} in {project}")
-        return r
-    if t.status == MERGED:
-        r.step(f"{name} already merged")
-        return r
-    if t.status not in (DONE, NEEDS_REVIEW):
-        r.fail(f"{name} is {t.status}, not done or needs-review")
-        return r
-    if not t.worktree or not t.branch:
-        r.fail(f"{name} has no recorded worktree or branch")
-        return r
-
-    wt = Path(t.worktree)
-    bare = Path(project)
-    base = gate.base_branch(wt) if wt.exists() else "main"
-
-    base_wt = _find_base_worktree(bare, base)
+    wt = Path(worktree)
+    base_wt = state._base_worktree(common, base)
     if base_wt is None:
-        r.fail(f"no worktree on {base} found in {bare}; cannot merge without one")
+        r.fail(f"no worktree on {base} found in {common}; cannot merge without one")
         return r
     r.step(f"base worktree: {base_wt} on {base}")
 
-    code, out = _git(wt, "add", "-A")
-    code, status = _git(wt, "status", "--porcelain")
-    if status:
-        code, out = _git(wt, "commit", "-q",
-                        "-m", f"work for {name} (committed by orch)")
-        if code != 0:
-            r.fail(f"could not commit uncommitted work in {wt}: {out[:300]}")
-            return r
-        r.step(f"committed uncommitted work on {t.branch}")
-        code, out = _git(wt, "push", "origin", f"{t.branch}:{t.branch}")
-        if code != 0:
-            pass
+    if not wt.exists():
+        r.fail(f"worktree {wt} no longer exists")
+        return r
+    if state._dirty(wt):
+        r.fail(f"worktree {wt} has uncommitted work; only a committed, diffing "
+               f"branch is merged. The gate must have passed and committed.")
+        return r
 
-    code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", t.branch)
+    code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", branch)
     if code != 0:
         _git(base_wt, "merge", "--abort")
-        store.finish(project, name, NEEDS_REVIEW,
-                     f"merge conflict: {out[-200:]}")
         r.fail(f"merge failed: {out[-1500:]}")
-        r.fail(f"the branch {t.branch} was NOT merged and the worktree survives")
-        r.fail(f"{name} -> needs-review (resolve the conflict and run "
-               f"`orch task merge {name}`)")
+        r.fail(f"the branch {branch} was NOT merged and the worktree survives. "
+               f"Resolve the conflict, then `orch task merge {name}`.")
         return r
-    r.step(f"merged {t.branch} into {base}")
+    r.step(f"merged {branch} into {base}")
 
-    env = _hook_env(name, t.branch, wt, base)
-    ok, msg = dispatch.run_hook(wt, "pre-task-cleanup", env)
-    r.step(msg)
-    if not ok:
-        r.fail(f"pre-task-cleanup blocked the cleanup; worktree survives")
+    _remove_worktree_and_branch(common, base_wt, name, branch, wt, base, r)
+    if not r.ok:
         return r
 
-    code, out = _git(bare, "worktree", "remove", str(wt))
-    if code != 0:
-        r.step(f"worktree remove failed, trying --force: {out[:200]}")
-        code, out = _git(bare, "worktree", "remove", "--force", str(wt))
+    for s in _archive(common, base_wt, name, base):
+        r.step(s)
+    r.step(f"{name} -> merged and archived")
+    return r
+
+
+def reset_task(
+    common: Path,
+    name: str,
+    branch: str,
+    worktree: Path,
+    base: str = "main",
+) -> MergeResult:
+    """Return a claimed task to `todo`: delete the worktree and branch, keep
+    the spec in tasks/. A deliberate human action - the branch may hold work."""
+    r = MergeResult()
+    wt = Path(worktree)
+    base_wt = state._base_worktree(common, base)
+    if base_wt is None:
+        r.fail(f"no worktree on {base} found in {common}; cannot reset without one")
+        return r
+    _kill_dispatch(wt)
+    code, out = _git(common, "worktree", "remove", "--force", str(wt))
     if code != 0:
         r.fail(f"could not remove worktree {wt}: {out[:300]}")
         return r
     r.step(f"removed worktree {wt}")
-
-    env["WORKTREE_PATH"] = str(wt)
-    ok, msg = dispatch.run_hook(base_wt, "pre-branch-delete", env)
-    r.step(msg)
-    if not ok:
-        r.fail(f"pre-branch-delete blocked; branch {t.branch} survives")
-        return r
-
-    code, out = _git(base_wt, "branch", "-d", t.branch)
+    code, out = _git(base_wt, "branch", "-D", branch)
     if code != 0:
-        r.fail(f"could not delete branch {t.branch}: {out[:300]}")
+        r.fail(f"could not delete branch {branch}: {out[:300]}")
         return r
-    r.step(f"deleted branch {t.branch}")
+    r.step(f"deleted branch {branch}")
+    _git(common, "worktree", "prune")
+    return r
 
-    ok, msg = dispatch.run_hook(base_wt, "post-task-cleanup", env)
-    r.step(msg)
 
-    store.finish(project, name, MERGED,
-                 f"merged {t.branch} into {base}, worktree + branch cleaned up")
-    r.step(f"{name} -> merged")
+def remove_task(
+    common: Path,
+    name: str,
+    branch: str,
+    worktree: Path,
+    base: str = "main",
+) -> MergeResult:
+    r = MergeResult()
+    wt = Path(worktree)
+    base_wt = state._base_worktree(common, base)
+    if base_wt is None:
+        r.fail(f"no worktree on {base} found in {common}; cannot clean up without one")
+        return r
+    r.step(f"base worktree: {base_wt} on {base}")
+
+    _remove_worktree_and_branch(common, base_wt, name, branch, wt, base, r,
+                                force_delete=True)
+    if not r.ok:
+        return r
+
+    for s in _archive(common, base_wt, name, base):
+        r.step(s)
+    r.step(f"{name} -> removed (nothing to merge) and archived")
     return r

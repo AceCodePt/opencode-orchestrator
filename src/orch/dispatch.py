@@ -3,12 +3,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gate, server
-from .store import Store
 
 HOOK_PRE = "pre-task-create"
 HOOK_POST = "post-task-create"
@@ -73,6 +71,11 @@ def project_of(start: Path) -> tuple[Path | None, Path | None, str | None]:
     if code != 0 or not common:
         return Path(top), Path(top), None
     return Path(top), Path(common), None
+
+
+def branch_exists(project: Path, branch: str) -> bool:
+    code, _ = _git(project, "show-ref", "--verify", "-q", f"refs/heads/{branch}")
+    return code == 0
 
 
 def plan(
@@ -244,7 +247,7 @@ def dispatch_command(p: Plan, url: str, json_stream: bool = True) -> list[str]:
         cmd += ["-m", p.model]
     if p.agent:
         cmd += ["--agent", p.agent]
-    cmd += ["--title", p.task, p.prompt]
+    cmd += ["--title", f"orch:{p.task}", p.prompt]
     return cmd
 
 
@@ -264,7 +267,6 @@ def start(
     worktree: Path | None = None,
     dry_run: bool = False,
     allow_ungated: bool = False,
-    store: Store | None = None,
 ) -> Result:
     result = Result(ok=True)
 
@@ -276,6 +278,13 @@ def start(
     result.worktree = p.worktree
     result.step(f"task {p.task} -> {p.worktree} (branch {p.branch}, base {p.base})")
 
+    if branch_exists(Path(p.project), p.branch):
+        return result.fail(
+            f"{p.task} is already claimed: branch {p.branch} exists in {p.project}. "
+            f"A branch is the claim. Use `orch observe` to see it, or `orch task "
+            f"reset` after confirming it is dead."
+        )
+
     if dry_run:
         srv = server.current()
         url = srv.url if srv else "<no server running>"
@@ -283,121 +292,73 @@ def start(
         result.step("would run: " + " ".join(dispatch_command(p, url)))
         return result
 
-    own_store = store is None
-    st = store or Store()
-    try:
-        declared = task_names(p.dispatcher)
-        if p.task not in declared:
-            declared.append(p.task)
-        st.sync_intent(p.project, declared)
+    env = {
+        "TASK_NAME": p.task,
+        "BRANCH_NAME": p.branch,
+        "WORKTREE_PATH": str(p.worktree),
+        "WORKTREE_NAME": p.worktree.name,
+        "BASE_BRANCH": p.base,
+    }
 
-        claimed = st.claim(p.project, p.task)
-        if claimed is None:
-            existing = st.get(p.project, p.task)
-            if existing is None:
-                return result.fail(
-                    f"{p.task} is not registered and could not be created. That "
-                    f"should not happen - the store is probably not writable."
-                )
-            if existing.status == "running":
-                held = (
-                    f", lease expires in {existing.lease_until - int(time.time())}s"
-                    if existing.lease_until else ""
-                )
-                return result.fail(
-                    f"{p.task} is already running (pid={existing.pid or '?'}{held}). "
-                    f"Use `orch observe` to see it; reclaiming needs proof it is "
-                    f"dead, not just an expired lease."
-                )
-            return result.fail(
-                f"{p.task} is {existing.status}, so there is nothing to claim. "
-                f"Last outcome: {existing.status}."
-            )
-        result.step(f"claimed {p.task}")
+    ok, msg = run_hook(p.dispatcher, HOOK_PRE, env)
+    result.step(f"pre-create: {msg}")
+    if not ok:
+        return result.fail(msg)
 
-        env = {
-            "TASK_NAME": p.task,
-            "BRANCH_NAME": p.branch,
-            "WORKTREE_PATH": str(p.worktree),
-            "WORKTREE_NAME": p.worktree.name,
-            "BASE_BRANCH": p.base,
-        }
-
-        ok, msg = run_hook(p.dispatcher, HOOK_PRE, env)
-        result.step(f"pre-create: {msg}")
-        if not ok:
-            st.reclaim(p.project, p.task, f"pre-create hook: {msg}")
-            return result.fail(msg)
-
-        if not create_worktree(p, result):
-            st.reclaim(p.project, p.task, "worktree creation failed")
-            return result
-
-        ok, msg = run_hook(p.worktree, HOOK_POST, env)
-        result.step(f"post-create: {msg}")
-        if not ok:
-            st.finish(p.project, p.task, "failed", f"post-create hook: {msg}")
-            return result.fail(msg)
-
-        findings = gate.inspect(p.worktree, p.base)
-        for f in findings:
-            result.step(f"gate {f.name}: {f.state} - {f.detail}")
-
-        reason = None
-        if not findings:
-            reason = (
-                f"no gate is committed on {p.base}, so nothing would verify this "
-                f"task. Commit {gate.HOOKS_REL}/session-idle first."
-            )
-        elif gate.blocking(findings):
-            reason = "this task would run ungated:\n" + "\n".join(
-                f"      - {f.name} ({f.state}): {f.detail}"
-                for f in gate.blocking(findings)
-            )
-        if reason and not allow_ungated:
-            st.reclaim(p.project, p.task, "refused: ungated")
-            return result.fail(reason + " Pass --allow-ungated to dispatch anyway.")
-        if reason:
-            result.step(f"WARNING, dispatching ungated on request: {reason}")
-
-        try:
-            srv = server.start()
-        except (RuntimeError, TimeoutError, OSError) as e:
-            st.reclaim(p.project, p.task, "no shared server")
-            return result.fail(f"could not start the shared server: {e}")
-        result.step(f"shared server pid={srv.pid} {srv.url}")
-        result.url = srv.url
-
-        cmd = dispatch_command(p, srv.url)
-        out = log_path(p)
-        handle = open(out, "wb", buffering=0)
-        try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(p.worktree), stdout=handle,
-                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as e:
-            handle.close()
-            st.reclaim(p.project, p.task, "dispatch failed to spawn")
-            return result.fail(f"could not spawn opencode run: {e}")
-        finally:
-            handle.close()
-
-        result.pid = proc.pid
-        st.record_launch(p.project, p.task, worktree=str(p.worktree),
-                         branch=p.branch, port=srv.port, pid=proc.pid)
-        result.step(f"dispatched pid={proc.pid}, events -> {out}")
-        result.step(
-            "completion is NOT this process exiting: the session can keep working "
-            "after it returns. Watch `orch observe`."
-        )
+    if not create_worktree(p, result):
         return result
+
+    ok, msg = run_hook(p.worktree, HOOK_POST, env)
+    result.step(f"post-create: {msg}")
+    if not ok:
+        return result.fail(msg)
+
+    findings = gate.inspect(p.worktree, p.base)
+    for f in findings:
+        result.step(f"gate {f.name}: {f.state} - {f.detail}")
+
+    reason = None
+    if not findings:
+        reason = (
+            f"no gate is committed on {p.base}, so nothing would verify this "
+            f"task. Commit {gate.HOOKS_REL}/session-idle first."
+        )
+    elif gate.blocking(findings):
+        reason = "this task would run ungated:\n" + "\n".join(
+            f"      - {f.name} ({f.state}): {f.detail}"
+            for f in gate.blocking(findings)
+        )
+    if reason and not allow_ungated:
+        return result.fail(reason + " Pass --allow-ungated to dispatch anyway.")
+    if reason:
+        result.step(f"WARNING, dispatching ungated on request: {reason}")
+
+    try:
+        srv = server.start()
+    except (RuntimeError, TimeoutError, OSError) as e:
+        return result.fail(f"could not start the shared server: {e}")
+    result.step(f"shared server pid={srv.pid} {srv.url}")
+    result.url = srv.url
+
+    cmd = dispatch_command(p, srv.url)
+    out = log_path(p)
+    handle = open(out, "wb", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(p.worktree), stdout=handle,
+            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        handle.close()
+        return result.fail(f"could not spawn opencode run: {e}")
     finally:
-        if own_store:
-            st.close()
+        handle.close()
 
-
-def poll_once(seconds: float = 0.0) -> None:
-    if seconds > 0:
-        time.sleep(seconds)
+    result.pid = proc.pid
+    result.step(f"dispatched pid={proc.pid}, events -> {out}")
+    result.step(
+        "completion is NOT this process exiting: the daemon settles on a clean, "
+        "committed, diffing branch. Watch `orch observe`."
+    )
+    return result

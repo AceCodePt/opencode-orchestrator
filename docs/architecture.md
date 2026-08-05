@@ -4,818 +4,313 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Harness** | opencode. Supplies the TUI, agents, sessions, HTTP API, plugin API, event bus. |
-| **Project** | A bare git repo plus worktrees. Owns its own code, checks, database, env. |
+| **Harness** | opencode. Supplies the TUI, agents, sessions, HTTP API, event bus. |
+| **Project** | A git repo (bare + worktrees, or plain). Owns its own code, checks, config. |
 | **Task** | A unit of work with a spec, dispatched into its own worktree with its own agent. |
 | **`orch`** | The global tool: one CLI and one daemon per machine. |
 | **`.orchestration/`** | Per-project, tracked, project-specific hooks and config. |
-| **Router plugin** | Installed into a project's `.opencode/` by `orch init`. Turns harness events into hook invocations. |
 
-Three words that are easy to use interchangeably and must not be:
+**The repo is the state.** Task management — which tasks exist, their status, their
+ordering — is derived from the project's own git repository, never stored anywhere
+else. Runtime facts — what is running right now — are read live from `/proc`, `ss`,
+and the shared server. There is no database, no cache, no registry, no generated
+backlog file. Nothing can drift because there is nothing to drift from.
 
-| Term | Means | Established by |
-| --- | --- | --- |
-| **stopped** | The session is idle and its dispatch has exited. | Observation. Says nothing about the work. |
-| **finished** | Stopped, **and the in-loop gate loop has terminated.** Nothing further will happen on its own. | The router's last outcome: `passed`, or the retry cap spent. |
-| **done** | Finished, and a gate the daemon ran itself passed. | The daemon, out-of-loop. |
-| **merged** | Done, and the branch was folded into base, worktree + branch removed. | The daemon, automatically after `done`. |
-
-`finished` is a property of the **loop**, not of the agent's opinion, and that is what
-makes it observable. Going idle is what *fires* the gate; a failing gate injects a
-prompt and the session becomes busy again. So an agent only stays stopped once the loop
-can no longer move it:
-
-| Router's last word | Meaning | Daemon does |
-| --- | --- | --- |
-| `passed` | finished — the loop settled on a pass | run its own gate; `passed` → **done** |
-| `stuck` | finished — retry cap spent, the agent gave up | run its own gate, but never `done` |
-| `failed` | **not** finished — a moment between attempts | renew; escalate if it stays idle past the budget |
-| nothing recorded | **not** finished — no gate ever fired here | `needs-review`, and do not verify |
-
-### Task lifecycle
-
-```
-todo  ->  running  ->  done  ->  merged
-                     ->  needs-review
-                     ->  stuck
-```
-
-`done` means the daemon ran the committed gate itself and it passed. `merged`
-means the branch was folded into base and the worktree + branch were removed.
-The daemon does this automatically on its next loop after `done`; the merge is
-`--no-ff` so the task's commits land as a distinct merge commit, and a conflict
-leaves everything in place for a human to resolve. `orch task merge <name>`
-re-runs the merge manually after a conflict.
-
-Two consequences worth stating, because both were wrong before.
-
-**No in-loop verdict means no verification.** If nothing gated the work while the agent
-was there, one lucky out-of-loop run must not stand in for the gate that never ran.
-That is the silent case found earlier: a worktree created before the router was
-committed, where the gate was valid and simply never fired. Verified — a task whose
-work was genuinely correct, and whose gate does pass on demand, still lands on
-`needs-review` once its in-loop verdicts are absent.
-
-**A pass after the cap was spent is not `done`.** A suite that failed to the cap and
-then passes untouched has not earned confidence; it has raised a question about
-flakiness. The gate is still run and recorded, because the evidence is worth having.
-
-What this still does not establish is **completeness**. A gate answers "is this broken",
-not "is this the task", so an agent that did a fifth of the work and left a green suite
-behind will pass. Closing that is a matter of what a project's gate checks — project
-knowledge, not infrastructure — and it is the reason `done` means "checked and passed",
-never "the task was accomplished".
-
-## The criterion
-
-Every "where does this go" question is answered by one rule:
-
-> `.orchestration/` holds what **only this project** knows.
-> `orch` holds what **every project does identically**.
-
-Applied: creating a worktree, pruning stale ones, starting tmux, launching the TUI
-with a port, writing a lease — identical everywhere, so global. Creating a
-Postgres database named `reeeally_*`, rewriting `.env.local.web`, checking a
-docker container, knowing that `pnpm check && pnpm test` is what "verify" means —
-project knowledge, so `.orchestration/`.
-
-## Separation of concerns
-
-**Headless, not TUI.** Agents run as one shared `opencode serve`; tasks are
-dispatched into it with `--dir`. The TUI is demoted to an optional *viewer* you
-launch with `opencode attach <url>` when you want to look, and close without
-affecting the agent. This deleted three problems rather than solving them:
-discovery, the `--port` contract, and the entire `unobservable` state.
-
-```
-                         ┌──────────────────────────────┐
-   phone / tailnet ─────│  orchestrator daemon         │
-                         │  policy + authority + server │
-                         └───────┬──────────────┬───────┘
-                                 │ facts        │ actions
-                         ┌───────▼──────┐       │  approve / deny
-                         │   observer   │       │  abort / reclaim
-                         │  read-only   │       │
-                         └───────┬──────┘       │
-                                 │ HTTP + SSE   │
-   ┌────────────────────────────▼──────────────▼────────────────────┐
-   │  ONE `opencode serve` per machine (headless, always a port)    │
-   │  per-directory: loads each worktree's own .opencode/ plugins   │
-   └───────────────────────────────┬────────────────────────────────┘
-                                   │ events → hooks
-                         ┌──────────▼───────────┐
-                         │  .orchestration/     │  project knowledge
-                         │  hooks/<event-name>  │
-                         └──────────────────────┘
-
-   dispatch  ── `opencode run --attach URL --dir <worktree> --format json`
-   viewing   ── `opencode attach URL`  (ephemeral, optional, stateless)
-   SQLite    ── runtime truth (claims, leases, pids, retries, alert state)
-   git       ── intent truth (TASKS.md, tasks/*/task.md)
-```
-
-One shared server is viable because plugin loading is **per-directory and lazy**:
-verified by starting a server in one directory and creating a session in another,
-whereupon the second directory's plugin was imported and its factory received
-`directory`/`worktree` pointing at that second directory. So each worktree still
-runs its own hooks, from one 362 MB process instead of 947 MB per task.
-
-The cost is a single failure domain: if that server dies, every running task dies
-with it. The daemon must therefore treat server death as a first-class event and
-re-dispatch from leases, which it can already do because leases are in SQLite.
-
-### 1. Observer — sensing only
-
-Discovers and reads. Holds no policy and takes no action.
-
-- **No discovery needed for orchestrated agents.** The daemon spawns the server,
-  so it *knows* the port; `serve` also announces it on stdout
-  (`opencode server listening on http://127.0.0.1:35283`). Scanning with
-  `ss -ltnp` remains only to spot **stray hand-started TUIs**, which is a
-  courtesy, not a mechanism.
-- **Reads:** `/session/status` (`{}` = idle, populated = busy), `/permission`,
-  `/question`, `/session?directory=…`, and the `/event` SSE stream.
-- **The unit of observation is a session, not a process.** This changed with
-  headless and it is easy to miss: one shared server has a single cwd and hosts many
-  sessions in many directories, so a per-process view can never say which *task* is
-  busy. `GET /session` is also global rather than per-server — it returned 33
-  sessions spanning directories going back days — so `?directory=<worktree>` is the
-  only usable join from a task to its state. Subagents are excluded via `parentID`:
-  a child going idle is not the task finishing.
-- **Emits facts, not verdicts:** "session X busy since T", "blocked on
-  `per_fcd9…` (`external_directory`, `/tmp/opencode/*`)", "tmux alive, port
-  unreachable".
-- **Runs standalone** as `orch observe`. When the daemon is the broken thing, this
-  is the only way to see anything.
-- **Writes nothing. Ever.** No authority, so it can never make a bad situation
-  worse.
-
-Do not use `/api/session/active` or `/api/permission/request` — both returned
-empty against a session that was demonstrably busy and blocked. Use the
-unprefixed routes. Avoid `/experimental/*`; it is unstable by name and its
-worktree list has already drifted from `git worktree list`.
-
-### 2. Orchestrator daemon — policy and authority
-
-Consumes observer facts, decides, and is the only component permitted to act.
-
-- **Policy:** per-state silence budgets, retry caps, alert dedup by permission id,
-  burst coalescing, concurrency limits.
-- **Authority:** approve/deny permissions, `POST /session/{id}/abort`, kill a
-  **recorded pid**, reclaim an expired lease.
-
-  Kill by pid, never by pattern. `pkill -f 'opencode serve'` matches the very
-  shell that invokes it, so it kills the command mid-flight; it did exactly that
-  here, and the same pattern would have killed an unrelated live task had the
-  string matched. tmux needs no separate teardown: killing the process ends the
-  session on its own (verified — pane process killed, session gone).
-- **Verdicts:** runs the committed gate itself once a task stops, and is the only
-  component whose `passed` may write `done`.
-- **Server:** faces the phone over the tailnet. Read status *and* take action —
-  approving an approval from your phone is the point, not a bonus. Not built.
-- **Routing:** decides who learns about an outcome — parent agent, human, or
-  nobody. Not built.
-- **Stateless in memory.** Rebuilds everything on restart from SQLite plus
-  `ss -ltnp`. A crash loses nothing, including children dispatched while it was
-  down.
-
-**One per machine, under systemd, with linger.** Not one per project: there is a
-single shared server, a single database and a single set of leases per machine, so a
-per-project daemon would have to be remembered once per project and would silently
-supervise nothing for any project nobody started. Actions therefore carry their
-project, because task names are unique only within one.
-
-`orch install` writes a **user** unit — the daemon runs the same gates a human
-runs, against worktrees in a home directory, and needs no privilege beyond the account
-that owns them. Three settings are load-bearing:
-
-| Setting | Why |
+| Concept | Derived from |
 | --- | --- |
-| `Restart=always` | A supervisor that exited *cleanly* is still not supervising, and nothing else notices its absence. |
-| `KillMode=process` | The shared server and every agent are started with `start_new_session` and must survive a unit restart. Verified: restarting the unit left the server untouched. |
-| `loginctl enable-linger` | Without it a user unit starts at login and dies at logout, so an unattended reboot comes back supervising nothing — while `systemctl status` looked correct when you set it up. |
+| task declared | `git ls-tree <base> -- tasks/` |
+| task claimed | `refs/heads/<name>` exists — **the branch is the claim** |
+| worktree / branch | `git worktree list` |
+| dirty / diff | `git status --porcelain` in the worktree; `rev-list --count base..branch` |
+| session state | the shared server: `/session?directory=<worktree>` |
+| dispatch alive | `/proc` — the process whose cmdline is `opencode run … --dir <worktree>` |
+| dispatch orchestrated | `/proc` — a `opencode run … --title orch:<task> …` process: one the daemon or CLI dispatched |
+| which projects exist | a live scan of `$HOME` and `/mnt` (env `ORCH_ROOTS`) for `.orchestration/` dirs |
+| retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
 
-**A long-lived daemon holds the code it imported at startup.** Upgrading `orch` on disk
-changes nothing until the unit restarts, and until then the daemon enforces the previous
-policy while `systemctl status` says active and every log line looks normal. Observed
-here: a supervisor fourteen minutes old verified a task by the old rules minutes after
-the new ones were written. `doctor` therefore compares a hash of the running sources
-against the installed ones and **fails** on a mismatch. A version string cannot do this
-job — it stays `0.1.0` across every commit.
+## The task lifecycle
 
-The absence of a daemon is a **silent** failure, which is why `doctor` fails on it
-rather than noting it. Dispatch still works, agents still run, in-loop gates still
-fire. But no lease is renewed and no stopped agent is ever verified, so tasks sit at
-`running` forever. Everything looks healthy until you ask for a result.
+```
+todo  ->  running  ->  merged  ->  archived
+            |  \->  needs-review
+```
 
-### 3. CLI — per-invocation action
+- **todo** — `tasks/<name>/task.md` on base, no branch.
+- **running** — a branch named `<name>` exists (a live session or dispatch).
+- **needs-review** — claimed, but the loop cannot settle it green: uncommitted work,
+  a failing gate with no session left to retrigger, retries exhausted, or a missing
+  worktree. Derived from the worktree, never stored.
+- **merged** — a clean, committed, diffing branch passed the daemon's gate and was
+  folded into base. The branch and worktree are removed and the spec is **archived**
+  (`archive/<name>/task.md`) so the active backlog stays light.
+- **archived** — the spec has left `tasks/`; git history and the merge commit are the
+  record of what was done.
 
-| Command | Does |
-| --- | --- |
-| `orch init` | Install the router plugin into `.opencode/`, scaffold `.orchestration/`, write a version marker |
-| `orch task start <name…>` | Claim, create worktree, run hooks, dispatch `opencode run --attach … --dir <worktree>`, write the lease |
-| `orch observe` | Standalone observer output |
-| `orch doctor` | Verify the shared server is up, hooks are **committed** and resolve, version marker matches, list emitted events |
-| `orch upgrade` | shadcn-style diff of scaffolded files against the current template |
+## The completion signal: the worktree tells you
 
-The CLI is what agents call, via a tool. It **refuses to create an agent it
-cannot observe**: if the daemon is unreachable it fails loudly, with an explicit
-override for when you are at the keyboard. It writes the lease row regardless, so
-a daemon that dies after dispatch still reconciles on restart.
+The agent does **not** commit, and the agent does **not** decide when it is done.
+The `session-idle` hook — the project's gate — does both:
 
-### 4. Project `.orchestration/` — project knowledge
+- **Non-zero exit** → failed; the output is fed back to the agent.
+- **Zero exit** → the gate *commits the work* (`git add -A && git commit` only if
+  anything is dirty — idempotent), then passes.
 
-- `hooks/<event-name>` — executables named after **what happened**, not what to
-  do. Task lifecycle: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
-  `post-task-cleanup`, `pre-branch-delete`. Agent lifecycle: `session-idle`,
-  `session-error`, and whatever else the harness emits.
-- Config: which files matter for the diff gate, the retry cap, the base branch.
-- The project's own `TASKS.md` and `tasks/`.
+So the observable state of the worktree is the whole story when a task settles
+(session idle or gone):
 
-Two dispatchers fire hooks from one directory under one env-var contract
-(`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the **CLI** fires
-task-lifecycle events, the **router plugin** fires agent-lifecycle events.
+| Worktree state | Meaning | Daemon does |
+| --- | --- | --- |
+| dirty (untracked/staged/modified) | the gate never passed, so nothing was committed | run the gate → retrigger or `needs-review` |
+| clean + diff vs base | the gate passed and committed | run the gate → **merge + archive + teardown** |
+| clean + identical to base | nothing was produced | **remove + archive** (no gate needed) |
 
-Consequence of naming hooks after harness events: the vocabulary is versioned with
-opencode. Accepted — harness independence is explicitly not a goal.
+## The loop lives in the daemon
+
+There is no router plugin. The daemon owns the whole loop — it is the component that
+observes, decides, verifies, retriggers, merges, and archives. `decide()` is a pure
+function of a snapshot, so every branch above is testable.
+
+### When is an agent "still working"?
+
+`/session/status` only reports sessions that are streaming tokens, so an agent that is
+sitting inside a long-running tool shows up idle. The reliable signal for **orchestrated**
+agents — the ones `orch task start` or the scheduler spawned — is the run process
+itself: `opencode run` stays alive for the whole agent loop and exits when it is done.
+The daemon marks those with the title `orch:<task>` and treats the process as the agent
+working. A human-attached client (no such title) is not the agent working, so the daemon
+settles on session state alone; the `orch:` title is the human-switch for what "busy"
+means.
+
+Per claimed task, each cycle:
+
+1. **Blocked** on a permission/question → alert (deduped by request id, in-memory).
+2. **Busy** session, or an orchestrated run process alive → running; nothing. (A run
+   client stuck alive past `MAX_ORCHESTRATED_S` is escaped, so it can never stall a
+   task forever.)
+3. **Settled** (session idle or gone) past a settle budget (~30s):
+   - worktree missing → `needs-review`
+   - clean + no diff → `remove` (no-op)
+   - otherwise run the committed gate:
+     - **pass** → the hook committed → diff → `merge`; no diff → `remove`
+     - **fail** → inject the failure via `prompt_async`; retry++; `< cap` wait for the
+       agent to work again, `>= cap` → `needs-review` (`retries-exhausted`)
+     - **no committed gate** → `needs-review` — never a pass
+4. **Fingerprint unchanged** since the last failure for longer than a stall budget →
+   `needs-review` (`stalled`) — the agent was told what to fix and changed nothing.
+
+Retries and settle timers are in-memory: a daemon restart resets them, and the task
+still lands correctly because `needs-review` is recomputed from the worktree, not
+stored.
+
+## The gate cannot be edited by the agent
+
+The gate that runs is the version **committed on the base branch**, staged to a temp
+dir outside the worktree (`gate.run`). The agent's working-tree copy is never the
+judge. A diverging copy is flagged as `gate-modified` but does not overturn the
+verdict — the committed gate ran. Improving a gate costs a commit to base, which is
+reviewable; editing it mid-task buys nothing. This is the sharpest lesson this
+design learned, and it still holds with the router gone: there is simply no plugin
+inside the agent's server left to trust or distrust — the daemon runs every gate.
+
+The commit-on-pass is inside the hook, so a passing gate is the only thing that can
+produce a clean, diffing branch. A dirty worktree at settle time is therefore
+unambiguous: the gate never passed.
 
 ## State: one authority per question
 
 | Question | Authority |
 | --- | --- |
 | What work exists, and what does it mean? | **the base branch** — `tasks/*/task.md` as committed there |
-| What is running, since when, where, on which port? | **SQLite** — one global DB per machine |
-| Who is this agent's parent? | **SQLite**, not opencode's session parentage |
-| What is checked, and how? | **the base branch** — the committed hook and config |
-| Did this task pass? | **a gate run the daemon performed itself** |
+| What is claimed? | **git refs** — `refs/heads/<name>` |
+| Is the work committed and passing? | **the worktree** — clean + diff + the daemon's own gate run |
+| What is running right now? | **live** — `/proc`, `ss`, the shared server |
+| How long since… (retries, settle) | **the daemon's memory** — restart-losing by design |
 
-The router plugin used to keep gate fingerprints and retry counters in
-`.orchestration/.state/` inside the worktree being judged, which broke this table
-three ways: two authorities for one question, per-worktree files that cannot express
-a machine-wide limit, and state `orch observe` could not see because it reads the
-database. That state now lives in the one database, reached through the CLI, and
-`orch init` no longer writes a `.gitignore` entry for it.
+## Separation of concerns
 
-A subprocess rather than an HTTP endpoint on the daemon, which is a deliberate
-departure from what `tasks/plugin-state-via-daemon` specified. SQLite in WAL mode
-already serialises writers across processes, so a socket buys nothing and adds a
-service that can be **down** — and "the daemon was unreachable" must never become a
-route by which a gate passes. The requirement was one authority, not one server.
+```
+                          ┌──────────────────────────────┐
+    phone / tailnet ──────│  orchestrator daemon         │
+                          │  observe · decide · verify   │
+                          │  retrigger · merge · archive │
+                          └───────┬──────────────┬───────┘
+                                  │ facts        │ actions
+                          ┌───────▼──────┐       │  inject failure / approve / abort
+                          │   scan       │       │  merge / remove / kill pid
+                          │  git + /proc │       │
+                          └───────┬──────┘       │
+                                  │ HTTP + SSE   │
+   ┌────────────────────────────▼──────────────▼────────────────────┐
+   │  ONE `opencode serve` per machine (headless, always a port)    │
+   │  sessions per worktree; agents run with `opencode run --attach`│
+   └───────────────────────────────┬────────────────────────────────┘
+                                    │ the gate
+                          ┌──────────▼───────────┐
+                          │  .orchestration/     │  project knowledge
+                          │  hooks/session-idle  │  verify + commit on pass
+                          └──────────────────────┘
 
-`- [-]` in `TASKS.md` is a **rendered convenience**: written back best-effort for
-human readability, never read as authority. That kills two problems at once — the
-stale `[-]` left by a dispatch that died, and two files disagreeing about state.
-
-"git" was too loose for the first row, because a working tree is not a ref. A task is
-**project-wide, and its authority is the base branch** — the same ref the gate is read
-from, for the same reason. `task start` resolves a spec with
-`git show <base>:tasks/<name>/task.md`, so a spec that exists only in some worktree, or
-only on a feature branch, is not work this system can see: it is undispatchable and it
-dies with the branch. `orch task add` therefore names the base worktree whenever it is
-writing somewhere else — placement stays the caller's (`-C`, else the cwd), because a
-tool that writes into a directory nobody named trades one silent surprise for another.
-`orch task list` seeds itself from `git ls-tree <base> -- tasks/` rather than waiting for
-a dispatch to reveal that a task existed at all.
-
-Claiming is one atomic statement, so no file lock is needed:
-
-```sql
-BEGIN IMMEDIATE;
-UPDATE task SET status='running', lease_until=unixepoch()+900, worktree=?, port=?
- WHERE name=(SELECT name FROM task WHERE status='todo' ORDER BY seq LIMIT 1)
- RETURNING name;
-COMMIT;
+   git    ── intent and status: tasks/, archive/, branches, worktrees
+   /proc  ── runtime facts: pids, cwd, tmux, ss
+   memory ── the daemon's retries, settle timers, alert dedup (restart-losing)
 ```
 
-Leases expire, so a crashed agent's task becomes reclaimable rather than wedged.
+### 1. The scan — sensing only
 
-Two traps: never `flock` a tracked file — git replaces inodes, so the lock stops
-referring to the file everyone else sees. And git's own `index.lock` **fails**
-rather than queueing, so concurrent commits produce errors, not serialization.
+`state.scan_project` derives every task fact from the repo and the live system. It
+writes nothing. Project discovery is a bounded `fd`/`find` walk of `$HOME` and `/mnt`
+(env `ORCH_ROOTS`) for `.orchestration/` directories, deduped by `git-common-dir`,
+cached in-memory for ~60s.
 
-Parent↔child is owned by `orch`, but **not** for the reason this document
-previously gave. That reason was tested and turned out to be wrong.
+### 2. The daemon — policy and authority
 
-Measured in an isolated lab — one bare repo, two worktrees, a single server:
+Consumes the scan, decides, and is the only component permitted to act. Its actions:
+restart the shared server, inject a gate failure back into a session, merge a verified
+branch, remove a no-op, mark `needs-review`, alert on a blocked permission. It runs
+the gate itself — there is no verdict it accepts from anywhere, because there is no
+plugin left to report one.
 
-| Child created with | Result |
+**One per machine, under systemd, with linger.** Not one per project: the shared
+server is one process, the retries are one set, and project discovery is machine-wide.
+
+A long-lived daemon holds the code it imported at startup. `doctor` therefore fails
+when the running supervisor's start time precedes the newest source file — a version
+string cannot do this job.
+
+### 3. CLI — per-invocation action
+
+| Command | Does |
 | --- | --- |
-| `?directory=` another worktree of the **same** bare repo | parentage **accepted**, same `projectID` |
-| `?directory=` a worktree of a **different** bare repo | parentage **accepted**, *different* `projectID` |
+| `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template) |
+| `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated) |
+| `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
+| `orch task list` | render the scan for this project |
+| `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
+| `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
+| `orch task merge <name>` | re-run a merge after a conflict |
+| `orch observe` | live process/server state, read-only |
+| `orch doctor` | verify the contracts that fail silently |
+| `orch gate-run` | run the committed gate here and say why |
 
-In both cases the child's own record carried the `parentID`, and
-`GET /session/{parent}/children` returned it. The earlier prediction — that
-cross-project parentage "almost certainly" would not work — was false. Harness
-parentage spans projects, and one server can create a session in any directory on
-the machine, which is a capability worth knowing about rather than a limitation to
-route around.
+The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
+when the branch already exists (the claim), and refuses an uncommitted spec or an
+ungated project.
 
-`orch` still owns the mapping, for the reasons that survive the test: lease rows
-need worktree, port, pid and tmux regardless, and orchestration truth should not
-rest on harness internals that can change between versions. But that is now a
-deliberate choice, not a forced one.
+### 4. Project `.orchestration/` — project knowledge
+
+- `hooks/session-idle` — the gate: verify, and on success commit the work. The daemon
+  fires it on settle; the CLI fires it via `gate-run`.
+- Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
+  `pre-branch-delete`, `post-task-cleanup`.
+- `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`.
+
+Two dispatchers fire hooks from one directory under one env-var contract
+(`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the CLI fires
+task-lifecycle events, the daemon fires `session-idle`.
 
 ## Flow A — dispatch
 
-1. Human or parent agent invokes the `task_runner` tool, or `orch task start`.
-2. CLI verifies the daemon is reachable. Not reachable → fail loudly (override
-   available).
-3. CLI claims the task in SQLite, atomically, with a lease.
-4. CLI runs `hooks/pre-task-create` **from the dispatcher's worktree** — the new
-   one does not exist yet.
-5. CLI creates the worktree, guards against a stale directory, runs
-   `git worktree prune`.
-6. CLI runs `hooks/post-task-create` **from the new worktree's checkout** —
-   database, `.env` rewrite.
-7. CLI **commits the gate** if `.orchestration/hooks/*` is uncommitted — the router
-   only honours the committed version, so dispatching with a dirty gate silently
-   yields `no-gate-configured`.
-8. CLI dispatches into the shared server, strictly after step 6 or the agent boots
-   against the wrong database:
+1. `orch task start <name>` (human, parent agent) or the **scheduler** (see below).
+2. CLI refuses if `refs/heads/<name>` exists — the branch is the claim, atomically.
+3. CLI runs `hooks/pre-task-create` from the dispatcher's worktree.
+4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
+5. CLI runs `hooks/post-task-create` from the new worktree.
+6. CLI refuses ungated work (no committed gate) unless `--allow-ungated`.
+7. CLI dispatches into the shared server, marking the session with the title
+   `orch:<task>`:
 
    ```
-   opencode run --attach $URL --dir <worktree> --format json [-m model] "<prompt>"
+   opencode run --attach $URL --dir <worktree> --format json --title orch:<task> [-m model] "<prompt>"
    ```
 
-9. CLI records pid, session id, `--dir`, and parent session in the lease row.
-10. Best-effort: flip `[ ]` → `[-]` in `TASKS.md` and commit.
+The dispatch process exiting is not the task finishing. Completion is derived later
+from the worktree state, by the daemon.
 
-Steps 4 and 6 necessarily run different refs' hooks. Not a bug — but it means a
-task branch can change its own post-create behaviour and not its pre-create
-behaviour.
+## Flow A′ — the scheduler
 
-### The dispatch process exiting does not mean the task is done
+The daemon can dispatch `todo` tasks itself. A project opts in via `.orchestration/config.json`:
 
-Measured, not assumed. A dispatched run exited **0 at 07:25:53** with its final
-`step_finish` on stdout — and the session then performed **24 further tool calls**
-until **07:26:29**, because the router injected a follow-up prompt after the gate
-failed. The verdict flipped `failed → passed` 36 seconds after the process that
-started the work had already gone.
+```json
+"scheduler": { "enabled": true, "maxConcurrent": 1, "model": "opencode/…" }
+```
 
-So the exit code answers "did my dispatch command finish", never "is the task
-finished". Anything that can inject a prompt — the router, the daemon, a human on
-a phone — extends a session past its dispatcher's lifetime. Completion is a
-property of the **session**, observed over SSE and confirmed by a `session.idle`
-with no gate work outstanding. `run --format json` is a convenient way to *start*
-work and stream its first leg; it is not a completion signal.
+Each cycle, per project, the daemon fills free slots (claimed, in-flight tasks count
+against `maxConcurrent`) with the next unclaimed declared task, in name order. A task
+whose `task.md` is uncommitted on base, or a project with no base worktree to dispatch
+from, is skipped. Failed dispatches back off (60s) and the daemon's journal records why
+— `dispatch_error` is in-memory only. The scheduler never dispatches ungated work —
+`--allow-ungated` is a human flag only.
 
-## Flow B — the event gate
+## Flow B — the gate loop
 
-The loop that makes a finished branch trustworthy.
+1. The task settles (session idle or gone; an orchestrated run process is held until
+   it exits, so a slow agent is never torn down mid-tool).
+2. The daemon runs the committed `session-idle` hook in the worktree.
+3. **exit 0** → the hook committed → diff → merge + archive + teardown; no diff →
+   remove + archive.
+4. **non-zero** → the daemon injects the output into the session and waits for the
+   agent to work again. This is bounded by `gate.retryCap`, tracked in memory.
+5. **Cap spent** → `needs-review` (`retries-exhausted`). No gate → `needs-review`
+   (`no-gate-configured`), because absence of checks must never be a pass.
 
-1. The child's router plugin receives `session.idle`. Skip if `session.parentID`
-   is set (a subagent) or the session errored.
-2. Plugin fingerprints the project-declared file set — **content hashes**, and
-   **persisted**, so a restart does not silently re-baseline.
-3. No difference → stop. Nothing happened worth checking.
-4. Difference → acquire a concurrency slot from the daemon, then run the gate —
-   **the version committed on the base branch**, staged to a temp dir outside the
-   worktree, never the working-tree copy. See below for why.
-5. Exit 0 → outcome `passed`, with a summary, handed to the daemon.
-6. Exit non-zero → inject the failure output into the child session via
-   `prompt_async`, increment the retry counter, and let the agent fix it.
-7. Retry cap exceeded → halt and escalate as `stuck`. This loop is self-inflicted
-   and therefore bounded on purpose.
-8. **No hook of that name exists** → outcome `no-gate-configured`. Not `passed`.
-   Routing decides whether an ungated project is acceptable, and `orch doctor`
-   reports it. A gate that silently approves unchecked work is worse than no gate,
-   because it manufactures confidence.
+The agent may assert it is done; the gate verifies and commits. Neither side can
+declare success alone — and there is no side inside the agent's server that reports
+a verdict at all.
 
-Inject via `prompt_async`, **not** `tui.appendPrompt` + `submitPrompt`. Driving
-the TUI text box destroys whatever a human was typing, requires a TUI at all, and
-races with the user.
+## Flow C — observation and failure handling
 
-The agent may **assert** it is done; the gate **verifies**. Neither side can
-declare success alone.
-
-### An agent must not be able to edit its own gate
-
-The sharpest thing this design got wrong, caught by running it.
-
-A dispatched agent was given a task, wrote the deliverable, and went idle. The
-router ran the fail-closed scaffold, which failed by design, and fed the failure
-back. The agent then read `.orchestration/`, **rewrote `hooks/session-idle`** into
-a gate tailored to the task, went idle again — and the router reported `passed`.
-
-The loop worked exactly as designed. That is the problem. The agent authored the
-criterion it was then judged by, and a human reading `session.idle -> passed`
-would have no reason to doubt it. This particular rewrite was honest — it really
-did check the deliverable — but nothing structurally prevented `exit 0`. An agent
-that can edit its own gate can always pass it, and "it happened to behave" is not
-a security property.
-
-Fix, now implemented in the router:
-
-- The gate that runs is `git show <baseBranch>:.orchestration/hooks/<event>`,
-  staged to a temp dir **outside** the worktree so it is neither fingerprinted nor
-  visible to `git status`.
-- Not committed on the base branch → `no-gate-configured`. An uncommitted gate is
-  not a gate.
-- Working-tree copy differs from the committed one → additionally report
-  `gate-modified`, naming it for review. It does not overturn the verdict, since
-  the committed gate is what ran, but an agent editing its own gate is precisely
-  what a human should see.
-
-Improving a gate therefore costs a commit to the base branch, which is reviewable.
-Editing it mid-task buys nothing. Same reason `--auto` is refused: the point is
-that some judgements are not the agent's to make.
-
-Full disclosure, because the same hole applies to this repository: `orch`'s own
-`.orchestration/hooks/session-idle` was written by me, and my earlier report of
-"gate passed: 7 shell, 10 python, tests green" was produced by a gate I authored.
-Read it as a self-report, not an independent check.
-
-### …and must not be able to report its own verdict either
-
-Closing the first hole exposed a second one in the same shape, one step further out.
-
-Reading the gate from the base branch removes the agent's authority over **what is
-checked**. It does nothing about its authority over **what the result was**. The
-router is a plugin loaded into the agent's own server, and the agent holds a bash
-tool, so any channel the router uses to say `passed` is a channel the agent can use
-directly. Verified rather than assumed: playing the agent, three moves — write the
-wrong answer, rewrite the local gate to `exit 0`, then call
-`orch gate-report --outcome passed` by hand.
-
-So `done` is not written by anything that reports a verdict. It is written only after
-**the daemon runs the committed gate itself**, in a process the session never spawned:
-
-| Who ran the gate | Recorded as | May promote to `done` |
-| --- | --- | --- |
-| the router, in-loop, inside the agent's server | `source=router` | no — it is a self-report |
-| the daemon, out-of-loop, after the session stopped | `source=daemon` | yes, and only on `passed` |
-| a human via `orch gate-run` | `source=cli` | no, but it is recorded |
-
-Both runs are kept, and neither is redundant. The router's job is to hand a failure
-back while the agent is still there to fix it — advisory, and harmless if wrong, since
-the worst case is a wasted nudge. The daemon's job is to decide, once, afterwards. The
-cost is running the suite twice on a passing task, which is the right thing to pay: the
-alternative is a `done` that means "something inside the sandbox said so".
-
-Against the three-move sabotage above, the daemon reported
-`failed gate-modified`, `needs-review`, and `answer.txt says '41', expected 42` — the
-forged `passed` is still in the history as `source=router`, which is exactly where a
-lie belongs: recorded, attributed, and not load-bearing.
-
-Verdicts accumulate rather than overwrite, because the question a human actually asks
-is "did this ever pass, and what did the run before it say".
-
-## Flow C — observation and fallback
-
-1. Observer streams `/event` and polls `/session/status` for every known port.
-   Both are required: SSE catches transitions, polling catches **absence**, and
-   absence is not an event.
-
-   The harness helps more than expected here. `server.heartbeat` arrives roughly
-   every 8-10 seconds, which separates **"stream alive, agent quiet"** from
-   **"stream dead"** — two situations that are otherwise indistinguishable and
-   demand opposite responses. Missing heartbeats mean the transport broke; quiet
-   with heartbeats means the agent genuinely has nothing to say. Neither
-   `server.heartbeat` nor `server.connected` appears in the OpenAPI schema list;
-   both were found by watching the wire.
-2. The daemon applies per-state budgets — one global timeout is wrong, because it
-   either fires during every legitimate test run or misses real stalls:
-
-| State | Budget |
-| --- | --- |
-| busy, long tool call running | generous — healthy silence |
-| busy, no output at all | tight — suspicious |
-| blocked on `/permission` or `/question` | alert almost immediately; never self-resolves |
-| idle with an open task | should not sit unnoticed |
-| tmux alive, no reachable port | distinct alarm — the `--port` contract is broken |
-
-3. **Definitely dead** — lease expired *and* port unreachable *and* tmux gone.
-   Reclaim automatically; there is nothing left to preserve.
-
-   Teardown is **not atomic**: a process losing its listener slightly before it
-   exits means a mid-teardown sample reads "alive, no port". Under the headless
-   model this is no longer ambiguous — a server that is a server always has a
-   port, so "alive, no port" simply means *dying*, and the reaper can wait one
-   more sample rather than reason about it.
-
-   An earlier revision of this document framed the above as `tmux kill-session`
-   leaving an orphan, and treated tmux as the way to stop an agent. Both were
-   wrong. **The process is the unit.** Kill the recorded pid; the tmux session
-   ends by itself because its pane command exited (verified directly: killed a
-   pane's process, the session disappeared). tmux is a place to host a process,
-   never a handle on its lifetime.
-4. **Maybe looping** — busy, events flowing, cost climbing, todos static. Alert
-   only. Auto-abort on a guessed threshold will eventually kill a legitimate long
-   run, after which the automation stops being trusted.
-
-Polling alone provably misses things. Measured on a live TUI at 2-second
-sampling: two distinct approval requests (`per_fcd9baecb0`, `per_fcda1767b0`),
-both `external_directory` for `/tmp/opencode/*`, appeared and cleared inside 27
-seconds within a single unit of work.
+- The daemon reads the scan every ~10s. Absence (a task whose session vanished) is as
+  important as presence: a claimed task with no session and a dirty tree is
+  `needs-review`.
+- **Server death** → restart. Tasks settle afterwards and their worktree state
+  decides: dirty → review, clean+diff → gate and merge, clean+no-diff → remove. The
+  gate is the daemon's own run, so a branch that merges after a crash is verified
+  work, not an unexamined claim.
+- **Kill by pid, never by pattern.** The dispatch process is identified by its exact
+  cmdline (`opencode run … --dir <worktree>`) and killed by that pid. tmux sessions
+  end on their own when their process dies.
 
 ## Flow D — routing, and the human switch
 
-An outcome reaches the daemon: `passed`, `failed`, `stuck`, `stalled`,
-`blocked-on-approval`, `no-gate-configured`. The daemon routes it to the parent
-agent (via `prompt_async`), to the human (phone over tailnet), or to nobody.
-
-This is why there is no `report_back` message. **A child produces a result; the
-orchestrator decides who needs to know.** The child never knows whether a human
-is involved.
-
-Human-in-the-loop is therefore a **per-event toggle in config**, not an
-architecture. Sensible defaults today:
-
-| Event | Parent | Human |
-| --- | --- | --- |
-| approval requested | — | yes |
-| stalled / stuck | yes | yes |
-| checks passed | yes — unblocks dependents | optional |
-| merge | — | **always** |
-
-The human role can shrink over time by editing a table, with no code change.
-
-One consequence to keep in view: **if a human reviews every merge, throughput is
-bounded by review bandwidth, not CPU.** More parallel agents deepen the queue at
-the reviewer rather than raising merges per day. The strongest argument for the
-event gate is not reliability, it is that a branch arriving already type-checked
-and tested is cheaper to review.
-
-## Flow E — development, including recursion
-
-`orch` is developed in its own repo — bare repo plus worktrees, the same ceremony
-it dispatches for everyone else — and its own `.orchestration/` lives **inside**
-`orch-main`, tracked. That is the point of recursion: if `orch` cannot orchestrate
-`orch`, the contract is wrong.
-
-The ceremony creates one ambiguity that has to be closed deliberately. With
-several worktrees of `orch` checked out, *which* one is on `PATH`? Answer:
-
-> **`PATH` points at an installed release, never at a worktree.** The installed
-> version dispatches. A worktree copy is invoked by explicit path, under test, and
-> never becomes the thing dispatching its own fix.
-
-Without that rule a broken change to the dispatcher removes your ability to
-dispatch the fix — the same discipline as editing a shell config in a shell that
-sources it.
-
-Scaffolded files are owned by the consuming project after `init` — the shadcn
-model. Upgrades are a diff you review, which is why `.orchestration/` carries a
-version marker and `orch upgrade` exists. The tradeoff is deliberate: projects can
-edit their hooks freely, and the cost is reading a diff at upgrade time.
-
-## Flow F — AI interactions
-
-- **Parent agent** (architect, on `main`/`preview`): holds the dispatch tool,
-  receives outcomes injected by the daemon, unblocks dependent tasks, performs
-  review. Does not merge — the human does.
-- **Child agent** (task worktree): has **no orchestration awareness by design**.
-  It works, and the surrounding machinery observes it. It may assert completion;
-  the gate decides. Failures arrive as ordinary prompts.
-- **Subagents:** excluded from the gate, and the observer distinguishes them when
-  judging whether an agent is working.
-- **Cross-worktree conversation:** mapping owned by `orch`; opencode parentage
-  used only where it happens to work.
+Not built. Outcomes are logged by the daemon (journald) and surfaced by `task list`
+as derived state; whether a human should be told, and whether a parent agent should
+be unblocked, is a decision still to make. The machinery no longer stores verdicts,
+so routing will be built on the daemon's log + scan rather than on a verdict table.
 
 ## Invariants
 
-1. No agent is created that cannot be observed. Now **structural rather than
-   enforced**: agents are headless servers, and a server always has a port. This
-   invariant used to require a `--port` contract, a wrapper script and a `doctor`
-   check, all of which existed only because a TUI can be started blind.
-2. The observer never writes. The daemon holds all authority.
-3. One authority per question: git for intent, SQLite for runtime.
-4. A child is never trusted for state. It may assert; gates verify; observation
-   decides.
-5. Auto-abort only when definitely dead. Suspected loops alert.
-6. Every project-specific decision is a hook or config value, never CLI or plugin
-   code.
-7. **Hook definitions live inside a worktree and are tracked.** Never beside the
-   bare repo. A bare repo has no working tree, so anything placed next to it is
-   outside version control by construction — which is exactly how
-   `rdk-template`'s dispatcher and hooks ended up with no history and no backup.
-   Tracked-in-a-worktree also makes hooks differ per branch, so changing how
-   checks run is an ordinary reviewable change.
-8. **Absence of a gate is not a pass.** A missing hook yields
-   `no-gate-configured`, never `passed`. Otherwise every unconfigured project
-   receives automatic green lights.
-9. **The gate's *entry point* comes from the base branch.** The committed version is
-   what runs; an uncommitted gate counts as no gate; a diverging working-tree copy is
-   reported as `gate-modified`. Learned by watching a dispatched agent rewrite its own
-   gate and then be told it passed.
-
-   Scoped deliberately, because an earlier draft of this invariant overclaimed. What
-   the hook *invokes* — test files, scripts, linters — is read from the worktree and is
-   writable by the agent. That is accepted, not overlooked: hooks and the scripts they
-   call are maintained on the base branch and inherited by every worktree created from
-   it, so the ordinary route to changing them is a reviewable merge. Deeper pinning
-   would mean a gate could not test the code under test, which is incoherent.
-10. **Kill by recorded pid, never by pattern.** `pkill -f` matches the invoking
-    shell and neighbouring processes. tmux sessions end on their own when their
-    process dies, so they need no separate teardown.
-11. **A verdict from inside the agent's server is a self-report.** `done` requires a
-    gate run the daemon performed itself, out-of-loop, after the session stopped.
-    Anything the router reports is recorded and attributed, never load-bearing —
-    because the agent's bash tool can send whatever the router can send.
-12. **Unavailability never produces a pass.** Store unreachable, gate absent, gate
-    timed out, worktree gone: each lands on `needs-review`. A gate that approves
-    unchecked work because a dependency was down is the failure this project exists
-    to prevent, and it is the one direction that cannot be noticed later — a wrongly
-    failed gate gets complained about within minutes, a wrongly passed one never
-    does.
-
-## Found by running a realistic gate
-
-Every gate in every lab until now returned in 0.0s. That single unrealistic condition hid
-three bugs, and a 45-second gate surfaced all of them in one run. Recorded because the
-lesson generalises: an instant gate is not a small version of a real one, it is a
-different test.
-
-**A running gate looked exactly like an unexamined agent.** The session is idle for the
-whole duration of a check and the dispatch process has usually exited, so the supervisor
-read a 45s gate as "stopped, and nothing ever verified this" - marking the task
-`needs-review` at 40s, mid-check, and then abandoning it, so the verdict that arrived
-five seconds later was never considered. Fixed on both sides: the router now reports
-`running` *before* executing, and a missing verdict is given a grace period before it is
-believed. The announcement is the real mechanism; the grace period only covers the delay
-before it arrives, because no fixed timeout can be both prompt for a fast gate and
-patient for a slow one.
-
-**A non-function export silently disabled the entire router.** opencode requires every
-export of a plugin file to be a function and rejects the whole file otherwise:
-
-```
-level=ERROR message="failed to load plugin" error="Plugin export is not a function"
-```
-
-Declaring the contract version as `export const ROUTER_CONTRACT = 2` therefore stopped
-every gate from firing, with one line in the server log as the only evidence. The rule is
-about the exported *value*, not the syntax - `export const OrchRouter = async …` is fine
-because it holds a function. Now a test asserts every export is callable, and it was
-confirmed to catch this exact mistake.
-
-**Plugins are imported once per directory and cached.** Upgrading the router changes
-nothing for any directory the server has already touched, and deleting and recreating a
-worktree at the same path does not help either - the module is keyed by path. This cost a
-full cycle: router upgraded, committed, worktree rebuilt, server still running the old
-plugin. `doctor` now warns when the router is newer than the running server.
-
-Two consequences worth stating plainly, because both are the same shape as the daemon
-staleness problem:
-
-| Long-lived process | Holds | Fix |
-| --- | --- | --- |
-| `orch daemon` | the Python it imported at startup | `systemctl --user restart orch-daemon` |
-| `opencode serve` | one plugin module per directory | `orch server restart` |
-
-`doctor` fails on the first and warns on the second, because neither is visible in logs
-that otherwise look completely normal.
-
-**Router contracts, and why a byte diff was not enough.** Projects own their copy of the
-plugin, so a content diff cannot separate a deliberate customisation from a router that
-predates a guarantee the supervisor depends on. The router therefore declares a contract
-number, `doctor` **fails** below the floor, and `task start` refuses to dispatch. A
-contract cannot express "same contract, bug fixed" - that is what drift detection and
-`orch init --force` are for.
-
-**`orch init --force` used to overwrite the gate.** Found by doing it to this repository
-while trying to update the router. The gate is the most valuable file in a project and its
-loss is unrecoverable, so `--force` now refuses to touch hooks; `--force-hooks` is a
-separate, explicit act. A router below the contract floor is upgraded even without
-`--force`, since that is a safety fix rather than a customisation.
+1. No agent is created that cannot be observed — structural: agents are headless
+   servers, and a server always has a port.
+2. The scan never writes. The daemon holds all authority.
+3. One authority per question: git for intent, live system for runtime, memory for
+   transient bookkeeping.
+4. The agent is never trusted for state. The worktree and the daemon's own gate
+   decide.
+5. The gate's entry point comes from the base branch; the working-tree copy is never
+   the judge, and a diverging copy is flagged.
+6. Absence of a gate is not a pass. `no-gate-configured` → `needs-review`.
+7. A dirty worktree is not done. Only a committed, diffing branch can merge, and only
+   a gate the daemon ran itself can produce one.
+8. Kill by recorded pid (a specific process found by exact cmdline), never by pattern.
+9. Unavailability never produces a pass. Store gone (there is none), server down,
+   gate timed out, worktree gone: each lands on `needs-review`.
+10. Every project-specific decision is a hook or config value, never daemon or CLI
+    code.
 
 ## Settled: threat model, scope, and versions
 
-Recorded so they stop being reopened.
-
 **The threat model is a lazy agent, not a hostile one.** An agent takes the shortest
-route to looking finished; it is not assumed to attack the machine. It holds a bash
-tool and could in principle kill the daemon or the server — that is accepted, and
-restricting what the agent may run is a separate concern handled at the permission
-layer, when the time comes. Nothing here should be designed as if the agent were an
-adversary with intent.
+route to looking finished; it is not assumed to attack the machine.
 
-**Authority against GitHub is the operator's, not this system's.** Push rights, branch
-protection and who may write to `main` are maintained outside `orch` and are not
-enforced here.
+**The scope is infrastructure, not agent workflow.** What an agent may do, which
+model it uses, what its prompt says — all out of scope. A project supplies its own
+checks through `.orchestration/`.
 
-**The scope is infrastructure, not agent workflow.** What an agent is and is not
-allowed to do, which model it uses, what its prompt says — all deliberately out of
-scope. `orch` supplies dispatch, observation, verdicts, leases and supervision. A
-project supplies its own checks through `.orchestration/`.
-
-**The supported harness floor is 1.18.11**, because that is what the box is pinned to.
-Anything newer is a bonus and must not become a requirement by accident. Minor
-releases are assumed API-compatible — an assumption, so it is recorded rather than
-trusted: every version actually run against is written to `harness_seen`, with the
-floor in `meta`. A version change is then a dated fact instead of a mystery, and is
-handled like any other dependency moving. Below the floor is a `doctor` failure, not a
-warning.
+**The supported harness floor is 1.18.11.** Anything newer is a bonus. The shared
+server's live version is checked by `doctor` against the floor; there is no version
+history store any more.
 
 **Deferred, with nothing built on either:**
-
-- What happens to a branch that passed — merge, PR, or nothing — pending a decision on
-  whether a human belongs in that loop. **Resolved: `done` merges automatically.** The
-  daemon folds the task's branch into base (`--no-ff`), removes the worktree, and deletes
-  the branch. The status moves to `merged`. A merge conflict leaves everything in place
-  and the task stays `done` for a human to resolve and re-run `orch task merge <name>`.
-  The lifecycle hooks `pre-task-cleanup`, `pre-branch-delete`, and `post-task-cleanup`
-  bracket the teardown, and either of the first two can block to preserve the worktree
-  or branch for review.
-- Notification routing and the phone-facing server. Recorded as
-  `tasks/outcome-routing`, `tasks/permission-burst-keying` and `tasks/phone-server`.
-- Concurrency limits. Known and accepted; nothing caps parallel agents or gate runs.
-
-**Recursion is possible and not sanctioned.** `orch` can dispatch agents onto its own
-backlog: its repo is a bare repo with worktrees, its tasks are in `TASKS.md`, and
-`orch task start` on one of them produces a valid dispatch. Verified as a mechanism
-only. It has never been used, because agents editing the gate, router and daemon that
-supervise them makes this system's own safety properties the work product of the
-agents it supervises. Not a technical blocker — an unmade decision.
-
-## Language and distribution
-
-**Decided: Python/bash for the CLI and daemon, TypeScript for the router plugin.**
-
-The plugin has no choice — the opencode plugin API is TypeScript. So the real
-question was never "avoid TS", it was one language or two, and two was chosen to
-keep dispatch free of a node dependency.
-
-The cost of two languages is duplicated harness knowledge, and the mitigation
-falls out of the component split: **all HTTP knowledge of the harness lives on the
-Python side.** The observer and CLI own `/session/status`, `/permission`,
-`/question`, `/event`, `/api/location`, and version negotiation. The TS plugin
-stays deliberately thin — receive an event, apply the diff gate, invoke a hook,
-record the outcome by calling `orch`. It needs no HTTP vocabulary at all, so there is
-nothing to keep in sync: the two CLI subcommands it uses (`gate-state`,
-`gate-report`) are versioned with the code that implements them.
-
-Open check before relying on this on the box: plugins execute inside opencode's
-runtime, but the observed plugin subprocess used a mise-managed system node
-(`~/.local/share/mise/installs/node/latest/bin/node`). Whether a plugin runs on the
-box's deliberately pinned-binary install is unverified.
-
-## Verified vs assumed
-
-**Verified headless (2026-08-05, 1.18.13), the run that reshaped this design:**
-
-| Claim | Evidence |
-| --- | --- |
-| `serve` announces its own port | prints `opencode server listening on http://127.0.0.1:35283` on stdout, so discovery is unnecessary |
-| Headless is far cheaper | `serve` 362 MB vs TUI 947 MB RSS — 2.6×, so memory stops being the concurrency ceiling on an 8 GB box |
-| One server serves every worktree | server started in dir A, session created with `?directory=B` → B's plugin imported, factory got `directory=B worktree=B` |
-| Both plugin dir spellings load | `.opencode/plugin/` and `.opencode/plugins/` each worked |
-| A TUI can be attached on demand | `opencode attach <url>` exists, so headless is not blind |
-| Dispatch works end to end | `opencode run --attach URL --dir W --format json` → exit 0, JSON event stream, `cost: 0` on a `-free` model |
-| **Exit code ≠ completion** | run exited 0 at 07:25:53; session did 24 more tool calls until 07:26:29 after the router injected a prompt |
-| **An agent will rewrite its own gate** | fail-closed scaffold → failure injected → agent rewrote `hooks/session-idle` → reported `passed` |
-| The retry loop is genuinely bounded | `failed: attempt 1/3` then `passed`, and the retry counter reset to 0 |
-| Killing a process ends its tmux session | killed a pane's process; session gone without `kill-session` |
-| `pkill -f` is dangerous | `pkill -f 'opencode serve'` killed its own invoking shell mid-command |
-| Free models exist | `opencode/deepseek-v4-flash-free` et al. report `cost: 0`, so mechanism tests need not cost money |
-| Basic auth is available | `serve` warns `OPENCODE_SERVER_PASSWORD is not set; server is unsecured`; `run`/`attach` take `-u`/`-p` — relevant to the tailnet server |
-
-**Superseded but kept for the record** — the following concerned TUIs and no longer
-constrains the design, since orchestrated agents are headless:
-
-**Verified against a live TUI:** portless TUIs are unobservable (no socket, no
-lock file, and the `permission` table holds zero rows — pending approvals live
-only in TUI memory); `--port` turns a TUI into a queryable server; `/permission`,
-`/question`, `/session/status` report real state; `session.idle` is a real event
-name carrying `event.properties.sessionID`; `--port 0` does not collide;
-worktrees of one bare repo share a session list.
-
-**`--help` lies about `--port`.** It reports `--port [default: 0]`, which suggests
-a server always starts. It does not. Verified on 1.18.13 by launching a TUI two
-ways in a scratch repo:
-
-| Launch | Listener |
-| --- | --- |
-| `opencode` | **none** |
-| `opencode --port 0` | `127.0.0.1:39243` (4096 was taken) |
-
-So the flag must be passed explicitly, and a shell wrapper is the only thing that
-makes hand-opened TUIs observable. The wrapper is still worth keeping for TUIs you
-open by hand — it demonstrably works, and made a real `--agent team-lead` task
-observable without anyone thinking about it — but it is no longer load-bearing for
-orchestration.
-
-**Verified since:** the full event vocabulary (93 schema types plus two
-undocumented ones — see `docs/events.md`); `parentID` is accepted across differing
-`directory`, both within one bare repo and across two; `/api/health` omits the
-version while `/global/health` carries it; `--help` misreports `--port` as
-defaulting to 0 when omitting it starts no server at all.
-
-**Assumed, not tested:** concurrency limits for N simultaneous check runs; whether
-a TS plugin runs under the box's pinned opencode; whether the
-TASKS.md-as-rendered-view decision is acceptable; how a shared server behaves when
-one hosted worktree's plugin throws; whether `run` blocks indefinitely or gives up
-when a permission is genuinely withheld.
-
-**A caution about "block and notify":** the chosen policy is never `--auto`, and
-that stands. But the dispatch above wrote a file **without any prompt** — the
-default resolved to `action=allow` for `write` and `bash`. So blocking is not the
-default behaviour that policy assumes; it only happens where a project's
-permission config actually demands it. Getting agents to stop and ask is a
-configuration job, not something the absence of `--auto` achieves by itself.
-
-**Version skew is now a declared contract, not a known risk.** The floor is 1.18.11
-(the box's pin); local runs 1.18.13. `harness.MIN_VERSION` and `store.MIN_HARNESS`
-carry it, `doctor` fails below it, and every version seen is recorded in
-`harness_seen` so a change is dated rather than discovered. Endpoint calls must still
-degrade rather than lie across the gap.
+- Outcome routing and the phone-facing server.
+- Global concurrency limits across projects (per-project `scheduler.maxConcurrent`
+  exists today; a machine-wide budget is a future daemon setting).

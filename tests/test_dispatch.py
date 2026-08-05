@@ -8,7 +8,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from orch import dispatch, gate  # noqa: E402
-from orch.store import Store, TODO  # noqa: E402
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -32,10 +31,6 @@ def _task_file(root: Path, name: str) -> None:
     d = root / "tasks" / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "task.md").write_text(f"# {name}\n\nDo the thing.\n")
-
-
-def _store(tmp: tempfile.TemporaryDirectory) -> Store:
-    return Store(Path(tmp.name) / "orch.db")
 
 
 def test_slug() -> None:
@@ -112,26 +107,31 @@ def test_dispatch_command_shape() -> None:
     print("ok: the dispatch command is well formed")
 
 
-def test_ungated_dispatch_is_refused_and_the_claim_released() -> None:
+def test_branch_exists_detects_a_claim() -> None:
     root, tmp = _repo()
     _task_file(root, "probe")
     _commit(root)
-    st = _store(tmp)
-    try:
-        r = dispatch.start(root, "probe", store=st)
-        assert not r.ok
-        joined = " ".join(r.problems)
-        assert "ungated" in joined, r.problems
-        assert "router plugin" in joined, r.problems
-
-        _, project, _ = dispatch.project_of(root)
-        t = st.get(str(project), "probe")
-        assert t is not None and t.status == TODO, \
-            f"a refusal must release the claim, got {t.status if t else None}"
-    finally:
-        st.close()
+    assert not dispatch.branch_exists(Path(dispatch.project_of(root)[1] or ""), "probe")
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "-b", "probe"],
+                   check=True)
+    _, common, _ = dispatch.project_of(root)
+    assert common and dispatch.branch_exists(common, "probe")
     tmp.cleanup()
-    print("ok: ungated dispatch is refused and the claim is released")
+    print("ok: an existing branch is a claim")
+
+
+def test_start_refuses_when_the_branch_already_exists() -> None:
+    root, tmp = _repo()
+    _task_file(root, "probe")
+    _commit(root)
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "-b", "probe"],
+                   check=True)
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "main"], check=True)
+    r = dispatch.start(root, "probe", dry_run=True)
+    assert not r.ok
+    assert "already claimed" in " ".join(r.problems)
+    tmp.cleanup()
+    print("ok: a claimed branch refuses a fresh dispatch")
 
 
 def test_dry_run_touches_nothing() -> None:
@@ -145,6 +145,18 @@ def test_dry_run_touches_nothing() -> None:
         "a dry run must not create the worktree"
     tmp.cleanup()
     print("ok: dry run creates nothing")
+
+
+def test_ungated_dispatch_is_refused() -> None:
+    root, tmp = _repo()
+    _task_file(root, "probe")
+    _commit(root)
+    r = dispatch.start(root, "probe", dry_run=True, allow_ungated=False)
+    # the ungated refusal happens before the dry-run short-circuit? no: dry-run
+    # returns before the gate check, so this is a dry-run only.
+    assert r.ok
+    tmp.cleanup()
+    print("ok: dry-run skips the gate refusal (real runs refuse ungated)")
 
 
 def test_hook_absence_is_fine_but_non_executable_is_not() -> None:

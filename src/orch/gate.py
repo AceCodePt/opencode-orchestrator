@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -13,27 +12,7 @@ ORCH_DIR = ".orchestration"
 HOOKS_REL = f"{ORCH_DIR}/hooks"
 CONFIG_REL = f"{ORCH_DIR}/config.json"
 
-ROUTER_RELS = (
-    ".opencode/plugins/orch-router.ts",
-    ".opencode/plugin/orch-router.ts",
-)
-
-MIN_ROUTER_CONTRACT = 2
-_CONTRACT_RE = re.compile(r"ROUTER_CONTRACT\s*=\s*(\d+)")
-
-
-def router_contract(worktree: Path) -> tuple[int | None, str | None]:
-    for rel in ROUTER_RELS:
-        p = worktree / rel
-        try:
-            text = p.read_text()
-        except OSError:
-            continue
-        m = _CONTRACT_RE.search(text)
-        return (int(m.group(1)) if m else 1), str(p)
-    return None, None
-
-GATE_EVENTS = ("session-idle", "session-error")
+GATE_EVENTS = ("session-idle",)
 
 OK = "ok"
 UNCOMMITTED = "uncommitted"
@@ -88,40 +67,6 @@ def inspect(worktree: Path, base: str | None = None) -> list[GateFinding]:
     base = base or base_branch(worktree)
     findings: list[GateFinding] = []
 
-    router_committed = any(show(worktree, base, rel) is not None for rel in ROUTER_RELS)
-    router_local = any((worktree / rel).exists() for rel in ROUTER_RELS)
-
-    if not router_local:
-        findings.append(GateFinding(
-            "router plugin", MISSING,
-            f"no {ROUTER_RELS[0]} on disk in this worktree, so NO gate can fire here "
-            f"however well the gate is written"
-            + (
-                f". It is committed on {base}, so this worktree predates that commit "
-                f"- rebase or merge {base} into it."
-                if router_committed else
-                f", and it is not committed on {base} either. Run `orch init` and "
-                f"commit the result."
-            ),
-        ))
-    else:
-        version, path = router_contract(worktree)
-        if version is not None and version < MIN_ROUTER_CONTRACT:
-            findings.append(GateFinding(
-                "router contract", MISSING,
-                f"{path} is contract {version}, and {MIN_ROUTER_CONTRACT} is required. "
-                f"It does not report that a gate has started, so a slow gate is read as "
-                f"an agent nothing checked. Run `orch init --force` and commit it",
-            ))
-
-    if router_local and not router_committed:
-        findings.append(GateFinding(
-            "router plugin", UNCOMMITTED,
-            f"{ROUTER_RELS[0]} is on disk here but not committed on {base}, so gates "
-            f"work in this worktree and will silently not fire in any worktree "
-            f"dispatched from {base}",
-        ))
-
     for name in GATE_EVENTS:
         rel = f"{HOOKS_REL}/{name}"
         committed = show(worktree, base, rel)
@@ -138,7 +83,7 @@ def inspect(worktree: Path, base: str | None = None) -> list[GateFinding]:
             findings.append(GateFinding(
                 name, UNCOMMITTED,
                 f"exists in the worktree but is not committed on {base}, so the "
-                f"router will report no-gate-configured and nothing will verify "
+                f"daemon reports no-gate-configured and nothing will verify "
                 f"this work",
             ))
             continue
@@ -164,7 +109,7 @@ def inspect(worktree: Path, base: str | None = None) -> list[GateFinding]:
     if cfg_committed is None and cfg_local_exists:
         findings.append(GateFinding(
             "config.json", UNCOMMITTED,
-            f"not committed on {base}, so the router falls back to defaults and any "
+            f"not committed on {base}, so the daemon falls back to defaults and any "
             f"include/exclude/retryCap here is silently ignored",
         ))
     elif cfg_committed is not None and cfg_local_exists:

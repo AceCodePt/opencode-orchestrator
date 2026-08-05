@@ -9,29 +9,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from orch import dispatch, tasks  # noqa: E402
 
-BACKLOG = """# Project Tasks
-
-## Backlog
-
-Seeded in rough execution order. Later additions go at the top per the protocol.
-
-**Foundations**
-
-- [x] [Old Thing](tasks/old-thing/task.md) - done ages ago
-"""
-
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name) / "wt"
     root.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
     return root, tmp
 
 
 def _git(root: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(root), *args], check=True,
-                   capture_output=True)
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
 
 
 def _project() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
@@ -67,83 +57,38 @@ def test_template_carries_every_required_section() -> None:
     print("ok: the template carries every required section")
 
 
-def test_entry_shape_with_and_without_a_description() -> None:
-    assert tasks.backlog_entry("fix-auth", "Fix Auth") == \
-        "- [ ] [Fix Auth](tasks/fix-auth/task.md)"
-    e = tasks.backlog_entry("fix-auth", "Fix Auth", "harden login")
-    assert e.endswith("\u2014 harden login"), e
-    print("ok: backlog entry shape")
-
-
-def test_entries_go_to_the_top_of_the_backlog_in_order() -> None:
-    out = tasks.insert_backlog(BACKLOG, ["- [ ] [A](tasks/a/task.md)",
-                                         "- [ ] [B](tasks/b/task.md)"])
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    assert lines.index("- [ ] [A](tasks/a/task.md)") \
-        < lines.index("- [ ] [B](tasks/b/task.md)"), "given order must be preserved"
-    assert lines.index("- [ ] [B](tasks/b/task.md)") < lines.index("**Foundations**")
-    assert lines.index("## Backlog") < lines.index("- [ ] [A](tasks/a/task.md)")
-    assert "Seeded in rough execution order" in out
-    print("ok: entries land at the top of the backlog, in the given order")
-
-
-def test_backlog_section_is_appended_when_absent() -> None:
-    out = tasks.insert_backlog("# Notes\n\nnothing here\n",
-                               ["- [ ] [A](tasks/a/task.md)"])
-    assert "## Backlog" in out and "- [ ] [A](tasks/a/task.md)" in out
-    assert out.endswith("\n")
-    print("ok: a missing Backlog section is appended")
-
-
-def test_add_creates_the_spec_and_the_entry() -> None:
+def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
     root, tmp = _repo()
-    (root / "TASKS.md").write_text(BACKLOG)
-    r = tasks.add_many(root, ["fix-auth"], desc="harden login")
+    r = tasks.add_many(root, ["fix-auth"])
     assert r.ok, r.notes
     body = (root / "tasks" / "fix-auth" / "task.md").read_text()
     assert body.startswith("# Task: Fix Auth")
-    listed = (root / "TASKS.md").read_text()
-    assert "- [ ] [Fix Auth](tasks/fix-auth/task.md) \u2014 harden login" in listed
+    assert not (root / "TASKS.md").exists(), \
+        "no TASKS.md is written or generated any more"
     assert any("COMMIT" in n for n in r.notes), "must say the files need committing"
     tmp.cleanup()
-    print("ok: add creates the spec and lists it")
+    print("ok: add creates the spec and writes no TASKS.md")
 
 
 def test_add_is_idempotent() -> None:
     root, tmp = _repo()
-    (root / "TASKS.md").write_text(BACKLOG)
     tasks.add_many(root, ["fix-auth"])
     (root / "tasks" / "fix-auth" / "task.md").write_text("# Task: edited by hand\n")
     r = tasks.add_many(root, ["fix-auth"])
     assert r.ok, r.notes
     assert (root / "tasks" / "fix-auth" / "task.md").read_text() \
         == "# Task: edited by hand\n", "an existing spec must never be overwritten"
-    assert (root / "TASKS.md").read_text().count("tasks/fix-auth/task.md") == 1
-    assert len(r.skipped) == 2, r.skipped
+    assert len(r.skipped) == 1 and "already exists" in r.skipped[0], r.skipped
     tmp.cleanup()
-    print("ok: re-adding overwrites nothing and duplicates nothing")
-
-
-def test_tasks_md_is_created_when_missing() -> None:
-    root, tmp = _repo()
-    r = tasks.add_many(root, ["fix-auth"])
-    assert r.ok, r.notes
-    listed = (root / "TASKS.md").read_text()
-    assert "## Backlog" in listed
-    assert "- [ ] [Fix Auth](tasks/fix-auth/task.md)" in listed
-    assert any("did not exist" in n for n in r.notes)
-    tmp.cleanup()
-    print("ok: a missing TASKS.md is created")
+    print("ok: re-adding overwrites nothing")
 
 
 def test_several_names_in_one_call() -> None:
     root, tmp = _repo()
-    (root / "TASKS.md").write_text(BACKLOG)
     r = tasks.add_many(root, ["one-thing", "two-thing"])
     assert r.ok, r.notes
     for n in ("one-thing", "two-thing"):
         assert (root / "tasks" / n / "task.md").is_file()
-        assert f"tasks/{n}/task.md" in (root / "TASKS.md").read_text()
     tmp.cleanup()
     print("ok: several names in one call")
 
@@ -163,10 +108,8 @@ def test_the_current_worktree_is_the_default_target() -> None:
     r = tasks.add_many(feature, ["urgent-fix"])
     assert r.ok, r.notes
     assert (feature / "tasks" / "urgent-fix" / "task.md").is_file(), \
-        "the default target is where you are, not where it would be dispatchable"
-    assert "tasks/urgent-fix/task.md" in (feature / "TASKS.md").read_text()
+        "the default target is where you are"
     assert not (main / "tasks").exists(), "no other worktree may be touched"
-    assert not (main / "TASKS.md").exists()
     tmp.cleanup()
     print("ok: the current worktree is the default target")
 
@@ -181,27 +124,6 @@ def test_being_off_base_is_warned_about_but_not_overridden() -> None:
     assert str(main) in joined, "and point at the worktree that has base"
     tmp.cleanup()
     print("ok: being off base warns loudly without moving the files")
-
-
-def test_directory_places_the_task_in_another_worktree() -> None:
-    main, feature, tmp = _project()
-    r = tasks.add_many(main, ["urgent-fix"])
-    assert r.ok, r.notes
-    assert (main / "tasks" / "urgent-fix" / "task.md").is_file()
-    assert not (feature / "tasks").exists()
-    assert not any("not dispatchable" in n for n in r.notes), r.notes
-    tmp.cleanup()
-    print("ok: an explicit directory places the task there, quietly")
-
-
-def test_a_detached_head_is_still_named_in_the_warning() -> None:
-    main, _feature, tmp = _project()
-    _git(main, "checkout", "-q", "--detach", "HEAD")
-    r = tasks.add_many(main, ["urgent-fix"])
-    assert r.ok, r.notes
-    assert any("detached HEAD" in n for n in r.notes), r.notes
-    tmp.cleanup()
-    print("ok: a detached HEAD is named rather than shown as None")
 
 
 def test_declared_names_reads_the_base_branch_only() -> None:

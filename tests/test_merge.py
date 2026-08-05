@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -8,8 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import merge  # noqa: E402
-from orch.store import DONE, MERGED, RUNNING, Store  # noqa: E402
+from orch import merge, state  # noqa: E402
 
 
 def _git(cwd, *args):
@@ -36,272 +34,176 @@ def _bare_repo(tmp: tempfile.TemporaryDirectory) -> Path:
     _git(main_wt, "config", "user.email", "t@t")
     _git(main_wt, "config", "user.name", "t")
     (main_wt / ".orchestration" / "hooks").mkdir(parents=True)
-    (main_wt / ".orchestration" / "config.json").write_text("{}")
+    (main_wt / ".orchestration" / "config.json").write_text(
+        '{"baseBranch": "main"}\n')
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "orchestration setup")
+
+    # declare the task on base so archive/scan can see it
+    (main_wt / "tasks" / "task-a").mkdir(parents=True)
+    (main_wt / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    _git(main_wt, "add", "-A")
+    _git(main_wt, "commit", "-q", "-m", "declare task-a")
     return bare
 
 
-def _done_task(bare: Path, store: Store, name: str) -> Path:
-    main_wt = bare.parent / "main"
+def _claim_task(bare: Path, name: str, content: str = "# task-a") -> Path:
     wt = bare.parent / name
     _git(bare, "worktree", "add", "-b", name, str(wt), "main")
     _git(wt, "config", "user.email", "t@t")
     _git(wt, "config", "user.name", "t")
-    (wt / "task.py").write_text(f"# {name}")
+    (wt / "task.py").write_text(content)
     _git(wt, "add", "-A")
     _git(wt, "commit", "-q", "-m", f"work for {name}")
-    store.sync_intent(str(bare), [name])
-    store.claim(str(bare), name)
-    store.record_launch(str(bare), name, worktree=str(wt), branch=name,
-                        port=4096, pid=0, parent_session="ses_1")
-    store.finish(str(bare), name, DONE, "gate passed")
     return wt
 
 
-def test_merge_done_task_folds_branch_and_cleans_up() -> None:
+def test_merge_done_task_folds_branch_archives_and_cleans_up() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
+    wt = _claim_task(bare, "task-a")
 
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert r.ok, r.problems
-    assert "merged" in r.steps[-1]
+    assert any("merged" in s for s in r.steps)
+    assert any("archived" in s for s in r.steps)
 
     main_wt = bare.parent / "main"
     log = _git(main_wt, "log", "--oneline")
     assert "work for task-a" in log
 
     assert not wt.exists(), "worktree should be gone"
-    wts = _git(bare, "worktree", "list")
-    assert "task-a" not in wts
-
-    branches = _git(main_wt, "branch", "--list")
-    assert "task-a" not in branches
-
-    t = st.get(str(bare), "task-a")
-    assert t.status == MERGED
-    print("ok: done task merged, worktree + branch cleaned up")
+    assert "task-a" not in _git(bare, "branch", "--list")
+    assert (main_wt / "archive" / "task-a" / "task.md").exists(), \
+        "the spec must be archived"
+    assert not (main_wt / "tasks" / "task-a").exists(), \
+        "the spec must leave the active backlog"
+    tmp.cleanup()
+    print("ok: done task merged, archived, worktree + branch cleaned up")
 
 
-def test_merge_non_done_task_refused() -> None:
+def test_merge_refuses_a_dirty_worktree() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    st.sync_intent(str(bare), ["running-task"])
-    st.claim(str(bare), "running-task")
-    st.record_launch(str(bare), "running-task", worktree="/tmp/x",
-                     branch="running-task", port=4096, pid=0,
-                     parent_session="ses_1")
+    wt = _claim_task(bare, "task-a")
+    (wt / "uncommitted.py").write_text("# dirty")
 
-    r = merge.merge_and_cleanup(st, str(bare), "running-task")
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
-    assert "not done" in r.problems[0] or "not done or needs-review" in r.problems[0]
-    print("ok: non-done task refused for merge")
-
-
-def test_merge_nonexistent_task() -> None:
-    tmp = tempfile.TemporaryDirectory()
-    bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    r = merge.merge_and_cleanup(st, str(bare), "ghost")
-    assert not r.ok
-    print("ok: nonexistent task fails merge")
-
-
-def test_merge_idempotent() -> None:
-    tmp = tempfile.TemporaryDirectory()
-    bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    _done_task(bare, st, "task-a")
-
-    r1 = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert r1.ok
-    r2 = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert r2.ok
-    assert "already merged" in r2.steps[0]
-    print("ok: merging an already-merged task is a no-op")
+    assert any("uncommitted" in p for p in r.problems), r.problems
+    assert wt.exists()
+    tmp.cleanup()
+    print("ok: a dirty worktree is never merged")
 
 
 def test_merge_conflict_keeps_worktree_and_branch() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
+    wt = _claim_task(bare, "task-a")
 
     main_wt = bare.parent / "main"
     (main_wt / "task.py").write_text("# conflicting")
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
 
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
-    assert any("merge failed" in p for p in r.problems)
+    assert any("merge failed" in p for p in r.problems), r.problems
     assert wt.exists(), "worktree should survive a failed merge"
-
-    log = _git(main_wt, "log", "--oneline")
-    assert "work for task-a" not in log, "the branch should not have merged"
-
-    t = st.get(str(bare), "task-a")
-    assert t.status == "needs-review", (
-        "a merge conflict should move the task to needs-review so the daemon stops "
-        "retrying; a human resolves and runs `orch task merge`")
-    print("ok: merge conflict keeps worktree + branch, task moves to needs-review")
+    assert "task-a" in _git(main_wt, "branch", "--list"), "branch survives"
+    tmp.cleanup()
+    print("ok: a merge conflict keeps the worktree and branch for a human")
 
 
-def test_manual_merge_after_resolving_conflict() -> None:
+def test_remove_task_handles_the_noop_case() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
+    # claim but produce nothing (branch == base)
+    wt = bare.parent / "noop-task"
+    _git(bare, "worktree", "add", "-b", "noop-task", str(wt), "main")
+    _git(wt, "config", "user.email", "t@t")
+    _git(wt, "config", "user.name", "t")
+    _git(wt, "commit", "-q", "--allow-empty", "-m", "nothing")
 
     main_wt = bare.parent / "main"
-    (main_wt / "task.py").write_text("# conflicting")
+    (main_wt / "tasks" / "noop-task").mkdir(parents=True)
+    (main_wt / "tasks" / "noop-task" / "task.md").write_text("# Noop\n")
     _git(main_wt, "add", "-A")
-    _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
+    _git(main_wt, "commit", "-q", "-m", "declare noop-task")
 
-    r1 = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert not r1.ok
+    r = merge.remove_task(bare, "noop-task", "noop-task", wt, "main")
+    assert r.ok, r.problems
+    assert not wt.exists()
+    assert "noop-task" not in _git(main_wt, "branch", "--list")
+    assert (main_wt / "archive" / "noop-task" / "task.md").exists()
+    tmp.cleanup()
+    print("ok: a no-op task is removed and archived")
 
-    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"],
-                       capture_output=True, check=True)
-    subprocess.run(["git", "-C", str(wt), "rebase", "main"],
-                       capture_output=True, timeout=10)
-    (wt / "task.py").write_text("# resolved task-a")
-    _git(wt, "add", "-A")
-    env = {**os.environ, "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
-    subprocess.run(["git", "-C", str(wt), "rebase", "--continue"],
-                       capture_output=True, timeout=10, env=env)
-    r2 = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert r2.ok, r2.problems
-    assert "merged" in r2.steps[-1]
 
-    t = st.get(str(bare), "task-a")
-    assert t.status == MERGED
-    print("ok: manual merge after resolving conflict works from needs-review")
+def test_reset_task_returns_to_todo_without_archiving() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    bare = _bare_repo(tmp)
+    wt = _claim_task(bare, "task-a")
+
+    main_wt = bare.parent / "main"
+    r = merge.reset_task(bare, "task-a", "task-a", wt, "main")
+    assert r.ok, r.problems
+    assert not wt.exists()
+    assert "task-a" not in _git(main_wt, "branch", "--list")
+    assert (main_wt / "tasks" / "task-a" / "task.md").exists(), \
+        "reset keeps the spec in the backlog"
+    assert not (main_wt / "archive" / "task-a").exists()
+    tmp.cleanup()
+    print("ok: reset deletes the branch and worktree, keeps the spec")
 
 
 def test_pre_task_cleanup_hook_blocks() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
+    wt = _claim_task(bare, "task-a")
 
-    hook_dir = wt / ".orchestration" / "hooks"
-    hook_dir.mkdir(parents=True, exist_ok=True)
-    hook = hook_dir / "pre-task-cleanup"
+    hook = wt / ".orchestration" / "hooks" / "pre-task-cleanup"
+    hook.parent.mkdir(parents=True, exist_ok=True)
     hook.write_text("#!/usr/bin/env bash\nexit 1\n")
     hook.chmod(0o755)
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "add blocking hook")
 
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
     assert any("blocked" in p for p in r.problems)
     assert wt.exists(), "worktree should survive a blocked cleanup"
 
     main_wt = bare.parent / "main"
-    log = _git(main_wt, "log", "--oneline")
-    assert "work for task-a" in log, "merge should have landed before the hook"
+    assert "work for task-a" in _git(main_wt, "log", "--oneline"), \
+        "merge should have landed before the hook"
+    tmp.cleanup()
     print("ok: pre-task-cleanup hook blocks worktree removal, merge survives")
 
 
-def test_pre_branch_delete_hook_blocks() -> None:
+def test_scan_after_merge_sees_nothing_claimed() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
+    wt = _claim_task(bare, "task-a")
+    merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
 
     main_wt = bare.parent / "main"
-    hook = main_wt / ".orchestration" / "hooks" / "pre-branch-delete"
-    hook.write_text("#!/usr/bin/env bash\nexit 1\n")
-    hook.chmod(0o755)
-
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert not r.ok
-    assert any("branch" in p.lower() for p in r.problems)
-    assert not wt.exists(), "worktree was removed before the branch hook ran"
-
-    branches = _git(main_wt, "branch", "--list")
-    assert "task-a" in branches, "branch should survive a blocked delete"
-    print("ok: pre-branch-delete hook blocks branch deletion, worktree still removed")
+    proj = state.Project.from_dir(main_wt)
+    assert proj is not None
+    tasks = {t.name: t for t in proj.scan()}
+    assert "task-a" in tasks and tasks["task-a"].archived
+    assert tasks["task-a"].status == state.ARCHIVED
+    tmp.cleanup()
+    print("ok: after merge the task reads as archived")
 
 
-def test_post_task_cleanup_hook_runs() -> None:
-    tmp = tempfile.TemporaryDirectory()
-    bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    _done_task(bare, st, "task-a")
-
-    main_wt = bare.parent / "main"
-    marker = main_wt / ".orchestration" / "hooks" / "post-task-cleanup"
-    marker.write_text("#!/usr/bin/env bash\necho cleanup-done > " + str(main_wt / "marker.txt"))
-    marker.chmod(0o755)
-
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert r.ok, r.problems
-    assert (main_wt / "marker.txt").read_text().strip() == "cleanup-done"
-    print("ok: post-task-cleanup hook runs after merge + cleanup")
-
-
-def test_decide_emits_merge_for_done_tasks() -> None:
-    from orch import daemon
-    from orch.store import Task
-    done_task = Task(id=1, project="/tmp/lab.git", name="task-a", status=DONE,
-                    lease_until=None, worktree="/tmp/lab/task-a", port=None,
-                    pid=None, retries=0, branch="task-a", last_outcome="passed")
-    snap = daemon.Snapshot(now=0, server_running=True, server_unresponsive=False,
-                          tasks=[], done_tasks=[done_task])
-    acts = daemon.decide(snap)
-    merges = [a for a in acts if a.kind == daemon.MERGE]
-    assert len(merges) == 1
-    assert merges[0].task == "task-a"
-    print("ok: decide emits MERGE for done tasks")
-
-
-def test_merge_commits_uncommitted_work_before_merging() -> None:
-    tmp = tempfile.TemporaryDirectory()
-    bare = _bare_repo(tmp)
-    st = Store(":memory:")
-    wt = _done_task(bare, st, "task-a")
-
-    (wt / "extra.py").write_text("# extra file")
-    _git(wt, "add", "-A")
-
-    r = merge.merge_and_cleanup(st, str(bare), "task-a")
-    assert r.ok, r.problems
-    assert any("committed" in s for s in r.steps)
-
-    main_wt = bare.parent / "main"
-    log = _git(main_wt, "log", "--oneline")
-    assert "work for task-a" in log or "committed by orch" in log
-    assert (main_wt / "extra.py").exists(), "uncommitted work should have landed"
-    print("ok: uncommitted work is committed before merge and lands on base")
-
-
-def test_decide_does_not_merge_running_tasks() -> None:
-    from orch import daemon
-    from orch.store import Task
-    running = Task(id=1, project="/tmp/lab.git", name="task-a", status=RUNNING,
-                  lease_until=999999999, worktree="/tmp/lab/task-a", port=4096,
-                  pid=1234, retries=0, branch="task-a")
-    snap = daemon.Snapshot(now=0, server_running=True, server_unresponsive=False,
-                          tasks=[running], done_tasks=[])
-    acts = daemon.decide(snap)
-    assert not any(a.kind == daemon.MERGE for a in acts)
-    print("ok: decide does not emit MERGE for running tasks")
+def main() -> int:
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+    print(f"\n{len(tests)} merge tests passed")
+    return 0
 
 
 if __name__ == "__main__":
-    import traceback
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-            except Exception:
-                print(f"FAIL: {name}")
-                traceback.print_exc()
-            else:
-                pass
-    print()
-    tests = [n for n in sorted(globals()) if n.startswith("test_")]
-    print(f"{len(tests)} merge tests passed")
+    raise SystemExit(main())

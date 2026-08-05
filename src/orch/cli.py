@@ -10,11 +10,10 @@ from pathlib import Path
 from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import gate as gate_mod
-from . import harness, init as init_mod, observe, server as server_mod
+from . import harness, init as init_mod, observe, server as server_mod, state
 from . import tasks as tasks_mod
 from .discovery import discover
 from . import doctor as doctor_mod
-from .store import Store
 
 __version__ = "0.1.0"
 
@@ -70,6 +69,7 @@ def cmd_events(args: argparse.Namespace) -> int:
         return 2
     tui = tuis[0]
     print(f"# tailing /event on port {tui.port} ({tui.cwd})", file=sys.stderr)
+    assert tui.port is not None
     seen: dict[str, int] = {}
     deadline = time.time() + args.duration if args.duration else None
 
@@ -212,64 +212,123 @@ def cmd_task_start(args: argparse.Namespace) -> int:
 
 def cmd_task_list(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    top, project, err = dispatch_mod.project_of(start)
-    if err or project is None or top is None:
-        print(err or "not in a worktree", file=sys.stderr)
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
         return 2
-    st = Store()
-    try:
-        base = gate_mod.base_branch(top)
-        st.sync_intent(str(project), dispatch_mod.declared_names(top, base))
-        rows = st.tasks(str(project))
-        if args.json:
-            print(json.dumps([vars(t) for t in rows], indent=2))
-            return 0
-        if not rows:
-            print("no tasks recorded for this project")
-            return 0
-        for t in rows:
-            flag = ""
-            if t.lease_expired:
-                flag = "  (lease expired - verify before reclaiming)"
-            v = st.last_verdict(str(project), t.name)
-            said = f"  {v['source']}:{v['outcome']}" if v else ""
-            print(f"  {t.status:12} {t.name:34} pid={t.pid or '-':<8} "
-                  f"retries={t.retries}{said}{flag}")
+    st = server_mod.status()
+    port = st.get("port") if st.get("running") and not st.get("unresponsive") else None
+    tasks = proj.scan(port)
+    if args.json:
+        print(json.dumps([_task_json(t) for t in tasks], indent=2))
         return 0
-    finally:
-        st.close()
+    if not tasks:
+        print("no tasks recorded for this project")
+        return 0
+    for t in tasks:
+        branch = t.branch or "-"
+        where = (t.worktree or "-").split("/")[-1]
+        state_info = ""
+        if t.session != state.SESSION_NONE:
+            state_info = f" session={t.session}"
+        if t.dirty:
+            state_info += " dirty"
+        elif t.diff:
+            state_info += " diff"
+        print(f"  {t.status:12} {t.name:34} {branch:<34} {where}{state_info}")
+        for n in t.notes:
+            print(f"    ! {n}")
+        for b in t.blocked:
+            print(f"    ↳ {b.kind}: {b.detail}  [{b.request_id}]")
+    return 0
+
+
+def _task_json(t: state.TaskState) -> dict:
+    return {
+        "name": t.name,
+        "status": t.status,
+        "project": t.project,
+        "declared": t.declared,
+        "archived": t.archived,
+        "claimed": t.claimed,
+        "branch": t.branch,
+        "worktree": t.worktree,
+        "dirty": t.dirty,
+        "diff": t.diff,
+        "session": t.session,
+        "session_ids": t.session_ids,
+        "dispatch_alive": t.dispatch_alive,
+        "dispatch_orchestrated": t.dispatch_orchestrated,
+        "base": t.base,
+    }
 
 
 def cmd_task_reset(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    _, project, err = dispatch_mod.project_of(start)
-    if err or project is None:
-        print(err or "not in a worktree", file=sys.stderr)
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
         return 2
-    st = Store()
-    try:
-        t = st.get(str(project), args.name)
-        if t is None:
-            print(f"no such task: {args.name}", file=sys.stderr)
-            return 2
-        if t.status == "running" and not args.force:
+    tasks = proj.scan()
+    t = next((x for x in tasks if x.name == args.name), None)
+    if t is None:
+        print(f"no such task: {args.name}", file=sys.stderr)
+        return 2
+    if not t.claimed or not t.worktree or not t.branch:
+        print(f"{args.name} is not claimed (status {t.status}); nothing to reset",
+              file=sys.stderr)
+        return 1
+    if not args.force:
+        live = t.session in (state.SESSION_BUSY, state.SESSION_BLOCKED) \
+            or t.dispatch_alive
+        if live:
             print(
-                f"{args.name} is still running (pid={t.pid or '?'}). Resetting a live "
-                f"task orphans the agent; stop it first, or pass --force if you have "
-                f"confirmed it is dead.",
+                f"{args.name} still has a live session or dispatch process. "
+                f"Reset deletes the branch and worktree; pass --force only if you "
+                f"have confirmed it is dead.",
                 file=sys.stderr,
             )
             return 1
-        st.reclaim(str(project), args.name, f"reset by hand (was {t.status})")
-        print(f"{args.name}: {t.status} -> todo")
-        return 0
-    finally:
-        st.close()
+    from . import merge as merge_mod
+    r = merge_mod.reset_task(proj.common, args.name, t.branch,
+                             Path(t.worktree), proj.base)
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    print(f"{args.name}: -> todo (branch and worktree deleted)")
+    return 0 if r.ok else 1
+
+
+def cmd_task_archive(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
+        return 2
+    tasks = proj.scan()
+    t = next((x for x in tasks if x.name == args.name), None)
+    if t is None:
+        print(f"no such task: {args.name}", file=sys.stderr)
+        return 2
+    if not t.claimed or not t.worktree or not t.branch:
+        print(f"{args.name} is not claimed (status {t.status}); nothing to archive",
+              file=sys.stderr)
+        return 1
+    from . import merge as merge_mod
+    r = merge_mod.remove_task(proj.common, args.name, t.branch,
+                              Path(t.worktree), proj.base)
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    print(f"{args.name}: closed and archived")
+    return 0 if r.ok else 1
 
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = tasks_mod.add_many(start, args.name, title=args.title, desc=args.desc)
+    r = tasks_mod.add_many(start, args.name, title=args.title)
     print(tasks_mod.render(r))
     return 0 if r.ok else 2
 
@@ -277,21 +336,22 @@ def cmd_task_add(args: argparse.Namespace) -> int:
 def cmd_task_merge(args: argparse.Namespace) -> int:
     from . import merge as merge_mod
     start = Path(args.directory) if args.directory else Path.cwd()
-    _, project, err = dispatch_mod.project_of(start)
-    if err or project is None:
-        print(err or "not in a worktree", file=sys.stderr)
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
         return 2
-    st = Store()
-    try:
-        r = merge_mod.merge_and_cleanup(st, str(project), args.name)
-        for s in r.steps:
-            print(f"  {s}")
-        sys.stdout.flush()
-        for p in r.problems:
-            print(f"  ! {p}", file=sys.stderr)
-        return 0 if r.ok else 1
-    finally:
-        st.close()
+    tasks = proj.scan()
+    t = next((x for x in tasks if x.name == args.name), None)
+    if t is None or not t.claimed or not t.worktree or not t.branch:
+        print(f"no claimed task: {args.name}", file=sys.stderr)
+        return 2
+    r = merge_mod.merge_and_cleanup(proj.common, args.name, t.branch,
+                                    Path(t.worktree), proj.base)
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    return 0 if r.ok else 1
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -327,64 +387,7 @@ def cmd_gate_run(args: argparse.Namespace) -> int:
     if v.detail:
         for line in v.detail.strip().splitlines()[-20:]:
             print(f"  {line}")
-
-    st = Store()
-    try:
-        t = st.by_worktree(str(wt))
-        if t is not None:
-            st.record_verdict(t.project, t.name, v.event, v.outcome, v.detail,
-                              diverged=v.diverged, seconds=v.seconds, source="cli")
-            print(f"  recorded against task {t.name}")
-    finally:
-        st.close()
     return 0 if v.justifies_done else 1
-
-
-def cmd_gate_state(args: argparse.Namespace) -> int:
-    st = Store()
-    try:
-        t = st.by_worktree(args.worktree)
-        if t is None:
-            print(json.dumps({"known": False, "fingerprint": None, "attempts": 0}))
-            return 0
-        print(json.dumps({
-            "known": True, "task": t.name, "project": t.project,
-            "fingerprint": t.fingerprint, "attempts": t.retries,
-        }))
-        return 0
-    finally:
-        st.close()
-
-
-def cmd_gate_report(args: argparse.Namespace) -> int:
-    st = Store()
-    try:
-        t = st.by_worktree(args.worktree)
-        if t is None:
-            print(json.dumps({"known": False, "attempts": 0}))
-            return 0
-        attempts = t.retries
-        if args.outcome == "running":
-            st.record_verdict(t.project, t.name, args.event, "running",
-                              args.detail or "", source="router")
-            print(json.dumps({"known": True, "task": t.name, "attempts": attempts}))
-            return 0
-        if args.outcome == "passed":
-            if args.fingerprint:
-                st.set_fingerprint(t.project, t.name, args.fingerprint)
-            st.reset_retry(t.project, t.name)
-            attempts = 0
-        elif args.outcome == "failed":
-            attempts = st.bump_retry(t.project, t.name)
-        elif args.outcome == "stuck" and args.fingerprint:
-            st.set_fingerprint(t.project, t.name, args.fingerprint)
-        st.record_verdict(t.project, t.name, args.event, args.outcome,
-                          args.detail or "", diverged=args.diverged,
-                          seconds=args.seconds, source="router")
-        print(json.dumps({"known": True, "task": t.name, "attempts": attempts}))
-        return 0
-    finally:
-        st.close()
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -491,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stop after N seconds and print the histogram")
     e.set_defaults(func=cmd_events)
 
-    i = sub.add_parser("init", help="scaffold .orchestration/ and install the router plugin")
+    i = sub.add_parser("init", help="scaffold .orchestration/ with the gate template")
     i.add_argument("-C", "--directory")
     i.add_argument("--force", action="store_true",
                    help="overwrite existing files, except gates")
@@ -545,20 +548,25 @@ def build_parser() -> argparse.ArgumentParser:
     tl.add_argument("--json", action="store_true")
     tl.set_defaults(func=cmd_task_list)
 
-    tr = tsub.add_parser("reset", help="return a task to available (a human action)")
+    tr = tsub.add_parser("reset", help="return a claimed task to todo (delete branch + worktree)")
     tr.add_argument("name")
     tr.add_argument("-C", "--directory")
     tr.add_argument("--force", action="store_true",
-                    help="reset even a task recorded as running")
+                    help="reset even a task with a live session or dispatch")
     tr.set_defaults(func=cmd_task_reset)
 
+    tar = tsub.add_parser("archive",
+                          help="close a reviewed needs-review task: delete branch + worktree, archive the spec")
+    tar.add_argument("name")
+    tar.add_argument("-C", "--directory")
+    tar.set_defaults(func=cmd_task_archive)
+
     ta = tsub.add_parser("add",
-                         help="scaffold task.md specs and list them in TASKS.md")
+                         help="scaffold tasks/<name>/task.md specs (no TASKS.md)")
     ta.add_argument("name", nargs="+")
     ta.add_argument("-C", "--directory",
                     help="write into this worktree instead of the current one")
     ta.add_argument("--title", help="entry title (default: derived from the name)")
-    ta.add_argument("--desc", help="one-line description for the TASKS.md entry")
     ta.set_defaults(func=cmd_task_add)
 
     tm = tsub.add_parser("merge",
@@ -576,20 +584,11 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--event", default="session-idle")
     gr.set_defaults(func=cmd_gate_run)
 
-    gs = sub.add_parser("gate-state", help="(internal) gate fingerprint and attempts")
-    gs.add_argument("--worktree", required=True)
-    gs.add_argument("--event", default="session-idle")
-    gs.set_defaults(func=cmd_gate_state)
+    gs = sub.add_parser("gate-state", help="(removed)")
+    gs.set_defaults(func=lambda _a: 1)
 
-    gp = sub.add_parser("gate-report", help="(internal) record a router gate result")
-    gp.add_argument("--worktree", required=True)
-    gp.add_argument("--event", default="session-idle")
-    gp.add_argument("--outcome", required=True)
-    gp.add_argument("--fingerprint")
-    gp.add_argument("--detail")
-    gp.add_argument("--seconds", type=float, default=0.0)
-    gp.add_argument("--diverged", action="store_true")
-    gp.set_defaults(func=cmd_gate_report)
+    gp = sub.add_parser("gate-report", help="(removed)")
+    gp.set_defaults(func=lambda _a: 1)
 
     dm = sub.add_parser("daemon", help="supervise leases, verdicts and the server")
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")
@@ -631,7 +630,7 @@ def build_parser() -> argparse.ArgumentParser:
     un = sub.add_parser(
         "uninstall",
         help="remove every config-level trace of orch (never a project's "
-             ".orchestration/ or router plugin)")
+             ".orchestration/)")
     un.add_argument("--keep-state", action="store_true",
                     help="stop the daemon and server but keep the database and "
                          "task history in ~/.local/state/orch")

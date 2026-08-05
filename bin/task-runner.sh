@@ -3,7 +3,6 @@
 # task-runner.sh - Streamlined Task Initialization
 # Usage: ../task-runner.sh (from main/) or ./task-runner.sh (from parent)
 
-# 1. Determine the base directory (parent of reeeally-preview)
 if [ -d "reeeally-preview" ]; then
     BASE_DIR="."
     MAIN_DIR="reeeally-preview"
@@ -22,8 +21,7 @@ if [ ! -f "$TASKS_FILE" ]; then
     exit 1
 fi
 
-# 2. Extract available tasks [ ]
-# Use HEAD version to list tasks with stable line numbers
+# Use HEAD, not the working tree, so line numbers are stable
 task_list=$(git show HEAD:TASKS.md | awk '/^- \[ \]/{printf "%d:%s\n", NR, $0}')
 
 if [ -z "$task_list" ]; then
@@ -31,7 +29,6 @@ if [ -z "$task_list" ]; then
     exit 0
 fi
 
-# Read tasks with line numbers into arrays
 IFS=$'\n' task_entries=($task_list)
 unset IFS
 
@@ -63,22 +60,18 @@ else
     echo ""
     printf "Pick task numbers, names, or folder names (space-separated): "
     read -r choices
-    # Split choices into an array using default IFS (space)
     read -r -a choices_array <<< "$choices"
 fi
 
-# 4. Process each selected task
 for choice in "${choices_array[@]}"; do
     selected_index=-1
     
-    # Try numeric match
     if [[ "$choice" =~ ^[0-9]+$ ]]; then
         if [ "$choice" -ge 1 ] && [ "$choice" -le "${#tasks[@]}" ]; then
             selected_index=$((choice-1))
         fi
     fi
     
-    # Try exact name or folder match if not found by number
     if [ "$selected_index" -eq -1 ]; then
         for i in "${!tasks[@]}"; do
             if [ "$choice" = "${task_names[$i]}" ] || [ "$choice" = "${task_folders[$i]}" ]; then
@@ -95,14 +88,13 @@ for choice in "${choices_array[@]}"; do
     
     task_name="${task_names[$selected_index]}"
     
-    # Create a branch name: kebab-case, lowercase, alphanumeric only
     branch_name=$(echo "$task_name" | tr '[:upper:]' '[:lower:]' | sed 's/ /-/g' | sed 's/[^a-z0-9-]//g')
 
     echo "------------------------------------------"
     echo "Processing: $task_name"
 
-    # 4.1 Mark as in-progress in TASKS.md and COMMIT
-    # This ensures each subsequent task's worktree is based on a commit that includes previous tasks' status
+    # Each subsequent task's worktree must be based on a commit that includes
+    # the previous task's status, so mark it in-progress and commit first.
     echo "[$branch_name] Marking as in-progress..."
     escaped_task_name=$(echo "$task_name" | sed 's/[&/\"\]/\\&/g')
     sed -i "s/^- \[ \] \[$escaped_task_name\]/- [-] [$escaped_task_name]/" "$TASKS_FILE"
@@ -113,18 +105,15 @@ for choice in "${choices_array[@]}"; do
         git commit -m "chore: mark task '$task_name' as in-progress" -q
     )
 
-    # 4.2 Create Worktree (git post-checkout hook will handle database setup + ni)
     echo "[$branch_name] Initializing worktree..."
     (
         cd "$BASE_DIR/reeeally-preview"
         zsh -c "source ~/.zshrc && gwadd $branch_name"
     )
 
-    # 4.3 Setup Tmux in background
     (
         TARGET_DIR="$BASE_DIR/$branch_name"
         if [ -d "$TARGET_DIR" ]; then
-            # Tmux Session Setup
             PARENT_DIR_NAME=$(basename $(realpath "$BASE_DIR"))
             SESSION_NAME="$PARENT_DIR_NAME/$branch_name"
 
@@ -141,9 +130,8 @@ for choice in "${choices_array[@]}"; do
 
             tmux new-session -d -s "$SESSION_NAME" -c "$TARGET_DIR" "${TMUX_ENV_ARGS[@]}"
             sleep 2
-            # Escape for the command inside tmux
             tmux_task_name=$(printf %q "$task_name")
-            # every tmux session open nvim terminal which needs the i(insert) for opencode
+            # every tmux session opens nvim's terminal, which needs i for opencode
             tmux send-keys -t "$SESSION_NAME" "iopencode --agent team-lead --prompt \"You are the Team Lead. Read tasks/${task_folders[$selected_index]}/task.md and execute it. Make structural edits yourself (migrations, schemas, routes, registry). Delegate implementation to test-creator and screen sub-agents.\"" C-m  
 
             echo "[$branch_name] Ready."
@@ -153,7 +141,6 @@ for choice in "${choices_array[@]}"; do
     ) &
 done
 
-# Wait for all background processes to finish
 wait
 echo "------------------------------------------"
 echo "All tasks initialized."

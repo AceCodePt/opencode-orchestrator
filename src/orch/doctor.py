@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +22,7 @@ TASK_HOOKS = [
     "post-task-cleanup",
     "pre-branch-delete",
 ]
-AGENT_HOOKS = ["session-idle", "session-error"]
+AGENT_HOOKS = ["session-idle"]
 
 
 @dataclass
@@ -152,7 +153,7 @@ def check_daemon() -> list[Check]:
     if not info.get("installed"):
         return [Check(
             FAIL, "no supervisor installed",
-            "nothing renews leases or verifies stopped agents, so no task will ever "
+            "nothing settles tasks or runs gates, so no task will ever "
             "reach done. `orch install`",
         )]
     out: list[Check] = []
@@ -164,7 +165,8 @@ def check_daemon() -> list[Check]:
         ))
     else:
         out.append(Check(OK, f"supervisor running pid {info.get('ExecMainPID')}",
-                         "renews leases, verifies stopped agents, restarts the server"))
+                         "settles tasks, runs gates, retriggers agents, merges "
+                         "and archives"))
     out.extend(_check_daemon_freshness(info))
     if info.get("linger") is False:
         out.append(Check(
@@ -178,76 +180,46 @@ def check_daemon() -> list[Check]:
 def _check_daemon_freshness(info: dict) -> list[Check]:
     if info.get("ActiveState") != "active":
         return []
-    from . import daemon as daemon_mod
-    from .store import Store
-
+    pid = info.get("ExecMainPID")
+    if not pid or str(pid) in ("-", "0"):
+        return [Check(WARN, "cannot find the supervisor's pid", "")]
     try:
-        s = Store()
-        try:
-            running = s.get_meta("daemon_running_source")
-        finally:
-            s.close()
-    except Exception:  # noqa: BLE001
-        return []
-
-    installed = daemon_mod.source_fingerprint()
-    if running is None:
-        return [Check(WARN, "the running supervisor did not record its source version",
-                      "it predates this check - restart it to be sure which policy is "
-                      "in force")]
-    if running != installed:
+        p = subprocess.run(["ps", "-o", "etimes=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=10)
+        elapsed = int(p.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return [Check(WARN, "cannot read the supervisor's start time", "")]
+    started_at = int(time.time()) - elapsed
+    src = Path(__file__).resolve().parent
+    newest = max((f.stat().st_mtime for f in src.glob("*.py")
+                  if f.is_file()), default=0)
+    if newest > started_at:
         return [Check(
-            FAIL, "the running supervisor is not the installed code",
-            f"in memory {running}, on disk {installed}. A long-lived process holds "
-            f"what it imported at startup, so it is still enforcing the older policy "
-            f"and nothing in its logs will say so. "
-            f"`systemctl --user restart orch-daemon`",
+            FAIL, "the running supervisor predates the installed code",
+            "a long-lived process holds what it imported at startup, so it is "
+            "still enforcing the older policy and nothing in its logs will say "
+            "so. `systemctl --user restart orch-daemon`",
         )]
-    return [Check(OK, f"supervisor matches the installed code ({running})", "")]
+    return [Check(OK, "supervisor runs the installed code", "")]
 
 
 def check_harness_version(st: dict) -> list[Check]:
-    from .store import MIN_HARNESS, Store
-
     raw = st.get("version")
     if not raw:
         return [Check(WARN, "harness version unknown",
                       "cannot compare against the supported floor "
-                      f"{'.'.join(map(str, MIN_HARNESS))}")]
+                      f"{'.'.join(map(str, harness.MIN_VERSION))}")]
     try:
         v = tuple(int(x) for x in str(raw).split(".")[:3])
     except ValueError:
         return [Check(WARN, f"harness version {raw} is unparseable", "")]
-
-    floor = ".".join(map(str, MIN_HARNESS))
-    if v < MIN_HARNESS:
+    floor = ".".join(map(str, harness.MIN_VERSION))
+    if v < harness.MIN_VERSION:
         return [Check(FAIL, f"harness {raw} is below the supported floor {floor}",
                       "the box is pinned to that floor, so anything older is "
                       "untested here - treat it as an unsatisfied dependency")]
-
-    out = [Check(OK, f"harness {raw} meets the floor {floor}",
-                 "newer is a bonus, not a requirement")]
-    try:
-        s = Store()
-        try:
-            history = s.harness_history()
-            seen = [r["version"] for r in history]
-            recorded = s.get_meta("harness_version")
-        finally:
-            s.close()
-    except Exception:  # noqa: BLE001
-        return out
-
-    if len(seen) > 1:
-        out.append(Check(
-            WARN, f"this database has seen {len(seen)} harness versions",
-            f"{', '.join(seen)} - minor releases are assumed API-compatible; if "
-            f"something behaves oddly, a version change is the first suspect",
-        ))
-    elif recorded is None:
-        out.append(Check(WARN, "no harness version recorded yet",
-                         "starting the shared server records it"))
-    return out
+    return [Check(OK, f"harness {raw} meets the floor {floor}",
+                  "newer is a bonus, not a requirement")]
 
 
 def check_gates(cwd: Path) -> list[Check]:
@@ -274,87 +246,6 @@ def check_gates(cwd: Path) -> list[Check]:
                              f.detail))
         else:
             out.append(Check(FAIL, f"gate {f.name}: {f.state}", f.detail))
-    return out
-
-
-def check_router_contract(cwd: Path) -> list[Check]:
-    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                          capture_output=True, text=True)
-    if code.returncode != 0:
-        return []
-    top = Path(code.stdout.strip())
-    version, path = gate.router_contract(top)
-    if version is None:
-        return []
-    if version < gate.MIN_ROUTER_CONTRACT:
-        return [Check(
-            FAIL,
-            f"router contract {version}, but {gate.MIN_ROUTER_CONTRACT} is required",
-            f"{path} predates a guarantee the supervisor depends on: reporting that a "
-            f"gate has started. Without it a slow gate is read as an agent nothing "
-            f"checked, and the task is marked needs-review while its gate is still "
-            f"running. `orch init --force`, then commit the result",
-        )]
-    return [Check(OK, f"router contract {version}",
-                  "reports gate starts, so a slow check is not mistaken for an "
-                  "unexamined agent")]
-
-
-def check_router_freshness(cwd: Path, st: dict) -> list[Check]:
-    if not st.get("running") or not st.get("started_at"):
-        return []
-    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                          capture_output=True, text=True)
-    if code.returncode != 0:
-        return []
-    top = Path(code.stdout.strip())
-    _, path = gate.router_contract(top)
-    if not path:
-        return []
-    try:
-        edited = int(Path(path).stat().st_mtime)
-    except OSError:
-        return []
-    if edited > int(st["started_at"]):
-        return [Check(
-            WARN, "the router changed after the shared server started",
-            f"the server imports a plugin once per directory and caches it, so any "
-            f"worktree it has already touched is still running the old router - "
-            f"recreating the worktree does not help. `orch server restart`",
-        )]
-    return []
-
-
-def check_router_drift(cwd: Path) -> list[Check]:
-    out: list[Check] = []
-    template = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
-    if not template.exists():
-        return out
-    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                          capture_output=True, text=True)
-    if code.returncode != 0:
-        return out
-    top = Path(code.stdout.strip())
-    installed = None
-    for rel in gate.ROUTER_RELS:
-        if (top / rel).exists():
-            installed = top / rel
-            break
-    if installed is None:
-        return out
-    try:
-        if installed.read_text() == template.read_text():
-            out.append(Check(OK, "router matches the shipped template", str(installed)))
-        else:
-            out.append(Check(
-                WARN, "installed router differs from the shipped template",
-                f"{installed} is not what this orch ships. Intended under the shadcn "
-                f"model, but an older router may silently lack guarantees this "
-                f"version documents - notably running the committed gate rather than "
-                f"the working-tree copy",
-            ))
-    except OSError:
-        pass
     return out
 
 
@@ -428,9 +319,6 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_server()
     checks += check_daemon()
     checks += check_gates(cwd)
-    checks += check_router_contract(cwd)
-    checks += check_router_freshness(cwd, server.status())
-    checks += check_router_drift(cwd)
     checks += check_launch()
     checks += check_tooling()
     checks += check_project(cwd)

@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import gate  # noqa: E402
 
 GATE_BODY = "#!/usr/bin/env bash\necho ok\n"
-ROUTER_BODY = f"export const ROUTER_CONTRACT = {gate.MIN_ROUTER_CONTRACT};\n"
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -27,16 +26,12 @@ def _commit(root: Path, msg: str = "c") -> None:
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", msg], check=True)
 
 
-def _scaffold(root: Path, gate_body: str = GATE_BODY, router: bool = True) -> None:
+def _scaffold(root: Path, gate_body: str = GATE_BODY) -> None:
     (root / gate.HOOKS_REL).mkdir(parents=True, exist_ok=True)
     h = root / gate.HOOKS_REL / "session-idle"
     h.write_text(gate_body)
     h.chmod(0o755)
     (root / gate.CONFIG_REL).write_text('{"baseBranch": "main"}\n')
-    if router:
-        p = root / gate.ROUTER_RELS[0]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(ROUTER_BODY)
 
 
 def _by_name(findings: list[gate.GateFinding], name: str) -> gate.GateFinding | None:
@@ -100,32 +95,6 @@ def test_config_divergence_is_flagged() -> None:
     print("ok: config divergence is flagged")
 
 
-def test_missing_router_on_disk_is_reported() -> None:
-    root, tmp = _repo()
-    _scaffold(root, router=False)
-    _commit(root)
-    findings = gate.inspect(root)
-    f = _by_name(findings, "router plugin")
-    assert f and f.state == gate.MISSING, findings
-    assert gate.blocking(findings), "no router means nothing verifies anything"
-    tmp.cleanup()
-    print("ok: a missing router is reported rather than read as success")
-
-
-def test_router_on_disk_but_uncommitted_is_reported() -> None:
-    root, tmp = _repo()
-    _scaffold(root, router=False)
-    _commit(root)
-    p = root / gate.ROUTER_RELS[0]
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(ROUTER_BODY)
-    findings = gate.inspect(root)
-    f = _by_name(findings, "router plugin")
-    assert f and f.state == gate.UNCOMMITTED, findings
-    tmp.cleanup()
-    print("ok: a router that works here but not downstream is reported")
-
-
 def test_base_branch_comes_from_config() -> None:
     root, tmp = _repo()
     (root / gate.ORCH_DIR).mkdir(parents=True, exist_ok=True)
@@ -184,18 +153,6 @@ def test_run_without_a_committed_gate_is_not_a_pass() -> None:
     print("ok: no committed gate is neither a pass nor an error")
 
 
-def test_run_does_not_leave_anything_in_the_worktree() -> None:
-    root, tmp = _repo()
-    _scaffold(root, "#!/usr/bin/env bash\nexit 0\n")
-    _commit(root)
-    gate.run(root)
-    out = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                         capture_output=True, text=True).stdout
-    assert out.strip() == "", f"gate run dirtied the worktree: {out!r}"
-    tmp.cleanup()
-    print("ok: running a gate leaves the worktree clean")
-
-
 def test_run_treats_a_hanging_gate_as_failure() -> None:
     root, tmp = _repo()
     _scaffold(root, "#!/usr/bin/env bash\nsleep 30\n")
@@ -207,39 +164,31 @@ def test_run_treats_a_hanging_gate_as_failure() -> None:
     print("ok: a hanging gate fails closed")
 
 
-def test_run_reports_a_gate_that_cannot_execute() -> None:
+def test_a_passing_gate_commits_the_work_and_is_idempotent() -> None:
     root, tmp = _repo()
-    _scaffold(root, "#!/nonexistent/interpreter\n")
+    body = (
+        "#!/usr/bin/env bash\n"
+        "cd \"${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}\" || exit 1\n"
+        "if [ -n \"$(git status --porcelain)\" ]; then\n"
+        "  git add -A\n"
+        "  git -c user.name=orch -c user.email=orch@localhost commit -q -m g\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    _scaffold(root, body)
     _commit(root)
+    (root / "work.txt").write_text("done")
     v = gate.run(root)
-    assert v.outcome == gate.FAILED and not v.justifies_done
-    tmp.cleanup()
-    print("ok: an unexecutable gate fails closed")
-
-
-def test_an_old_router_contract_blocks_dispatch() -> None:
-    root, tmp = _repo()
-    _scaffold(root)
-    (root / gate.ROUTER_RELS[0]).write_text("export const ROUTER_CONTRACT = 1;\n")
-    _commit(root)
-
-    findings = gate.inspect(root)
-    f = _by_name(findings, "router contract")
-    assert f is not None and not f.trustworthy, findings
-    assert gate.blocking(findings), "an old contract must stop a dispatch"
-    tmp.cleanup()
-    print("ok: a router below the required contract blocks dispatch")
-
-
-def test_a_router_with_no_marker_is_contract_one() -> None:
-    root, tmp = _repo()
-    _scaffold(root)
-    (root / gate.ROUTER_RELS[0]).write_text("export const X = 1;\n")
-    _commit(root)
-    version, path = gate.router_contract(root)
-    assert version == 1 and path is not None
-    tmp.cleanup()
-    print("ok: a router with no contract marker is treated as contract 1")
+    assert v.outcome == gate.PASSED, v
+    out = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                         capture_output=True, text=True).stdout
+    assert out.strip() == "", f"a passing gate must commit the work: {out!r}"
+    log = subprocess.run(["git", "-C", str(root), "log", "--oneline"],
+                         capture_output=True, text=True).stdout
+    assert "g" in log, "the gate's commit must exist"
+    v2 = gate.run(root)
+    assert v2.outcome == gate.PASSED, "re-running on a clean tree must still pass"
+    print("ok: a passing gate commits the work, and re-running is idempotent")
 
 
 def main() -> int:

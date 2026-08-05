@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import dispatch, gate
-
-TASKS_REL = "TASKS.md"
-BACKLOG_HEADING = "## Backlog"
-
-ENTRY_RE = re.compile(r"^- \[[ x\-?]\] ")
 
 TEMPLATE = """# Task: {title}
 
@@ -36,20 +30,6 @@ Code that exists is not a completed task._
 ## Prohibited Patterns
 
 - <what not to do, and why it is tempting>
-"""
-
-TEMPLATE_TASKS_MD = """# Project Tasks
-
-## Status Legend
-
-- `[ ]` **Todo**: available to be picked up.
-- `[-]` **In Progress**: currently being executed.
-- `[x]` **Done**: completed and verified.
-- `[?]` **Indeterminate**: blocked or needs review.
-
-## Backlog
-
-Later additions go at the top.
 """
 
 
@@ -79,48 +59,6 @@ def template(title: str) -> str:
     return TEMPLATE.format(title=title)
 
 
-def backlog_entry(name: str, title: str, desc: str | None = None) -> str:
-    entry = f"- [ ] [{title}]({task_rel(name)})"
-    if desc:
-        entry += f" \u2014 {desc}"
-    return entry
-
-
-def has_entry(content: str, name: str) -> bool:
-    return f"]({task_rel(name)})" in content
-
-
-def insert_backlog(content: str, entries: list[str]) -> str:
-    if not entries:
-        return content
-    block = list(entries)
-    lines = content.splitlines()
-
-    heading = None
-    for i, line in enumerate(lines):
-        if line.strip().lower() == BACKLOG_HEADING.lower():
-            heading = i
-            break
-
-    if heading is None:
-        tail = lines + ([""] if lines and lines[-1].strip() else [])
-        return "\n".join(tail + [BACKLOG_HEADING, "", *block, ""]) + "\n"
-
-    at = len(lines)
-    for i in range(heading + 1, len(lines)):
-        stripped = lines[i].strip()
-        if ENTRY_RE.match(stripped) or stripped.startswith("**") \
-                or stripped.startswith("#"):
-            at = i
-            break
-
-    while at > heading + 1 and not lines[at - 1].strip():
-        at -= 1
-
-    out = lines[:at] + ["", *block] + lines[at:]
-    return "\n".join(out) + "\n"
-
-
 def off_base_note(root: Path, base: str) -> str | None:
     current = dispatch.current_branch(root)
     if current == base:
@@ -141,7 +79,6 @@ def add_many(
     start: Path,
     names: list[str],
     title: str | None = None,
-    desc: str | None = None,
 ) -> AddResult:
     result = AddResult()
 
@@ -149,9 +86,9 @@ def add_many(
     if err or root is None:
         return result.fail(err or "not inside a git worktree")
 
-    if len(names) > 1 and (title or desc):
+    if len(names) > 1 and title:
         return result.fail(
-            "--title and --desc describe one task, so they cannot be combined with "
+            "--title describes one task, so it cannot be combined with "
             "several names. Add them one at a time, or edit the files afterwards."
         )
 
@@ -160,16 +97,6 @@ def add_many(
     if note:
         result.notes.append(note)
 
-    tasks_md = root / TASKS_REL
-    existed = tasks_md.is_file()
-    content = tasks_md.read_text() if existed else TEMPLATE_TASKS_MD
-    if not existed:
-        result.notes.append(
-            f"{TASKS_REL} did not exist and was created. It is the human-readable "
-            f"view of the backlog; `orch` reads intent from tasks/*/task.md."
-        )
-
-    entries: list[str] = []
     for raw in names:
         name = dispatch.slug(raw)
         if not name:
@@ -183,20 +110,10 @@ def add_many(
 
         if path.exists():
             result.skipped.append(f"{rel} (already exists)")
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(template(shown))
-            result.created.append(rel)
-
-        if has_entry(content, name):
-            result.skipped.append(f"{TASKS_REL} entry for {name} (already listed)")
-        else:
-            entries.append(backlog_entry(name, shown, desc))
-
-    if entries or not existed:
-        tasks_md.write_text(insert_backlog(content, entries))
-        for e in entries:
-            result.created.append(f"{TASKS_REL}: {e.strip()}")
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(template(shown))
+        result.created.append(rel)
 
     if result.created:
         on = dispatch.current_branch(root)

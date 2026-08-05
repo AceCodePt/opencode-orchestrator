@@ -8,51 +8,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import daemon, observe  # noqa: E402
-from orch import server  # noqa: E402
-from orch.store import RUNNING, Store, Task  # noqa: E402
+from orch import daemon, gate, observe, server, state  # noqa: E402
 
 NOW = 1_700_000_000
-WT = "/tmp/lab/task-a"
+_WT_DIR = tempfile.mkdtemp(prefix="orch-lab-")
+WT = _WT_DIR
 
 
-def _task(**kw) -> Task:
-    base = dict(id=1, project="/tmp/lab/lab.git", name="task-a", status=RUNNING,
-                lease_until=NOW + 300, worktree=WT, port=4096, pid=1234, retries=0)
+def _task(**kw) -> state.TaskState:
+    base = dict(project="/tmp/lab/lab.git", name="task-a", base="main",
+                retry_cap=3, declared=True, claimed=True, branch="task-a",
+                worktree=WT, dirty=False, diff=True, session=state.SESSION_NONE)
     base.update(kw)
-    return Task(**base)  # type: ignore[arg-type]
-
-
-def _store() -> Store:
-    return Store(":memory:")
-
-
-def _gated_repo(gate_body: str | None) -> tuple[Path, tempfile.TemporaryDirectory]:
-    tmp = tempfile.TemporaryDirectory()
-    root = Path(tmp.name)
-    for cmd in (["init", "-q", "-b", "main", str(root)],):
-        subprocess.run(["git", *cmd], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
-    if gate_body is not None:
-        h = root / ".orchestration" / "hooks"
-        h.mkdir(parents=True)
-        (h / "session-idle").write_text(gate_body)
-        (h / "session-idle").chmod(0o755)
-    (root / "README").write_text("x")
-    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "c"], check=True)
-    return root, tmp
-
-
-def _fact(state: str, blocked: list | None = None) -> observe.TaskFact:
-    return observe.TaskFact(worktree=WT, session_ids=["ses_1"], state=state,
-                            blocked=blocked or [])
+    return state.TaskState(**base)  # type: ignore[arg-type]
 
 
 def _snap(**kw) -> daemon.Snapshot:
     base = dict(now=NOW, server_running=True, server_unresponsive=False,
-                tasks=[_task()], facts={}, dispatch_alive={1234: True}, quiet_for={})
+                port=4096, tasks=[_task()], mem=daemon.LoopState())
     base.update(kw)
     return daemon.Snapshot(**base)  # type: ignore[arg-type]
 
@@ -61,406 +34,384 @@ def _kinds(actions: list[daemon.Action]) -> list[str]:
     return [a.kind for a in actions]
 
 
-def test_dead_server_escalates_every_running_task() -> None:
+def test_dead_server_is_restarted_and_nothing_else_is_decided() -> None:
     acts = daemon.decide(_snap(server_running=False))
-    assert daemon.RESTART_SERVER in _kinds(acts)
-    review = [a for a in acts if a.kind == daemon.NEEDS_REVIEW]
-    assert len(review) == 1 and review[0].task == "task-a"
-    assert daemon.RECLAIM not in _kinds(acts)
-    print("ok: a dead shared server escalates every running task")
+    assert _kinds(acts) == [daemon.RESTART_SERVER]
+    print("ok: a dead shared server is restarted, tasks are left alone")
 
 
-def test_unresponsive_server_counts_as_dead() -> None:
-    acts = daemon.decide(_snap(server_unresponsive=True))
-    assert daemon.RESTART_SERVER in _kinds(acts)
-    print("ok: an unresponsive server is treated as dead")
+def test_busy_session_needs_no_action() -> None:
+    acts = daemon.decide(_snap(tasks=[_task(session=state.SESSION_BUSY)]))
+    assert acts == []
+    print("ok: a busy session is left alone")
 
 
-def test_busy_session_is_renewed_not_touched() -> None:
-    acts = daemon.decide(_snap(facts={WT: _fact(observe.BUSY)}))
-    assert _kinds(acts) == [daemon.RENEW]
-    print("ok: a busy session is renewed")
-
-
-def test_blocked_agent_is_alerted_and_kept_alive() -> None:
+def test_blocked_session_alerts_once() -> None:
     b = observe.Blocked(kind="external_directory", request_id="per_1",
                         session_id="ses_1", detail="/etc/*")
-    acts = daemon.decide(_snap(facts={WT: _fact(observe.BLOCKED_PERMISSION, [b])}))
+    sup = daemon.Supervisor(dry_run=False)
+    mem = sup.mem
+    acts = daemon.decide(_snap(
+        tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
     assert daemon.ALERT in _kinds(acts)
-    assert daemon.RENEW in _kinds(acts)
-    assert daemon.RECLAIM not in _kinds(acts)
-    print("ok: a blocked agent is alerted and its lease renewed")
+    sup.apply(acts)  # apply marks the request id as alerted
+    acts2 = daemon.decide(_snap(
+        tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
+    assert daemon.ALERT not in _kinds(acts2), "the alert must dedupe by request id"
+    print("ok: a blocked agent is alerted once, deduped by request id")
 
 
-def test_session_outliving_its_dispatch_is_not_dead() -> None:
-    acts = daemon.decide(_snap(dispatch_alive={1234: False},
-                               facts={WT: _fact(observe.BUSY)}))
-    assert _kinds(acts) == [daemon.RENEW]
-    assert daemon.RECLAIM not in _kinds(acts)
-    assert daemon.NEEDS_REVIEW not in _kinds(acts)
-    print("ok: a session still working after its dispatch exited is left alone")
-
-
-def _stopped(outcome: str | None, quiet: int = 0) -> list[daemon.Action]:
-    return daemon.decide(_snap(
-        dispatch_alive={1234: False},
-        facts={WT: _fact(observe.IDLE)},
-        router_outcome={WT: outcome},
-        quiet_for={WT: quiet},
-    ))
-
-
-def test_a_finished_agent_is_verified_not_believed() -> None:
-    acts = _stopped("passed")
-    assert _kinds(acts) == [daemon.VERIFY]
-    assert acts[0].reason == daemon.FINISHED_COMPLETE
-    print("ok: a finished agent is verified rather than assumed either way")
-
-
-def test_stopped_is_not_finished_while_the_gate_loop_is_still_driving() -> None:
-    acts = _stopped("failed")
-    assert _kinds(acts) == [daemon.RENEW]
+def test_newly_settled_task_waits_out_the_budget() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE)
+    acts = daemon.decide(_snap(tasks=[t], mem=mem))
+    assert acts == [], "the first settle observation must only start the timer"
     assert daemon.VERIFY not in _kinds(acts)
-    print("ok: idle mid-retry is not treated as finished")
+    acts = daemon.decide(_snap(now=NOW + 10, tasks=[t], mem=mem))
+    assert daemon.VERIFY not in _kinds(acts), "before the budget no action"
+    print("ok: a freshly settled task waits before being acted on")
 
 
-def test_a_stalled_retry_loop_is_eventually_escalated() -> None:
-    acts = _stopped("failed", quiet=daemon.BUDGET_IDLE_S + 1)
-    assert daemon.NEEDS_REVIEW in _kinds(acts)
-    assert "mid-retry" in [a.reason for a in acts if a.kind == daemon.NEEDS_REVIEW][0]
-    print("ok: a retry loop that stopped driving is escalated, not renewed forever")
+def test_settled_dirty_task_is_verified() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    assert acts[0].retry_cap == 3
+    print("ok: a settled dirty task is verified (the gate decides commit vs retry)")
 
 
-def test_spending_the_retry_cap_counts_as_finished() -> None:
-    acts = _stopped("stuck")
+def test_settled_clean_diff_task_is_verified() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.VERIFY]
-    assert acts[0].reason == daemon.FINISHED_GAVE_UP
-    print("ok: a spent retry cap ends the loop, so the task is finished")
+    print("ok: a settled clean+diff task is verified")
 
 
-def test_a_running_gate_is_not_an_unexamined_agent() -> None:
-    acts = _stopped("running", quiet=200)
-    assert _kinds(acts) == [daemon.RENEW]
-    assert acts[0].reason == daemon.GATE_IN_FLIGHT
-    assert daemon.NEEDS_REVIEW not in _kinds(acts)
-    print("ok: a gate that is still running is not mistaken for an unchecked agent")
+def test_settled_clean_noop_is_removed_without_a_gate() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.REMOVE]
+    print("ok: a clean no-diff task is removed without running a gate")
 
 
-def test_a_gate_running_past_its_own_timeout_is_escalated() -> None:
-    acts = _stopped("running", quiet=daemon.BUDGET_GATE_S + 1)
-    assert daemon.NEEDS_REVIEW in _kinds(acts)
-    assert daemon.BUDGET_GATE_S * 1.0 > 900, "must exceed the gate's own timeout"
-    print("ok: a gate running past its own timeout is escalated")
-
-
-def test_never_gated_waits_out_a_grace_period_first() -> None:
-    early = _stopped(None, quiet=1)
-    assert _kinds(early) == [daemon.RENEW]
-    assert daemon.NEEDS_REVIEW not in _kinds(early)
-    print("ok: a missing verdict is given a grace period before it is believed")
-
-
-def test_an_agent_that_was_never_gated_is_not_verified() -> None:
-    acts = _stopped(None, quiet=daemon.GRACE_UNGATED_S + 1)
+def test_missing_worktree_needs_review() -> None:
+    mem = daemon.LoopState()
+    acts = daemon.decide(_snap(tasks=[_task(worktree=None)], mem=mem))
     assert _kinds(acts) == [daemon.NEEDS_REVIEW]
-    assert acts[0].reason == daemon.NEVER_GATED
-    assert daemon.VERIFY not in _kinds(acts)
-    print("ok: an agent no gate ever examined is reviewed, not verified")
+    print("ok: a claimed task with no worktree needs review")
 
 
-def test_no_gate_configured_is_not_finished_either() -> None:
-    acts = _stopped("no-gate-configured", quiet=daemon.GRACE_UNGATED_S + 1)
+def test_wait_backoff_blocks_repeated_actions() -> None:
+    mem = daemon.LoopState()
+    mem.wait_until[("/tmp/lab/lab.git", "task-a")] = NOW + 9999
+    snap = _snap(tasks=[_task(session=state.SESSION_IDLE, dirty=True)], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(snap)
+    assert acts == [], "a task in backoff must not be acted on"
+    print("ok: a task in backoff is left alone")
+
+
+def test_unchanged_worktree_after_failure_stalls_to_review() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.fingerprint[key] = state.fingerprint(WT)
+    mem.last_fail[key] = NOW - daemon.STALL_BUDGET_S - 1
+    t = _task(session=state.SESSION_IDLE, dirty=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.NEEDS_REVIEW]
-    print("ok: an ungated project cannot produce a finished task")
+    assert "stalled" in acts[0].reason
+    print("ok: an unchanged worktree after a gate failure eventually stalls to review")
 
 
-def test_stop_reasons_are_exhaustive() -> None:
-    for outcome in ("running", "passed", "failed", "stuck", "gate-modified",
-                    "no-gate-configured", None, "something-new"):
-        assert daemon.stop_reason(outcome) in (
-            daemon.FINISHED_COMPLETE, daemon.FINISHED_GAVE_UP,
-            daemon.STILL_RETRYING, daemon.GATE_IN_FLIGHT, daemon.NEVER_GATED)
-    assert daemon.stop_reason("something-new") == daemon.NEVER_GATED
-    print("ok: unknown router outcomes classify as not-finished")
+def test_unchanged_but_recently_failed_keeps_waiting() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.fingerprint[key] = state.fingerprint(WT)
+    mem.last_fail[key] = NOW - 10
+    t = _task(session=state.SESSION_IDLE, dirty=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert acts == [], "recently injected and unchanged: keep waiting"
+    print("ok: a recently injected task that is unchanged keeps waiting")
 
 
-def test_dry_run_never_runs_a_gate() -> None:
-    sup = daemon.Supervisor("/tmp/lab/lab.git", store=_store(), dry_run=True)
-    ran: list[str] = []
-    sup.verify = lambda *a, **k: ran.append("ran") or []  # type: ignore[assignment]
-    sup.apply([daemon.Action(daemon.VERIFY, "task-a", "stopped")])
-    assert ran == [], "dry-run executed the gate"
-    sup.close()
-    print("ok: dry-run decides without running a gate")
+def test_a_non_orchestrated_attach_is_ignored_for_settling() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=True, dispatch_alive=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    print("ok: a human-attached client (no orch: title) does not block settling - "
+          "the session state is the truth")
 
 
-def test_reclaim_requires_all_three_proofs() -> None:
-    acts = daemon.decide(_snap(
-        tasks=[_task(lease_until=NOW - 1)],
-        dispatch_alive={1234: False},
-        facts={},
-    ))
-    assert _kinds(acts) == [daemon.RECLAIM]
-    print("ok: reclaim needs expired lease + gone dispatch + no session")
+def test_orchestrated_dispatch_holds_settling_until_the_process_exits() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=True, dispatch_alive=True,
+              dispatch_orchestrated=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [], \
+        "an orchestrated `opencode run` is the agent working; hold settling"
+    t.dispatch_orchestrated = False
+    acts = daemon.decide(_snap(now=NOW + 2 * daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [], "releasing the process restarts the settle timer"
+    acts = daemon.decide(_snap(now=NOW + 3 * daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    print("ok: an orchestrated run process holds settling, and releasing it "
+          "settles and verifies")
 
 
-def test_expired_lease_alone_does_not_reclaim() -> None:
-    acts = daemon.decide(_snap(
-        tasks=[_task(lease_until=NOW - 1)],
-        dispatch_alive={1234: False},
-        facts={WT: _fact(observe.BUSY)},
-    ))
-    assert daemon.RECLAIM not in _kinds(acts)
-    print("ok: an expired lease alone is not proof of death")
+def test_lingering_orchestrated_process_escapes_after_the_cap() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.dispatch_seen[key] = NOW - daemon.MAX_ORCHESTRATED_S - 1
+    t = _task(session=state.SESSION_IDLE, dirty=True, dispatch_alive=True,
+              dispatch_orchestrated=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], \
+        "a run client stuck alive past the cap must not stall the task forever"
+    print("ok: an orchestrated client alive past MAX_ORCHESTRATED_S is escaped")
 
 
-def test_valid_lease_with_no_session_waits() -> None:
-    acts = daemon.decide(_snap(dispatch_alive={1234: False}, facts={}))
-    assert _kinds(acts) == [daemon.NOTE]
-    assert "not proof of death" in acts[0].detail
-    print("ok: a valid lease with no session waits instead of reclaiming")
-
-
-def test_non_running_tasks_are_ignored() -> None:
-    acts = daemon.decide(_snap(tasks=[_task(status="done"), _task(status="todo")]))
+def test_only_claimed_tasks_are_supervised() -> None:
+    acts = daemon.decide(_snap(tasks=[_task(claimed=False)]))
     assert acts == []
-    print("ok: only running tasks are supervised")
+    print("ok: todo and archived tasks are not supervised")
 
 
-def test_silence_budgets_differ_by_state() -> None:
-    quiet_busy = daemon.decide(_snap(facts={WT: _fact(observe.BUSY)},
-                                     quiet_for={WT: daemon.BUDGET_BUSY_S - 1}))
-    assert daemon.NOTE not in _kinds(quiet_busy)
-
-    loud_busy = daemon.decide(_snap(facts={WT: _fact(observe.BUSY)},
-                                    quiet_for={WT: daemon.BUDGET_BUSY_S + 1}))
-    assert daemon.NOTE in _kinds(loud_busy)
-
-    b = observe.Blocked("external_directory", "per_1", "ses_1", "/etc/*")
-    blocked = daemon.decide(_snap(
-        facts={WT: _fact(observe.BLOCKED_PERMISSION, [b])},
-        quiet_for={WT: daemon.BUDGET_BLOCKED_S + 1}))
-    assert daemon.NOTE in _kinds(blocked)
-    assert daemon.BUDGET_BLOCKED_S < daemon.BUDGET_BUSY_S
-    print("ok: silence budgets differ by state")
-
-
-def test_every_action_carries_a_reason() -> None:
-    for snap in (
-        _snap(server_running=False),
-        _snap(facts={WT: _fact(observe.BUSY)}),
-        _snap(dispatch_alive={1234: False}, facts={WT: _fact(observe.IDLE)}),
-        _snap(tasks=[_task(lease_until=NOW - 1)], dispatch_alive={1234: False}),
-    ):
-        for a in daemon.decide(snap):
-            assert a.reason, f"{a.kind} carried no reason"
-    print("ok: every action carries a reason")
+def _gated_repo(gate_body: str) -> tuple[Path, tempfile.TemporaryDirectory]:
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name) / "wt"
+    root.mkdir(parents=True)
+    for cmd in (["init", "-q", "-b", "main"],):
+        subprocess.run(["git", *cmd, str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+    h = root / ".orchestration" / "hooks"
+    h.mkdir(parents=True)
+    (h / "session-idle").write_text(gate_body)
+    (h / "session-idle").chmod(0o755)
+    (root / ".orchestration" / "config.json").write_text(
+        '{"baseBranch": "main", "gate": {"retryCap": 3}}\n')
+    (root / "seed").write_text("x")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "c"], check=True)
+    return root, tmp
 
 
-def _running_task(st: Store, project: str, wt: Path) -> None:
-    st.sync_intent(project, ["task-a"])
-    assert st.claim(project, "task-a") == "task-a"
-    st.record_launch(project, "task-a", worktree=str(wt), pid=1234)
+def test_apply_verify_merges_a_passing_gate_and_archives() -> None:
+    root, tmp = _gated_repo(
+        "#!/usr/bin/env bash\n"
+        "cd \"${WORKTREE_PATH:-.}\" || exit 1\n"
+        "if [ -n \"$(git status --porcelain)\" ]; then\n"
+        "  git add -A\n"
+        "  git -c user.name=orch -c user.email=orch@localhost commit -q -m g\n"
+        "fi\n"
+        "exit 0\n")
+    # create the task on base, then a claimed branch with committed work
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "answer.txt").write_text("42")
+    # dirty work, gate will pass and commit it
+
+    mem = daemon.LoopState()
+    snap = _snap(now=int(time.time()),
+                 tasks=[_task(project=str(root), worktree=str(wt),
+                              session=state.SESSION_IDLE, dirty=True)],
+                 mem=mem)
+    sup = daemon.Supervisor(dry_run=False)
+    # point the snapshot's task at this repo
+    snap.tasks[0].project = str(root)
+    snap.tasks[0].worktree = str(wt)
+    snap.tasks[0].branch = "task-a"
+    acts = [daemon.Action(daemon.VERIFY, "task-a", "settled",
+                          project=str(root), worktree=str(wt), branch="task-a",
+                          base="main", retry_cap=3, session_ids=[])]
+    log = sup.apply(acts)
+    joined = "\n".join(log)
+    assert "merged" in joined or "archived" in joined, joined
+    # the branch should be gone
+    p = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "-q",
+                        "refs/heads/task-a"], capture_output=True)
+    assert p.returncode != 0, "the task branch must be merged and deleted"
+    assert not wt.exists(), "the worktree must be removed"
+    tmp.cleanup()
+    print("ok: a passing gate merges, archives, and tears the task down")
 
 
-def test_verify_promotes_only_on_a_pass() -> None:
+def test_apply_verify_failing_gate_retriggers_up_to_the_cap() -> None:
+    root, tmp = _gated_repo("#!/usr/bin/env bash\necho 'tests red'\nexit 1\n")
+    injected: list[tuple[int, str, str]] = []
+    orig = daemon.prompt_async
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text)) or None
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        a = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                          project=str(root), worktree=str(root), branch="task-a",
+                          base="main", retry_cap=3, port=4096, session_ids=["ses_1"])
+        sup.apply([a])
+        assert len(injected) == 1, "a failing gate must inject the failure back"
+        assert "tests red" in injected[0][2]
+
+        a2 = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                           project=str(root), worktree=str(root), branch="task-a",
+                           base="main", retry_cap=3, port=4096, session_ids=["ses_1"])
+        sup.apply([a2])
+        assert len(injected) == 2, "attempt 2 still retriggers"
+        a3 = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                           project=str(root), worktree=str(root), branch="task-a",
+                           base="main", retry_cap=3, port=4096, session_ids=["ses_1"])
+        log = "\n".join(sup.apply([a3]))
+        assert "retries-exhausted" in log, log
+        assert len(injected) == 2, "the cap must stop retriggering"
+    finally:
+        daemon.prompt_async = orig
+    tmp.cleanup()
+    print("ok: a failing gate retriggers up to the cap, then needs-review")
+
+
+def test_apply_verify_no_gate_is_reviewed() -> None:
     root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 0\n")
-    project = str(root / "lab.git")
-    st = _store()
-    _running_task(st, project, root)
-    sup = daemon.Supervisor(project, store=st)
-
-    sup.verify("task-a")
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "done", t
-    v = st.last_verdict(project, "task-a")
-    assert v is not None and v["source"] == "daemon" and v["outcome"] == "passed"
-    sup.close()
+    # no committed gate: remove the committed hook and commit
+    subprocess.run(["git", "-C", str(root), "rm", "-q",
+                    ".orchestration/hooks/session-idle"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "no gate"],
+                   check=True)
+    sup = daemon.Supervisor(dry_run=False)
+    a = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                      project=str(root), worktree=str(root), branch="task-a",
+                      base="main", retry_cap=3, session_ids=[])
+    log = "\n".join(sup.apply([a]))
+    assert "needs-review" in log
+    assert "no committed gate" in log
     tmp.cleanup()
-    print("ok: a passing committed gate promotes the task to done")
+    print("ok: no committed gate lands on needs-review, never done")
 
 
-def test_a_pass_after_a_spent_cap_is_not_done() -> None:
-    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 0\n")
-    project = str(root / "lab.git")
-    st = _store()
-    _running_task(st, project, root)
-    sup = daemon.Supervisor(project, store=st)
-
-    out = "\n".join(sup.verify("task-a", why=daemon.FINISHED_GAVE_UP))
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "needs-review", t
-    assert "flakiness" in out
-    v = st.last_verdict(project, "task-a", source="daemon")
-    assert v is not None and v["outcome"] == "passed", "the evidence should still exist"
-    sup.close()
-    tmp.cleanup()
-    print("ok: a pass after the cap was spent is recorded but not called done")
-
-
-def test_verify_sends_a_failing_gate_to_review() -> None:
-    root, tmp = _gated_repo("#!/usr/bin/env bash\necho 'tests are red'\nexit 1\n")
-    project = str(root / "lab.git")
-    st = _store()
-    _running_task(st, project, root)
-    sup = daemon.Supervisor(project, store=st)
-
-    out = "\n".join(sup.verify("task-a"))
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "needs-review", t
-    assert "tests are red" in out or "gate said no" in out
-    sup.close()
-    tmp.cleanup()
-    print("ok: a failing gate lands on needs-review, never done")
-
-
-def test_verify_refuses_done_when_no_gate_is_committed() -> None:
-    root, tmp = _gated_repo(None)
-    project = str(root / "lab.git")
-    st = _store()
-    _running_task(st, project, root)
-    sup = daemon.Supervisor(project, store=st)
-
-    out = "\n".join(sup.verify("task-a"))
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "needs-review", t
-    assert "nothing verified" in out
-    v = st.last_verdict(project, "task-a")
-    assert v is not None and v["outcome"] == "no-gate-configured"
-    sup.close()
-    tmp.cleanup()
-    print("ok: no committed gate cannot produce done")
-
-
-def test_verify_ignores_a_router_self_report() -> None:
-    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 1\n")
-    project = str(root / "lab.git")
-    st = _store()
-    _running_task(st, project, root)
-    st.record_verdict(project, "task-a", "session-idle", "passed",
-                      "all good, honestly", source="router")
-    sup = daemon.Supervisor(project, store=st)
-
-    sup.verify("task-a")
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "needs-review", (
-        "a router self-report was allowed to decide the outcome")
-    sup.close()
-    tmp.cleanup()
-    print("ok: a router self-report cannot override the daemon's own gate run")
-
-
-def test_verify_reviews_a_vanished_worktree() -> None:
-    st = _store()
-    project = "/tmp/lab/lab.git"
-    _running_task(st, project, Path("/tmp/lab/definitely-not-here"))
-    sup = daemon.Supervisor(project, store=st)
-    out = "\n".join(sup.verify("task-a"))
-    t = st.get(project, "task-a")
-    assert t is not None and t.status == "needs-review"
-    assert "no longer exists" in out
-    sup.close()
-    print("ok: a missing worktree is reviewed, not passed")
-
-
-def test_actions_carry_their_project() -> None:
-    a = _task(project="/a/one.git", worktree="/wt/a", pid=1)
-    b = _task(project="/b/two.git", worktree="/wt/b", pid=2)
-    acts = daemon.decide(_snap(
-        tasks=[a, b],
-        dispatch_alive={1: True, 2: True},
-        facts={"/wt/a": _fact(observe.BUSY), "/wt/b": _fact(observe.BUSY)},
-    ))
-    assert len(acts) == 2
-    assert {x.project for x in acts} == {"/a/one.git", "/b/two.git"}
-    print("ok: every per-task action names its project")
-
-
-def test_same_name_in_two_projects_is_not_confused() -> None:
-    st = _store()
-    for p in ("/a/one.git", "/b/two.git"):
-        st.sync_intent(p, ["task-a"])
-        st.claim(p, "task-a")
-    sup = daemon.Supervisor(store=st)
-    sup.apply([daemon.Action(daemon.RECLAIM, "task-a", "dead", project="/a/one.git")])
-    assert st.get("/a/one.git", "task-a").status == "todo"
-    assert st.get("/b/two.git", "task-a").status == "running", (
-        "reclaiming one project's task disturbed another's")
-    sup.close()
-    print("ok: identically named tasks in two projects stay independent")
-
-
-def test_systemd_unit_survives_logout_and_keeps_children() -> None:
+def test_unit_text_keeps_the_expected_shape() -> None:
     text = daemon.unit_text(interval=10)
     assert "Restart=always" in text
     assert "KillMode=process" in text
-    assert "WantedBy=default.target" in text
     assert "daemon run --interval 10" in text
-    assert Path(text.split("ExecStart=")[1].split()[0]).name == "orch"
-    print("ok: the unit restarts always and does not kill the server it supervises")
+    print("ok: the systemd unit restarts always and keeps the server alive")
 
 
-def test_uninstall_removes_config_but_never_touches_project() -> None:
-    tmp = Path(tempfile.mkdtemp())
-    unit = tmp / "systemd" / "user" / daemon.UNIT_NAME
-    unit.parent.mkdir(parents=True)
-    unit.write_text("x")
-    state = tmp / "state" / "orch"
-    state.mkdir(parents=True)
-    (state / "orch.db").write_text("x")
-
-    real_unit_path, real_run = daemon.unit_path, daemon.subprocess.run
-    real_state_dir, real_current = server.state_dir, server.current
-    daemon.unit_path = lambda: unit  # type: ignore[method-assign]
-    daemon.subprocess.run = (  # type: ignore[method-assign]
-        lambda cmd, capture_output=None, text=None, timeout=None: real_run(
-            ["true"], capture_output=True, text=True))
-    server.state_dir = lambda: state  # type: ignore[method-assign]
-    server.current = lambda: None  # type: ignore[method-assign]
-    try:
-        out = daemon.uninstall()
-    finally:
-        daemon.unit_path, daemon.subprocess.run = real_unit_path, real_run
-        server.state_dir, server.current = real_state_dir, real_current
-
-    assert not unit.exists(), "the systemd unit is gone"
-    assert not state.exists(), "the state dir is gone by default"
-    assert any("disable-linger" in l and l.startswith("ok") for l in out)
-    assert any("left every project's" in l for l in out)
-    print("ok: uninstall removes the unit, linger and state, leaves projects alone")
+def test_scheduler_dispatches_a_declared_todo() -> None:
+    mem = daemon.LoopState()
+    todo = _task(claimed=False, branch=None, worktree=None)
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[todo], mem=mem,
+                               policies={todo.project: pol}))
+    assert _kinds(acts) == [daemon.DISPATCH], _kinds(acts)
+    assert acts[0].start == "/tmp/lab"
+    print("ok: a declared todo is auto-dispatched when the scheduler is on")
 
 
-def test_uninstall_keep_state_preserves_database() -> None:
-    tmp = Path(tempfile.mkdtemp())
-    unit = tmp / "systemd" / "user" / daemon.UNIT_NAME
-    unit.parent.mkdir(parents=True)
-    unit.write_text("x")
-    state = tmp / "state" / "orch"
-    state.mkdir(parents=True)
-    (state / "orch.db").write_text("x")
+def test_scheduler_is_opt_in() -> None:
+    todo = _task(claimed=False, branch=None, worktree=None)
+    off = state.SchedulerPolicy(enabled=False, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[todo],
+                               policies={todo.project: off}))
+    assert daemon.DISPATCH not in _kinds(acts), "disabled means never dispatch"
+    acts = daemon.decide(_snap(tasks=[todo]))
+    assert daemon.DISPATCH not in _kinds(acts), "no policy means never dispatch"
+    print("ok: the scheduler only acts when a project opts in")
 
-    real_unit_path, real_run = daemon.unit_path, daemon.subprocess.run
-    real_state_dir, real_current = server.state_dir, server.current
-    daemon.unit_path = lambda: unit  # type: ignore[method-assign]
-    daemon.subprocess.run = (  # type: ignore[method-assign]
-        lambda cmd, capture_output=None, text=None, timeout=None: real_run(
-            ["true"], capture_output=True, text=True))
-    server.state_dir = lambda: state  # type: ignore[method-assign]
-    server.current = lambda: None  # type: ignore[method-assign]
-    try:
-        out = daemon.uninstall(wipe_state=False)
-    finally:
-        daemon.unit_path, daemon.subprocess.run = real_unit_path, real_run
-        server.state_dir, server.current = real_state_dir, real_current
 
-    assert not unit.exists(), "the systemd unit is gone"
-    assert state.exists() and (state / "orch.db").exists(), "state kept with --keep-state"
-    assert any("kept state" in l for l in out)
-    print("ok: --keep-state stops the daemon but preserves the database")
+def test_scheduler_respects_max_concurrent() -> None:
+    mem = daemon.LoopState()
+    claimed = _task(claimed=True, branch="task-a", worktree=WT,
+                    session=state.SESSION_NONE, dirty=False, diff=True)
+    todo = _task(name="task-b", claimed=False, branch=None, worktree=None)
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[claimed, todo], mem=mem,
+                               policies={claimed.project: pol}))
+    assert daemon.DISPATCH not in _kinds(acts), \
+        "one slot is held by the claimed task"
+    print("ok: concurrency is counted from claimed (in-flight) tasks")
+
+
+def test_scheduler_fills_free_slots_in_order() -> None:
+    mem = daemon.LoopState()
+    claimed = _task(claimed=True, branch="task-a", worktree=WT,
+                    session=state.SESSION_NONE, dirty=False, diff=True)
+    t1 = _task(name="task-b", claimed=False, branch=None, worktree=None)
+    t2 = _task(name="task-c", claimed=False, branch=None, worktree=None)
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=2,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[claimed, t1, t2], mem=mem,
+                               policies={claimed.project: pol}))
+    dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
+    assert dispatched == ["task-b"], \
+        "one free slot must go to the first todo, in order"
+    print("ok: free slots are filled by the next todo in name order")
+
+
+def test_scheduler_skips_tasks_in_dispatch_backoff() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.dispatch_backoff[key] = NOW + 9999
+    todo = _task(claimed=False, branch=None, worktree=None)
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[todo], mem=mem,
+                               policies={todo.project: pol}))
+    assert daemon.DISPATCH not in _kinds(acts)
+    print("ok: a task that failed to dispatch is not retried before backoff")
+
+
+def test_apply_dispatch_failure_sets_backoff() -> None:
+    sup = daemon.Supervisor(dry_run=False)
+    a = daemon.Action(daemon.DISPATCH, "task-x", "todo: declared, no claim",
+                      project="/tmp/nowhere/x.git", base="main",
+                      start="/tmp/nowhere-not-a-worktree")
+    log = "\n".join(sup.apply([a]))
+    assert "not inside a git worktree" in log, log
+    key = ("/tmp/nowhere/x.git", "task-x")
+    assert key in sup.mem.dispatch_backoff
+    assert sup.mem.dispatch_error[key] != ""
+    print("ok: a failed auto-dispatch backs off and records why")
 
 
 def main() -> int:
-    assert time.time() > 0
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()

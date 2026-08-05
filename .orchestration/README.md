@@ -20,12 +20,15 @@ Tracked-in-a-worktree buys three things:
 
 - `config.json` — which files matter for the diff gate, the retry cap, the base
   branch.
-- `hooks/session-idle` — what "verify" means for this project.
+- `hooks/session-idle` — what "verify" means for this project, and the thing that
+  commits a passing task's work.
 
 There is no `post-task-create` here, and that is a signal rather than an omission.
 This project has no database to create and no `.env` to rewrite, so it needs
-almost no hooks. If a project with no infrastructure still required a pile of
-hooks, the line between `orch` and `.orchestration/` would be drawn wrong.
+almost no hooks.
+
+There is no `.opencode/` router plugin any more. The daemon runs the gate itself
+and injects failures itself; nothing is installed into the project's `.opencode/`.
 
 ## The contract
 
@@ -34,14 +37,16 @@ from this one directory:
 
 - The **CLI** fires task-lifecycle events: `pre-task-create`, `post-task-create`,
   `pre-task-cleanup`, `post-task-cleanup`, `pre-branch-delete`.
-- The **router plugin** fires agent-lifecycle events: `session-idle`,
-  `session-error`, and whatever else the harness emits.
+- The **daemon** fires agent-lifecycle events: `session-idle`, when a task's
+  session settles.
 
 Both pass `TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`.
 
-Exit 0 means the gate passed. Non-zero means it failed and the output is fed back
-to the agent. A **missing** hook is neither — see `no-gate-configured` in
-`docs/architecture.md`. Absence of checks must never be reported as success.
+`session-idle` is the gate. Exit 0 passes **and commits the work**; non-zero fails
+and the output is fed back to the agent by the daemon, which retries up to
+`gate.retryCap` before marking the task needs-review. A **missing** hook is
+`no-gate-configured` — never a pass. Absence of checks must never be reported as
+success.
 
 Note one asymmetry: `pre-task-create` necessarily runs from the *dispatching*
 worktree because the new one does not exist yet, while `post-task-create` runs from

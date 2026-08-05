@@ -25,32 +25,28 @@ TEMPLATE_CONFIG = {
 TEMPLATE_SESSION_IDLE = """#!/usr/bin/env bash
 # session-idle - what "verify" means for this project.
 #
-# Fired by the router plugin when an agent goes idle AND the files declared in
-# ../config.json actually changed. Named after the event, not the action.
-#
-# Provided: WORKTREE_PATH  WORKTREE_NAME  ORCH_EVENT  ORCH_SESSION_ID
-#
-# Contract: exit 0 = the gate passed. Non-zero = failed, and everything on
-# stdout/stderr is fed back to the agent as its next instructions, so keep the
-# output useful and bounded.
-#
-# Absence of this file is reported as `no-gate-configured`, never as a pass.
-#
-# IMPORTANT: the version that runs is the one COMMITTED on the base branch, not
-# the copy in your working tree. Editing this file mid-task changes nothing about
-# how the task is judged - you must commit it. That is deliberate: a dispatched
-# agent was observed rewriting this very file to make its own gate pass, and an
-# agent that can edit its own gate can always pass it.
+# Contract (full version in .orchestration/README.md): exit 0 commits the work
+# and passes; non-zero fails and everything written to stdout/stderr is fed back
+# to the agent as its next instructions. Only the version committed on the base
+# branch runs - edit, then commit, before dispatching.
 
-set -uo pipefail
+set -euo pipefail
 cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
 
-# Replace with this project's real verification, e.g.
-#   pnpm check && pnpm test
-#   cargo clippy -- -D warnings && cargo test
-#   ruff check . && pytest -q
+# Put this project's real checks above the commit block, e.g. `pnpm check && pnpm test`.
+# `set -e` aborts on the first failing command, and the output becomes the agent's
+# next instructions, so keep it useful and bounded.
 echo "no verification configured yet - edit .orchestration/hooks/session-idle" >&2
 exit 1
+
+# The gate passed: commit the work (idempotent - an empty tree has nothing to
+# commit, and the gate still passes so the daemon can re-run it safely).
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A
+  git -c user.name=orch -c user.email=orch@localhost \\
+      commit -q -m "orch: session-idle gate passed"
+fi
+exit 0
 """
 
 TEMPLATE_README = """# `.orchestration/`
@@ -67,11 +63,19 @@ from this one directory under one env-var contract (`TASK_NAME`, `BRANCH_NAME`,
 
 - the **CLI** fires task-lifecycle events: `pre-task-create`, `post-task-create`,
   `pre-task-cleanup`, `post-task-cleanup`, `pre-branch-delete`
-- the **router plugin** fires agent-lifecycle events: `session-idle`,
-  `session-error`, and anything else the harness emits
+- the **daemon** fires agent-lifecycle events: `session-idle` - the gate, run
+  when a task's session settles
 
-Exit 0 passes, non-zero fails and is fed back to the agent, and a **missing** hook
-is `no-gate-configured` - which is not a pass.
+`session-idle` is the gate: exit 0 passes **and commits the work**; non-zero fails
+and the output is fed back to the agent by the daemon, which retries up to
+`gate.retryCap` before marking the task needs-review. A **missing** hook is
+`no-gate-configured` - which is not a pass.
+
+The gate that runs is the version **committed on the base branch**, never the
+working-tree copy, so edit the hook and commit it before dispatching. To configure
+it, put the project's real checks in `hooks/session-idle` above the commit block
+(e.g. `pnpm check && pnpm test`, `cargo clippy -- -D warnings && cargo test`,
+`ruff check . && pytest -q`); the scaffold exits non-zero on purpose until then.
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
@@ -153,43 +157,12 @@ def run(start: Path, force: bool = False, version: str = "0",
           protected=True)
     write(orch / ".version", version + "\n")
 
-    plugins = target / ".opencode" / "plugins"
-    plugins.mkdir(parents=True, exist_ok=True)
-    src = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
-    if src.is_file():
-        from .gate import MIN_ROUTER_CONTRACT, router_contract
-
-        have, _ = router_contract(target)
-        dest = plugins / "orch-router.ts"
-        if have is not None and have < MIN_ROUTER_CONTRACT and not force:
-            dest.write_text(src.read_text())
-            created.append(f".opencode/plugins/orch-router.ts (contract {have} "
-                           f"-> {MIN_ROUTER_CONTRACT})")
-            notes.append(
-                f"upgraded the router from contract {have} to {MIN_ROUTER_CONTRACT} "
-                f"without being asked: the supervisor relies on it reporting when a "
-                f"gate starts, and without that a slow gate is read as an agent "
-                f"nothing checked. COMMIT it, or dispatched worktrees keep the old one."
-            )
-        else:
-            write(dest, src.read_text())
-    else:
-        notes.append(f"router plugin template not found at {src}")
-
-    stale = target / ".orchestration" / ".state"
-    if stale.exists():
-        notes.append(
-            f"{stale} is left over from the file-based router state and is no longer "
-            f"read. Delete it; fingerprints and retry counters are in the orch "
-            f"database now, which is what makes them visible to `orch task list`."
-        )
-
     notes.append(
         "the scaffolded session-idle hook exits non-zero on purpose: an unconfigured "
         "gate must not report success. Edit it before dispatching real work."
     )
     notes.append(
-        "COMMIT the hook before dispatching. The router runs the version committed on "
+        "COMMIT the hook before dispatching. The daemon runs the version committed on "
         "the base branch, not the working-tree copy, so an uncommitted gate counts as "
         "no gate at all. A dispatched agent was observed rewriting its own gate to "
         "make it pass, which is why the committed version is the only authority."
