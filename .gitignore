@@ -2,3 +2,6 @@
 # python bytecode
 __pycache__/
 *.pyc
+
+# orch runtime state (not intent)
+.orchestration/.state/
