@@ -93,6 +93,9 @@ bin/orch observe                 # live state, read-only, exits 1 if you are nee
 bin/orch observe -w --json
 bin/orch attach                  # open a TUI onto the shared server, close it freely
 bin/orch events -d 30 -v         # tail SSE, then print a histogram of event types
+
+bin/orch daemon --once --dry-run # decide and print, change nothing
+bin/orch daemon                  # supervise: renew, alert, reclaim, restart
 ```
 
 `observe` and `doctor` exit non-zero when something needs a human or when the
@@ -119,14 +122,22 @@ Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
 and the router plugin — including the full loop of event → hook → failure → prompt
 injection → agent fix → pass, with a bounded retry cap.
 
-Not built yet: **the daemon**. So nothing renews leases, nothing notices an agent
-that went quiet, nothing reclaims a dead one, nothing routes an outcome anywhere,
-and there is no phone server. A task therefore stays `running` in `orch task list`
-even after it is done — completion has to come from session state, and the
-component that would watch for it does not exist.
+`orch daemon` supervises: it renews leases while an agent is alive, alerts on
+blocked permissions keyed by request id, restarts a dead or unresponsive shared
+server and escalates the tasks that were inside it, and reclaims a task only on all
+three proofs together — expired lease, gone dispatch process, and no session. The
+policy is a pure function, so those cases are actually tested rather than hoped for.
 
-35 tests: `python3 tests/test_store.py` and the same for `test_gate`,
-`test_server`, `test_dispatch`.
+**It never marks a task `done`.** A finished agent becomes `needs-review`, because
+the gate verdict exists only inside the router, which currently reports it to the
+server log rather than to a daemon endpoint. Calling it `done` would manufacture
+exactly the confidence the gate rules exist to prevent.
+
+Not built yet: outcome routing, the phone-facing server over the tailnet, SSE-driven
+absence detection (the watchdog is poll-only), and the daemon endpoint that would
+retire the `.orchestration/.state/` deviation.
+
+47 tests, all offline: `for t in tests/test_*.py; do python3 "$t"; done`
 
 ## Layout
 

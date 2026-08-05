@@ -124,6 +124,25 @@ def questions(port: int) -> list[dict]:
     return _as_list(get(port, "/question"))
 
 
+def sessions(port: int, directory: str | None = None) -> list[dict]:
+    """Sessions known to this server, optionally only those for one directory.
+
+    `GET /session` is **global**, not per-server: one shared server returned 33
+    sessions spanning every directory ever used on the machine, including long-dead
+    ones. So the unfiltered call is useless for "what is running now", and the
+    `?directory=` filter is what makes per-task observation possible at all.
+
+    This is the join that the headless model needs. With one process hosting every
+    worktree, a per-process view cannot say which *task* is busy - the process has
+    one cwd and N sessions in N directories.
+    """
+    path = "/session"
+    if directory:
+        from urllib.parse import quote
+        path += f"?directory={quote(directory, safe='/')}"
+    return _as_list(get(port, path))
+
+
 def todos(port: int, session_id: str) -> list[dict]:
     return _as_list(get(port, f"/session/{session_id}/todo"))
 

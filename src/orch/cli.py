@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import gate as gate_mod
 from . import harness, init as init_mod, observe, server as server_mod
@@ -301,6 +302,18 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_daemon(args: argparse.Namespace) -> int:
+    """Supervise: renew leases, alert, reclaim the definitely dead, restart the
+    shared server. Deliberately does not mark anything `done` - see daemon.py."""
+    start = Path(args.directory) if args.directory else Path.cwd()
+    _, project, err = dispatch_mod.project_of(start)
+    if err or project is None:
+        print(err or "not in a worktree", file=sys.stderr)
+        return 2
+    return daemon_mod.run(str(project), interval=args.interval,
+                          once=args.once, dry_run=args.dry_run)
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     for t in discover():
@@ -389,6 +402,14 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")
     g.set_defaults(func=cmd_gate)
+
+    dm = sub.add_parser("daemon", help="supervise leases, alerts and the server")
+    dm.add_argument("-C", "--directory")
+    dm.add_argument("-n", "--interval", type=float, default=10.0)
+    dm.add_argument("--once", action="store_true", help="one pass, then exit")
+    dm.add_argument("--dry-run", action="store_true",
+                    help="decide and print, change nothing")
+    dm.set_defaults(func=cmd_daemon)
 
     v = sub.add_parser("version", help="show orch and harness versions")
     v.set_defaults(func=cmd_version)

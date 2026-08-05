@@ -39,6 +39,10 @@ TODO = "todo"
 RUNNING = "running"
 DONE = "done"
 STUCK = "stuck"
+# The agent stopped, but nothing told the store whether the gate passed. Distinct
+# from `done` on purpose: only a gate verdict justifies `done`, and the component
+# that would report one (the daemon endpoint) does not exist yet.
+NEEDS_REVIEW = "needs-review"
 FAILED = "failed"
 
 SCHEMA = """

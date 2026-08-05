@@ -79,7 +79,14 @@ Discovers and reads. Holds no policy and takes no action.
   `ss -ltnp` remains only to spot **stray hand-started TUIs**, which is a
   courtesy, not a mechanism.
 - **Reads:** `/session/status` (`{}` = idle, populated = busy), `/permission`,
-  `/question`, and the `/event` SSE stream.
+  `/question`, `/session?directory=…`, and the `/event` SSE stream.
+- **The unit of observation is a session, not a process.** This changed with
+  headless and it is easy to miss: one shared server has a single cwd and hosts many
+  sessions in many directories, so a per-process view can never say which *task* is
+  busy. `GET /session` is also global rather than per-server — it returned 33
+  sessions spanning directories going back days — so `?directory=<worktree>` is the
+  only usable join from a task to its state. Subagents are excluded via `parentID`:
+  a child going idle is not the task finishing.
 - **Emits facts, not verdicts:** "session X busy since T", "blocked on
   `per_fcd9…` (`external_directory`, `/tmp/opencode/*`)", "tmux alive, port
   unreachable".

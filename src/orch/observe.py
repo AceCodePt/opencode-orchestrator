@@ -169,6 +169,71 @@ def look(tui: Tui) -> Fact:
     )
 
 
+@dataclass
+class TaskFact:
+    """What is happening in one worktree, as seen through the shared server.
+
+    Separate from `Fact` because the unit differs. `Fact` describes a *process*,
+    which made sense when every worktree had its own TUI. Under one shared server a
+    process has one cwd and many sessions in many directories, so the only thing that
+    can describe a task is its **sessions**, selected by directory.
+    """
+
+    worktree: str
+    session_ids: list[str] = field(default_factory=list)
+    state: str = IDLE
+    blocked: list[Blocked] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def needs_human(self) -> bool:
+        return self.state in (BLOCKED_PERMISSION, BLOCKED_QUESTION)
+
+
+def look_task(port: int, worktree: str) -> TaskFact | None:
+    """Observe one worktree. None means the server knows no session for it.
+
+    None is genuinely different from idle: never dispatched, or dispatched into a
+    server that has since been replaced. Collapsing the two would let a task that
+    was never started look finished.
+    """
+    sess = harness.sessions(port, worktree)
+    if not sess:
+        return None
+
+    ids = [str(s.get("id")) for s in sess if s.get("id")]
+    # Subagents are excluded: a child going idle is not the task finishing, and a
+    # child being busy is not evidence the parent is progressing.
+    primary = [str(s.get("id")) for s in sess
+               if s.get("id") and not s.get("parentID")]
+    watch = primary or ids
+
+    status = harness.session_status(port)
+    busy = [sid for sid in watch if sid in status]
+
+    perms = [p for p in harness.permissions(port)
+             if str(p.get("sessionID") or "") in set(ids)]
+    ques = [q for q in harness.questions(port)
+            if str(q.get("sessionID") or "") in set(ids)]
+
+    if perms:
+        state = BLOCKED_PERMISSION
+    elif ques:
+        state = BLOCKED_QUESTION
+    elif busy:
+        state = BUSY
+    else:
+        state = IDLE
+
+    return TaskFact(
+        worktree=worktree,
+        session_ids=watch,
+        state=state,
+        blocked=[_describe_permission(p) for p in perms]
+        + [_describe_question(q) for q in ques],
+    )
+
+
 def look_all() -> list[Fact]:
     facts = [look(t) for t in discover()]
     # Relabel the shared server by pid rather than by guessing from its cwd. The
