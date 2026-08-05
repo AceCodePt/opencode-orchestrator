@@ -125,18 +125,90 @@ def test_session_outliving_its_dispatch_is_not_dead() -> None:
     print("ok: a session still working after its dispatch exited is left alone")
 
 
-def test_stopped_agent_is_verified_not_believed() -> None:
-    """A stopped agent triggers a gate run, not a status guess.
+def _stopped(outcome: str | None, quiet: int = 0) -> list[daemon.Action]:
+    """An agent that has gone idle with its dispatch gone, and the router's last word."""
+    return daemon.decide(_snap(
+        dispatch_alive={1234: False},
+        facts={WT: _fact(observe.IDLE)},
+        router_outcome={WT: outcome},
+        quiet_for={WT: quiet},
+    ))
+
+
+def test_a_finished_agent_is_verified_not_believed() -> None:
+    """A finished agent triggers a gate run, not a status guess.
 
     `decide` cannot mark anything done because it cannot run anything - which is the
     point of it being pure. It says "check this", and the executor checks.
     """
-    acts = daemon.decide(_snap(dispatch_alive={1234: False},
-                               facts={WT: _fact(observe.IDLE)}))
+    acts = _stopped("passed")
     assert _kinds(acts) == [daemon.VERIFY]
-    assert daemon.NEEDS_REVIEW not in _kinds(acts), (
-        "needs-review is now an outcome of verification, not a substitute for it")
-    print("ok: a stopped agent is verified rather than assumed either way")
+    assert acts[0].reason == daemon.FINISHED_COMPLETE
+    print("ok: a finished agent is verified rather than assumed either way")
+
+
+def test_stopped_is_not_finished_while_the_gate_loop_is_still_driving() -> None:
+    """Going idle is what *fires* the gate, so idle alone is not an ending.
+
+    A failing gate injects a prompt and the session becomes busy again. Idle with a
+    failed verdict is therefore a moment between attempts, and verifying it would judge
+    work the loop has not finished with.
+    """
+    acts = _stopped("failed")
+    assert _kinds(acts) == [daemon.RENEW]
+    assert daemon.VERIFY not in _kinds(acts)
+    print("ok: idle mid-retry is not treated as finished")
+
+
+def test_a_stalled_retry_loop_is_eventually_escalated() -> None:
+    """Not finished must not mean waited on forever.
+
+    If the gate failed and nothing drove the agent back to work, the injection or the
+    router has broken - which is a human's problem, not something to renew silently.
+    """
+    acts = _stopped("failed", quiet=daemon.BUDGET_IDLE_S + 1)
+    assert daemon.NEEDS_REVIEW in _kinds(acts)
+    assert "mid-retry" in [a.reason for a in acts if a.kind == daemon.NEEDS_REVIEW][0]
+    print("ok: a retry loop that stopped driving is escalated, not renewed forever")
+
+
+def test_spending_the_retry_cap_counts_as_finished() -> None:
+    acts = _stopped("stuck")
+    assert _kinds(acts) == [daemon.VERIFY]
+    assert acts[0].reason == daemon.FINISHED_GAVE_UP
+    print("ok: a spent retry cap ends the loop, so the task is finished")
+
+
+def test_an_agent_that_was_never_gated_is_not_verified() -> None:
+    """The silent hole, and the reason `finished` is defined by the loop.
+
+    No in-loop verdict at all means the router never fired here: not installed, or it
+    threw. Verifying would let one lucky out-of-loop run stand in for a gate that never
+    ran, turning "nothing objected" into a pass.
+    """
+    acts = _stopped(None)
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW]
+    assert acts[0].reason == daemon.NEVER_GATED
+    assert daemon.VERIFY not in _kinds(acts)
+    print("ok: an agent no gate ever examined is reviewed, not verified")
+
+
+def test_no_gate_configured_is_not_finished_either() -> None:
+    acts = _stopped("no-gate-configured")
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW]
+    print("ok: an ungated project cannot produce a finished task")
+
+
+def test_stop_reasons_are_exhaustive() -> None:
+    """Every outcome the router can report must classify, including ones added later."""
+    for outcome in ("passed", "failed", "stuck", "gate-modified",
+                    "no-gate-configured", None, "something-new"):
+        assert daemon.stop_reason(outcome) in (
+            daemon.FINISHED_COMPLETE, daemon.FINISHED_GAVE_UP,
+            daemon.STILL_RETRYING, daemon.NEVER_GATED)
+    # An unrecognised outcome must fall to the cautious side, not to "finished".
+    assert daemon.stop_reason("something-new") == daemon.NEVER_GATED
+    print("ok: unknown router outcomes classify as not-finished")
 
 
 def test_dry_run_never_runs_a_gate() -> None:
@@ -250,6 +322,30 @@ def test_verify_promotes_only_on_a_pass() -> None:
     sup.close()
     tmp.cleanup()
     print("ok: a passing committed gate promotes the task to done")
+
+
+def test_a_pass_after_a_spent_cap_is_not_done() -> None:
+    """A suite that failed to the cap and then passes untouched has not earned trust.
+
+    It has raised a question about flakiness instead, and that is a human's to answer.
+    The gate is still run and recorded - the evidence is worth having - but the status
+    stops short of `done`.
+    """
+    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 0\n")
+    project = str(root / "lab.git")
+    st = _store()
+    _running_task(st, project, root)
+    sup = daemon.Supervisor(project, store=st)
+
+    out = "\n".join(sup.verify("task-a", why=daemon.FINISHED_GAVE_UP))
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "needs-review", t
+    assert "flakiness" in out
+    v = st.last_verdict(project, "task-a", source="daemon")
+    assert v is not None and v["outcome"] == "passed", "the evidence should still exist"
+    sup.close()
+    tmp.cleanup()
+    print("ok: a pass after the cap was spent is recorded but not called done")
 
 
 def test_verify_sends_a_failing_gate_to_review() -> None:

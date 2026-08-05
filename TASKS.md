@@ -56,7 +56,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 - [x] [Subscribe to the Event Stream and Capture the Event Vocabulary](tasks/event-stream-listener/task.md) — 93 types + 2 undocumented, see docs/events.md
 - [x] [Keep the Supervisor Alive Across Logout and Reboot](tasks/supervisor-under-systemd/task.md) — systemd user unit, machine-wide, Restart=always, KillMode=process, linger on; `doctor` fails when nothing is supervising
-- [ ] [Distinguish an Agent That Finished From One That Merely Stopped](tasks/completion-signal/task.md) — the gate answers "is this broken", not "is this the task"
+- [x] [Distinguish an Agent That Finished From One That Merely Stopped](tasks/completion-signal/task.md) — `finished` is the in-loop gate loop terminating, not a claim by the agent; no in-loop verdict now means no verification
 - [-] [Watchdog for a TUI That Has Gone Silent Too Long](tasks/silence-watchdog/task.md) — per-state budgets and the reclaim rule are implemented and tested in `orch daemon`; still poll-only, so SSE-driven absence detection remains
 
 **Acting**

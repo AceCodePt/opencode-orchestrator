@@ -140,6 +140,13 @@ server and escalates the tasks that were inside it, and reclaims a task only on 
 three proofs together — expired lease, gone dispatch process, and no session. The
 policy is a pure function, so those cases are actually tested rather than hoped for.
 
+**Stopped, finished and done are three different things.** Stopped means the session went
+idle. *Finished* means the in-loop gate loop terminated — going idle is what fires the
+gate, and a failing gate pushes the agent back to work, so an agent only stays stopped
+once the gate passed or the retry cap was spent. Only a finished task is verified. A task
+with no in-loop verdict at all is never verified and never reaches `done`, because one
+lucky out-of-loop run must not stand in for a gate that never fired.
+
 **A task reaches `done` only when the daemon has run the gate itself.** Not when the
 agent says so, and not when the router says so. The router runs gates too, but it is a
 plugin inside the agent's own server, and the agent holds a bash tool — so anything the

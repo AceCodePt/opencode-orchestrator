@@ -34,6 +34,7 @@ the alternative is a `done` that means "something inside the sandbox said so".
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import time
@@ -48,6 +49,17 @@ from .store import DONE, NEEDS_REVIEW as ST_NEEDS_REVIEW, RUNNING, Store, Task
 BUDGET_BUSY_S = 20 * 60
 BUDGET_IDLE_S = 2 * 60
 BUDGET_BLOCKED_S = 60
+
+# Why a task stopped, which is not the same as whether it is done.
+#
+# `finished` is a property of the in-loop gate loop having *terminated*, not of the
+# session merely going quiet. Going idle is what fires the gate; a failing gate injects
+# a prompt and the agent works again. So an agent only stays stopped once the loop can
+# no longer move it: the gate passed, or the retry cap was spent.
+FINISHED_COMPLETE = "finished: gate loop settled on a pass"
+FINISHED_GAVE_UP = "finished: retry cap spent"
+STILL_RETRYING = "not finished: the gate loop is still driving it"
+NEVER_GATED = "not finished: stopped and no gate ever ran"
 
 RENEW = "renew"
 RECLAIM = "reclaim"
@@ -89,6 +101,60 @@ class Snapshot:
     dispatch_alive: dict[int, bool] = field(default_factory=dict)
     # worktree -> seconds since that agent last changed state
     quiet_for: dict[str, int] = field(default_factory=dict)
+    # worktree -> the router's most recent in-loop outcome, or None if it never
+    # reported. This is how "stopped" is told apart from "finished": the router is what
+    # drives an idle agent back to work, so its last word says whether anything more
+    # was ever going to happen.
+    router_outcome: dict[str, str | None] = field(default_factory=dict)
+
+
+def source_fingerprint() -> str:
+    """Hash of the code this process would run if started now.
+
+    A version string is useless for this: it stays `0.1.0` across every commit, so it
+    cannot tell a running daemon from an upgraded checkout. Hashing the sources catches
+    any change, committed or not, which is what the question actually is - is the
+    supervisor in memory the supervisor on disk.
+    """
+    h = hashlib.sha256()
+    for f in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        h.update(f.name.encode())
+        try:
+            h.update(f.read_bytes())
+        except OSError:
+            h.update(b"<unreadable>")
+    return h.hexdigest()[:12]
+
+
+def project_label(project: str) -> str:
+    """A readable name for a project path.
+
+    A project is identified by its git common dir, which for an ordinary clone is
+    `<repo>/.git` - so the last path component is the useless string `.git`. Bare repos
+    end in `<name>.git`, which is fine as-is.
+    """
+    p = Path(project)
+    return p.parent.name if p.name == ".git" else p.name
+
+
+def stop_reason(outcome: str | None) -> str:
+    """Classify a stopped agent by what the in-loop gate loop last did.
+
+    Deliberately reads the router's outcome rather than asking the agent. The router's
+    verdict cannot be trusted as a statement about *quality* - it runs inside the
+    agent's own server - but it is solid evidence about *mechanism*: whether the loop
+    that would have sent the agent back to work has stopped trying.
+    """
+    if outcome == "passed":
+        return FINISHED_COMPLETE
+    if outcome == "stuck":
+        return FINISHED_GAVE_UP
+    if outcome in ("failed", "gate-modified"):
+        return STILL_RETRYING
+    # Includes `no-gate-configured` and the absence of any report at all: no router
+    # installed, a plugin that threw, or a gate that never fired. Idle is what triggers
+    # the gate, so silence here means the mechanism did not run.
+    return NEVER_GATED
 
 
 def decide(snap: Snapshot) -> list[Action]:
@@ -171,12 +237,39 @@ def decide(snap: Snapshot) -> list[Action]:
 
         # Dispatch gone from here on.
         if fact is not None and fact.state == observe.IDLE:
-            # The agent stopped and its dispatch is gone: the work is as finished as
-            # it is going to get. Check it here rather than believe anything reported
-            # from inside the session.
+            # Stopped. Whether it is *finished* depends on the in-loop gate loop: going
+            # idle is what fires the gate, and a failing gate sends the agent back to
+            # work. So the loop's last word decides what happens next.
+            why = stop_reason(snap.router_outcome.get(t.worktree or ""))
+
+            if why == STILL_RETRYING:
+                # The loop is mid-flight. Injecting a prompt makes the session busy
+                # again, so idle here is a moment between attempts - not an end.
+                actions.append(Action(RENEW, t.name, why, project=t.project))
+                if quiet > BUDGET_IDLE_S:
+                    actions.append(Action(
+                        NEEDS_REVIEW, t.name,
+                        f"stopped mid-retry and idle for {quiet}s",
+                        "the gate failed and nothing drove it back to work - the "
+                        "prompt injection or the router itself has stopped working",
+                        project=t.project,
+                    ))
+                continue
+
+            if why == NEVER_GATED:
+                # The silent hole. Verifying here would let a gate that never fired
+                # be replaced by one lucky out-of-loop run, and "nothing objected"
+                # would become a pass for work nothing in-loop ever examined.
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name, why,
+                    "no in-loop verdict was ever recorded, so the router did not "
+                    "fire here: check that it is installed and the gate is committed",
+                    project=t.project,
+                ))
+                continue
+
             actions.append(Action(
-                VERIFY, t.name,
-                "the agent stopped, so run the committed gate and let it decide",
+                VERIFY, t.name, why,
                 "verified out-of-loop on purpose: a verdict from the router would be "
                 "the agent's own report",
                 project=t.project,
@@ -262,6 +355,17 @@ class Supervisor:
             t.pid: server.pid_alive(t.pid)
             for t in tasks_all if t.pid
         }
+
+        # The router's last in-loop word per worktree. Read from the store rather than
+        # asked of the agent: it is untrustworthy about quality and reliable about
+        # mechanism, and mechanism is all this needs.
+        router: dict[str, str | None] = {}
+        for t in tasks_all:
+            if not t.worktree:
+                continue
+            row = self.store.last_verdict(t.project, t.name, source="router")
+            router[t.worktree] = row["outcome"] if row else None
+
         return Snapshot(
             now=now,
             server_running=bool(st.get("running")),
@@ -270,6 +374,7 @@ class Supervisor:
             facts=by_worktree,
             dispatch_alive=alive,
             quiet_for=quiet,
+            router_outcome=router,
         )
 
     def apply(self, actions: list[Action]) -> list[str]:
@@ -277,7 +382,7 @@ class Supervisor:
         for a in actions:
             # Label with the project, since one daemon now covers all of them and two
             # projects may hold a task of the same name.
-            where = f"[{Path(a.project).name}] " if a.project else ""
+            where = f"[{project_label(a.project)}] " if a.project else ""
             log.append(f"{a.kind}: {where}{a.task or '-'} - {a.reason}"
                        + (f" ({a.detail})" if a.detail else ""))
             if self.dry_run:
@@ -297,7 +402,7 @@ class Supervisor:
                 if self.store.note_alert(rid, "", a.task, a.reason, a.detail):
                     log.append(f"  -> new alert {rid} (would notify)")
             elif a.kind == VERIFY and a.task and proj:
-                for line in self.verify(a.task, project=proj):
+                for line in self.verify(a.task, project=proj, why=a.reason):
                     log.append(f"  -> {line}")
             elif a.kind == RESTART_SERVER:
                 try:
@@ -308,12 +413,17 @@ class Supervisor:
         return log
 
     def verify(self, name: str, event: str = "session-idle",
-               project: str | None = None) -> list[str]:
-        """Run the committed gate for a stopped task and record what it said.
+               project: str | None = None, why: str = "") -> list[str]:
+        """Run the committed gate for a finished task and record what it said.
 
         Only `passed` promotes to `done`. Everything else - a failure, a timeout, or no
         committed gate at all - lands on `needs-review`, because they share the one
         property that matters: nobody has established that this branch is good.
+
+        An agent that spent its retry cap never reaches `done` even on a passing gate.
+        A suite that failed three times and then passes untouched has not earned
+        confidence; it has raised a question about flakiness, and that is a human's to
+        answer.
         """
         proj = project or self.project
         if not proj:
@@ -336,7 +446,12 @@ class Supervisor:
         if v.diverged:
             out.append("the worktree's gate differs from the committed one; the "
                        "committed gate ran, but review the diff")
-        if v.justifies_done:
+        if v.justifies_done and why == FINISHED_GAVE_UP:
+            self.store.finish(proj, name, ST_NEEDS_REVIEW,
+                              f"{v.event}: {v.outcome} after the cap was spent")
+            out.append(f"{name} -> needs-review (the gate passes now, but the agent "
+                       f"had already spent its retry cap - suspect flakiness)")
+        elif v.justifies_done:
             self.store.finish(proj, name, DONE, f"{v.event}: {v.outcome}")
             out.append(f"{name} -> done")
         else:
@@ -359,8 +474,20 @@ class Supervisor:
 def run(project: str | None = None, interval: float = 10.0, once: bool = False,
         dry_run: bool = False) -> int:
     sup = Supervisor(project, dry_run=dry_run)
-    scope = Path(project).name if project else "all projects"
+    scope = project_label(project) if project else "all projects"
     print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
+
+    # Record which version is actually running. A long-lived daemon holds the code it
+    # imported at startup, so upgrading `orch` on disk changes nothing until the unit is
+    # restarted - and the daemon keeps enforcing the old policy while looking healthy.
+    # Observed here: a supervisor that had been running for fourteen minutes verified a
+    # task using the previous release's rules.
+    if not dry_run:
+        try:
+            sup.store.set_meta("daemon_running_source", source_fingerprint())
+            sup.store.set_meta("daemon_started_at", str(int(time.time())))
+        except Exception:  # noqa: BLE001
+            pass
     try:
         while True:
             for line in sup.step():

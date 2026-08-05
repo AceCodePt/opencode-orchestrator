@@ -190,6 +190,7 @@ def check_daemon() -> list[Check]:
     else:
         out.append(Check(OK, f"supervisor running pid {info.get('ExecMainPID')}",
                          "renews leases, verifies stopped agents, restarts the server"))
+    out.extend(_check_daemon_freshness(info))
     if info.get("linger") is False:
         # Easy to miss and it defeats the whole point: a user unit without linger
         # starts at login and dies at logout, so an unattended reboot comes back
@@ -200,6 +201,45 @@ def check_daemon() -> list[Check]:
             f"`loginctl enable-linger {os.environ.get('USER', '$USER')}`",
         ))
     return out
+
+
+def _check_daemon_freshness(info: dict) -> list[Check]:
+    """Whether the running supervisor is the one currently installed.
+
+    A long-lived process holds the code it imported at startup, so `git pull` changes
+    nothing until the unit restarts. The daemon goes on enforcing the previous release's
+    policy while `systemctl status` says active and every log line looks normal. Seen
+    here: a supervisor fourteen minutes old verified a task by the old rules minutes
+    after the new ones were written.
+    """
+    if info.get("ActiveState") != "active":
+        return []
+    from . import daemon as daemon_mod
+    from .store import Store
+
+    try:
+        s = Store()
+        try:
+            running = s.get_meta("daemon_running_source")
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+    installed = daemon_mod.source_fingerprint()
+    if running is None:
+        return [Check(WARN, "the running supervisor did not record its source version",
+                      "it predates this check - restart it to be sure which policy is "
+                      "in force")]
+    if running != installed:
+        return [Check(
+            FAIL, "the running supervisor is not the installed code",
+            f"in memory {running}, on disk {installed}. A long-lived process holds "
+            f"what it imported at startup, so it is still enforcing the older policy "
+            f"and nothing in its logs will say so. "
+            f"`systemctl --user restart orch-daemon`",
+        )]
+    return [Check(OK, f"supervisor matches the installed code ({running})", "")]
 
 
 def check_harness_version(st: dict) -> list[Check]:

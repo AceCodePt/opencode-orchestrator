@@ -4,51 +4,69 @@
 
 - **Complexity:** Medium
 - **Priority:** High
-- **Status:** Ready for Handoff
+- **Status:** Done
 - **Dependencies:** none
 
 ## Context
 
-Three states are currently collapsed into two, and the missing one is the one that
-matters.
+Three states were collapsed into two, and the daemon acted on the wrong one: it ran the
+gate for **any** agent that had gone quiet.
 
-| Term | Means | Established by |
-| --- | --- | --- |
-| stopped | the session is idle and its dispatch exited | observation |
-| finished | the agent considers the task complete | a claim by the agent — **not captured** |
-| done | the work was checked and passed | a gate the daemon ran |
+The first draft of this task assumed the missing piece was a *claim by the agent* —
+something asking it whether it had completed the work. That was wrong, and would have
+added a new untrustworthy input for no gain.
 
-Because `finished` is never captured, the daemon treats `stopped` as if it were
-`finished` and runs the gate on any agent that has gone quiet. An agent stops for many
-reasons: it completed the work, it gave up, it hit a wall, it asked a question nobody
-answered, it ran out of context, it crashed.
-
-The consequence is specific. A gate answers *"is this broken"*, not *"is this the
-task"*. An agent that did a fifth of the work and quit leaves a green suite behind, so
-the gate passes and the task is marked `done`. Completeness is never checked by
-anything.
-
-This is not the same problem as the gate being trustworthy. That one is solved: the
-gate is read from the base branch and only the daemon's own run can promote a task.
-This is about what the passing gate *means*.
+`finished` is a property of the **in-loop gate loop**, not of the agent's opinion, and it
+was already observable in data the store held. Going idle is what *fires* the gate; a
+failing gate injects a prompt and the session becomes busy again. So an agent only stays
+stopped once the loop can no longer move it — the gate passed, or the retry cap was
+spent. The router's last outcome says which.
 
 ## Requirements
 
-- [ ] A stopped agent's task does not reach `done` on gate evidence alone.
-- [ ] Some record of whether the agent believes it completed the task. It is a claim,
-      so it must be stored as a claim — attributed, like router verdicts are, and
-      never sufficient on its own.
-- [ ] Distinguish at minimum: completed, gave up, blocked and unanswered, died.
-- [ ] `orch observe` and `orch task list` show which of those happened.
+- [x] `stopped` and `finished` are distinct, and the daemon acts only on `finished`.
+- [x] Classify: settled on a pass, retry cap spent, still retrying, never gated.
+- [x] A task with no in-loop verdict is never verified and never reaches `done`.
+- [x] An unrecognised router outcome falls to the cautious side, not to `finished`.
+- [x] A retry loop that has stopped driving the agent is escalated, not renewed forever.
+- [x] `orch task list` shows the last verdict and who reached it.
+
+## Outcome
+
+`daemon.stop_reason()` maps the router's last outcome onto four states, and `decide()`
+branches on them:
+
+| Router's last word | State | Action |
+| --- | --- | --- |
+| `passed` | finished, loop settled on a pass | verify out-of-loop; `passed` → `done` |
+| `stuck` | finished, cap spent | verify, but never `done` |
+| `failed` / `gate-modified` | still retrying | renew; escalate past the idle budget |
+| nothing, or unrecognised | never gated | `needs-review`, do not verify |
+
+Two rules came out of this that were not in the original requirements:
+
+**No in-loop verdict means no verification.** If nothing gated the work while the agent
+was present, one lucky out-of-loop run must not substitute for the gate that never ran.
+This closes the silent case found earlier — a worktree created before the router was
+committed, where the gate was valid and simply never fired.
+
+**A pass after the cap was spent is not `done`.** A suite that failed to the cap and then
+passes untouched has raised a flakiness question rather than earned confidence. The gate
+still runs and the verdict is still recorded.
 
 ## Verification
 
-Dispatch a task the agent cannot complete, and confirm the outcome is not `done` even
-when the gate passes. Then dispatch one it can, and confirm the two are distinguishable
-without reading a log.
+Performed live: a task whose work was genuinely correct, and whose gate passes on demand
+(`orch gate-run` → `passed`), still landed on `needs-review` once its in-loop verdicts
+were removed. The honest path was re-confirmed end to end under systemd, unattended:
+`router:passed` → daemon verified → `done` in about twenty seconds.
 
-## Prohibited Patterns
+Eleven unit tests cover the classifier, each branch, the escalation budget, and the
+flakiness rule.
 
-- Do **not** trust the claim on its own. An agent asserting completion is the same
-  class of evidence as an agent asserting a gate passed.
-- Do **not** infer completion from the absence of activity. That is the current bug.
+## Not solved by this
+
+**Completeness.** A gate answers "is this broken", not "is this the task", so an agent
+that did a fifth of the work and left a green suite behind still passes. That is a matter
+of what a project's gate checks — project knowledge, not infrastructure — and it is why
+`done` means "checked and passed" rather than "the task was accomplished".

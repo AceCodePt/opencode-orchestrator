@@ -16,15 +16,39 @@ Three words that are easy to use interchangeably and must not be:
 | Term | Means | Established by |
 | --- | --- | --- |
 | **stopped** | The session is idle and its dispatch has exited. | Observation. Says nothing about the work. |
-| **finished** | The agent considers the task complete. | A claim by the agent. **Currently not captured at all.** |
-| **done** | The work was checked and the check passed. | A gate the daemon ran itself. |
+| **finished** | Stopped, **and the in-loop gate loop has terminated.** Nothing further will happen on its own. | The router's last outcome: `passed`, or the retry cap spent. |
+| **done** | Finished, and a gate the daemon ran itself passed. | The daemon, out-of-loop. |
 
-The gap is `finished`. Nothing asks the agent whether it completed the task, so
-`stopped` is currently read as if it were `finished`, and any stopped agent gets its
-gate run. That conflates completion with correctness: an agent that did a fifth of the
-work and quit can still leave a green suite behind, and would then be called `done`.
-The gate answers "is this broken", not "is this the task". See
-`tasks/completion-signal`.
+`finished` is a property of the **loop**, not of the agent's opinion, and that is what
+makes it observable. Going idle is what *fires* the gate; a failing gate injects a
+prompt and the session becomes busy again. So an agent only stays stopped once the loop
+can no longer move it:
+
+| Router's last word | Meaning | Daemon does |
+| --- | --- | --- |
+| `passed` | finished — the loop settled on a pass | run its own gate; `passed` → **done** |
+| `stuck` | finished — retry cap spent, the agent gave up | run its own gate, but never `done` |
+| `failed` | **not** finished — a moment between attempts | renew; escalate if it stays idle past the budget |
+| nothing recorded | **not** finished — no gate ever fired here | `needs-review`, and do not verify |
+
+Two consequences worth stating, because both were wrong before.
+
+**No in-loop verdict means no verification.** If nothing gated the work while the agent
+was there, one lucky out-of-loop run must not stand in for the gate that never ran.
+That is the silent case found earlier: a worktree created before the router was
+committed, where the gate was valid and simply never fired. Verified — a task whose
+work was genuinely correct, and whose gate does pass on demand, still lands on
+`needs-review` once its in-loop verdicts are absent.
+
+**A pass after the cap was spent is not `done`.** A suite that failed to the cap and
+then passes untouched has not earned confidence; it has raised a question about
+flakiness. The gate is still run and recorded, because the evidence is worth having.
+
+What this still does not establish is **completeness**. A gate answers "is this broken",
+not "is this the task", so an agent that did a fifth of the work and left a green suite
+behind will pass. Closing that is a matter of what a project's gate checks — project
+knowledge, not infrastructure — and it is the reason `done` means "checked and passed",
+never "the task was accomplished".
 
 ## The criterion
 
@@ -154,6 +178,14 @@ that owns them. Three settings are load-bearing:
 | `Restart=always` | A supervisor that exited *cleanly* is still not supervising, and nothing else notices its absence. |
 | `KillMode=process` | The shared server and every agent are started with `start_new_session` and must survive a unit restart. Verified: restarting the unit left the server untouched. |
 | `loginctl enable-linger` | Without it a user unit starts at login and dies at logout, so an unattended reboot comes back supervising nothing — while `systemctl status` looked correct when you set it up. |
+
+**A long-lived daemon holds the code it imported at startup.** Upgrading `orch` on disk
+changes nothing until the unit restarts, and until then the daemon enforces the previous
+policy while `systemctl status` says active and every log line looks normal. Observed
+here: a supervisor fourteen minutes old verified a task by the old rules minutes after
+the new ones were written. `doctor` therefore compares a hash of the running sources
+against the installed ones and **fails** on a mismatch. A version string cannot do this
+job — it stays `0.1.0` across every commit.
 
 The absence of a daemon is a **silent** failure, which is why `doctor` fails on it
 rather than noting it. Dispatch still works, agents still run, in-loop gates still
