@@ -1,10 +1,3 @@
-"""Tests for the claims/leases store.
-
-The interesting cases are the ones that motivated moving state out of TASKS.md:
-a task must be claimed exactly once under concurrency, and a dispatch that dies
-must not wedge its task forever.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -44,11 +37,6 @@ def test_claim_is_exclusive() -> None:
 
 
 def test_claim_under_concurrency() -> None:
-    """Ten threads, one task. Exactly one winner.
-
-    This is the property TASKS.md cannot provide: two dispatchers flipping a
-    checkbox in the same worktree interleave rather than conflicting.
-    """
     tmp = tempfile.TemporaryDirectory()
     path = Path(tmp.name) / "orch.db"
     boot = Store(path)
@@ -80,11 +68,6 @@ def test_claim_under_concurrency() -> None:
 
 
 def test_expired_lease_is_reclaimable() -> None:
-    """A dispatch that dies must not wedge the task.
-
-    Git can express `[-]` but not an expiry, so a crashed dispatch leaves a state
-    nothing can distinguish from healthy work. A lease can.
-    """
     s, tmp = _store()
     s.sync_intent(PROJECT, ["crashy"])
     assert s.claim(PROJECT, lease_seconds=-1) == "crashy"
@@ -95,7 +78,6 @@ def test_expired_lease_is_reclaimable() -> None:
 
     assert [x.name for x in s.expired(PROJECT)] == ["crashy"]
 
-    # Expiry alone is not permission to reclaim; the caller proves death first.
     s.reclaim(PROJECT, "crashy", "port unreachable and tmux gone")
     t = s.get(PROJECT, "crashy")
     assert t is not None and t.status == TODO
@@ -114,13 +96,6 @@ def test_live_lease_is_not_reclaimable() -> None:
 
 
 def test_renew_extends() -> None:
-    """Deliberately not written with a short lease plus a sleep.
-
-    `int(time.time())` truncates, so a 1-second lease compared after a 1.1-second
-    sleep is expired or not depending on where the wall clock happened to sit inside
-    its second. A negative lease is already lapsed by construction, which tests the
-    same behaviour without the coin flip.
-    """
     s, tmp = _store()
     s.sync_intent(PROJECT, ["long"])
     s.claim(PROJECT, lease_seconds=-1)
@@ -132,7 +107,6 @@ def test_renew_extends() -> None:
 
 
 def test_retry_cap_bookkeeping() -> None:
-    """The gate loop is self-inflicted, so it must be bounded."""
     s, tmp = _store()
     s.sync_intent(PROJECT, ["failing"])
     s.claim(PROJECT)
@@ -148,7 +122,6 @@ def test_retry_cap_bookkeeping() -> None:
 
 
 def test_fingerprint_persists() -> None:
-    """Held in plugin memory, a restart re-baselines and skips the first check."""
     tmp = tempfile.TemporaryDirectory()
     path = Path(tmp.name) / "orch.db"
     a = Store(path)
@@ -156,14 +129,13 @@ def test_fingerprint_persists() -> None:
     a.set_fingerprint(PROJECT, "fp", "hash-v1")
     a.close()
 
-    b = Store(path)  # simulates a TUI restart
+    b = Store(path)
     assert b.fingerprint(PROJECT, "fp") == "hash-v1"
     b.close(); tmp.cleanup()
     print("ok: fingerprint survives a restart")
 
 
 def test_alerts_dedupe_by_request_id() -> None:
-    """Two ids were observed 27s apart for the same pattern in one turn."""
     s, tmp = _store()
     assert s.note_alert("per_aaa", "ses_1", "/wt", "external_directory", "/tmp/*")
     assert not s.note_alert("per_aaa", "ses_1", "/wt", "external_directory", "/tmp/*"), \
@@ -178,8 +150,6 @@ def test_alerts_dedupe_by_request_id() -> None:
 
 
 def test_verdicts_are_appended_not_overwritten() -> None:
-    """History, because the question a human asks is "did this ever pass, and what did
-    the run before it say". A single column answers only the first half."""
     s, tmp = _store()
     s.sync_intent("/p", ["a"])
     s.record_verdict("/p", "a", "session-idle", "failed", "red", source="router")
@@ -192,8 +162,6 @@ def test_verdicts_are_appended_not_overwritten() -> None:
 
 
 def test_verdicts_are_filterable_by_who_ran_the_gate() -> None:
-    """`source` is load-bearing, not decoration: only a gate the daemon ran itself may
-    promote a task, because the router runs inside the agent's own server."""
     s, tmp = _store()
     s.sync_intent("/p", ["a"])
     s.record_verdict("/p", "a", "session-idle", "passed", "", source="router")
@@ -204,9 +172,6 @@ def test_verdicts_are_filterable_by_who_ran_the_gate() -> None:
 
 
 def test_harness_versions_accumulate_and_a_change_is_reported() -> None:
-    """The floor is 1.18.11 and newer is a bonus, so the current number is not the
-    interesting fact. The interesting fact is that it *changed*, which is otherwise
-    invisible and is the first thing to suspect when behaviour moves."""
     s, tmp = _store()
     assert s.note_harness((1, 18, 11), below_min=False) is None
     assert s.note_harness((1, 18, 11), below_min=False) is None, "no change, no noise"
@@ -226,8 +191,6 @@ def test_a_harness_below_the_floor_is_recorded_as_such() -> None:
 
 
 def test_task_is_addressable_by_worktree() -> None:
-    """The only join a plugin can make: it is told the directory it loaded for, and
-    knows neither the task name nor the project."""
     s, tmp = _store()
     s.sync_intent("/p", ["a"])
     s.claim("/p", "a")

@@ -1,30 +1,3 @@
-"""Runtime state: claims, leases, retries.
-
-One authority per question. Git holds **intent** - which tasks exist and what they
-mean, in `TASKS.md` and `tasks/*/task.md`, human-authored and reviewable. This
-module holds **runtime** - what is actually running, since when, where, on which
-port.
-
-`- [-]` in TASKS.md becomes a rendered convenience: written back best-effort for a
-human reading the file, and never read as authority. That kills two problems at
-once. A dispatch that dies after flipping the checkbox currently leaves a task
-indistinguishable from one still running, and two files that both claim to hold
-state will eventually disagree.
-
-Why SQLite rather than a lock file:
-
-- A claim is one atomic statement under `BEGIN IMMEDIATE`, so no external lock is
-  needed at all.
-- Leases expire, so a crashed agent's task becomes reclaimable. Git can express
-  state but not a lease, and that - not the race - is the real gap.
-- Never `flock` a tracked file: git replaces inodes, so the lock silently stops
-  referring to the file everyone else sees. And git's own `index.lock` *fails*
-  rather than queueing, so it cannot serialize anything.
-
-One database per machine, mirroring how opencode keeps a single global store rather
-than one per project.
-"""
-
 from __future__ import annotations
 
 import os
@@ -35,12 +8,6 @@ from pathlib import Path
 
 DEFAULT_LEASE_SECONDS = 900
 
-# The supported harness floor. The box is pinned to 1.18.11, so that is the minimum;
-# anything newer is a bonus. Minor releases are assumed not to change the API, and that
-# assumption is recorded in `harness_seen` rather than trusted - if a release does move
-# behaviour, it is handled like any other dependency change, with evidence of when it
-# arrived. Kept here rather than only in `harness.py` because the database is what
-# outlives any single process.
 MIN_HARNESS = (1, 18, 11)
 
 TODO = "todo"
@@ -48,10 +15,6 @@ RUNNING = "running"
 DONE = "done"
 MERGED = "merged"
 STUCK = "stuck"
-# The agent stopped and the work was not established to be good. Either the daemon's
-# own gate run said no, or there was no committed gate to run - which is not the same
-# as a failure, and still not a pass. Distinct from `done` because only a verdict the
-# daemon reached itself justifies `done`.
 NEEDS_REVIEW = "needs-review"
 FAILED = "failed"
 
@@ -179,11 +142,7 @@ class Store:
     def close(self) -> None:
         self.db.close()
 
-    # ------------------------------------------------------------------ intent in
     def sync_intent(self, project: str, names: list[str]) -> int:
-        """Register tasks discovered in git. Intent lives in git; this only mirrors
-        the list so claims have something to point at. Existing rows keep their
-        runtime state."""
         now = int(time.time())
         added = 0
         for i, name in enumerate(names):
@@ -195,18 +154,12 @@ class Store:
             added += cur.rowcount or 0
         return added
 
-    # -------------------------------------------------------------------- claiming
     def claim(
         self,
         project: str,
         name: str | None = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> str | None:
-        """Atomically claim a task and return its name, or None if none available.
-
-        `BEGIN IMMEDIATE` takes the write lock before reading, which is what makes
-        the read-then-update safe against a concurrent claimer.
-        """
         now = int(time.time())
         until = now + lease_seconds
         try:
@@ -249,9 +202,6 @@ class Store:
         tmux: str | None = None,
         parent_session: str | None = None,
     ) -> None:
-        """Write the lease details. Called even when the daemon is unreachable, so
-        that a daemon which starts later can still reconcile children it never
-        saw."""
         self.db.execute(
             "UPDATE task SET worktree=COALESCE(?,worktree), branch=COALESCE(?,branch),"
             " port=COALESCE(?,port), pid=COALESCE(?,pid), tmux=COALESCE(?,tmux),"
@@ -278,13 +228,6 @@ class Store:
         )
 
     def expired(self, project: str | None = None) -> list[Task]:
-        """Tasks whose lease has lapsed.
-
-        Expiry alone is not permission to reclaim. The caller must also confirm the
-        port is unreachable and the tmux session is gone - only all three together
-        mean *definitely dead*. A busy agent whose lease lapsed because renewal
-        broke is not the same thing.
-        """
         now = int(time.time())
         sql = ("SELECT * FROM task WHERE status='running' AND lease_until IS NOT NULL"
                " AND lease_until<?")
@@ -295,14 +238,12 @@ class Store:
         return [self._task(r) for r in self.db.execute(sql, args)]
 
     def reclaim(self, project: str, name: str, reason: str) -> None:
-        """Return a task to available after it was proven dead."""
         self.db.execute(
             "UPDATE task SET status='todo', lease_until=NULL, port=NULL, pid=NULL,"
             " tmux=NULL, last_outcome=?, updated_at=? WHERE project=? AND name=?",
             (f"reclaimed: {reason}", int(time.time()), project, name),
         )
 
-    # --------------------------------------------------------------------- retries
     def bump_retry(self, project: str, name: str) -> int:
         self.db.execute(
             "UPDATE task SET retries=retries+1, updated_at=? WHERE project=? AND name=?",
@@ -320,8 +261,6 @@ class Store:
         )
 
     def set_fingerprint(self, project: str, name: str, fp: str) -> None:
-        """Persisted deliberately: holding the gate baseline in plugin memory means
-        a TUI restart re-baselines and can skip the first check entirely."""
         self.db.execute(
             "UPDATE task SET fingerprint=?, updated_at=? WHERE project=? AND name=?",
             (fp, int(time.time()), project, name),
@@ -333,11 +272,9 @@ class Store:
         ).fetchone()
         return row["fingerprint"] if row else None
 
-    # -------------------------------------------------------------------- verdicts
     def record_verdict(self, project: str, name: str, event: str, outcome: str,
                        detail: str = "", diverged: bool = False,
                        seconds: float = 0.0, source: str = "daemon") -> None:
-        """Append a gate verdict. Never overwrites: the previous answer is evidence."""
         self.db.execute(
             "INSERT INTO verdict(project,name,event,outcome,detail,diverged,seconds,"
             "source,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -364,7 +301,6 @@ class Store:
             "SELECT * FROM verdict WHERE project=? AND name=?"
             " ORDER BY id DESC LIMIT ?", (project, name, limit)))
 
-    # ------------------------------------------------------------------ meta / deps
     def set_meta(self, key: str, value: str) -> None:
         self.db.execute(
             "INSERT INTO meta(key,value) VALUES(?,?)"
@@ -375,13 +311,6 @@ class Store:
         return row["value"] if row else None
 
     def note_harness(self, version: tuple[int, ...], below_min: bool) -> str | None:
-        """Record a harness version we have run against. Returns the previous one when
-        it differs, so a caller can say so out loud.
-
-        The point is not the current value - `orch version` can ask the server. It is
-        having a record that the version changed *between* runs, which is otherwise
-        invisible and is the only warning that behaviour may have moved under us.
-        """
         dotted = ".".join(map(str, version))
         now = int(time.time())
         previous = self.get_meta("harness_version")
@@ -398,15 +327,8 @@ class Store:
         return list(self.db.execute(
             "SELECT * FROM harness_seen ORDER BY first_seen"))
 
-    # ---------------------------------------------------------------------- alerts
     def note_alert(self, request_id: str, session_id: str, worktree: str | None,
                    kind: str, detail: str) -> bool:
-        """Record a pending approval. Returns True if this id is newly seen.
-
-        Keyed on the request id because one turn can raise several requests, each
-        with its own id. Alerting on "is /permission non-empty" instead would fire
-        repeatedly for what a human experiences as a single decision.
-        """
         now = int(time.time())
         cur = self.db.execute(
             "INSERT OR IGNORE INTO alert(request_id,session_id,worktree,kind,detail,"
@@ -427,7 +349,6 @@ class Store:
         return list(self.db.execute(
             "SELECT * FROM alert WHERE resolved_at IS NULL ORDER BY first_seen"))
 
-    # ----------------------------------------------------------------------- reads
     def get(self, project: str, name: str) -> Task | None:
         row = self.db.execute(
             "SELECT * FROM task WHERE project=? AND name=?", (project, name)
@@ -435,12 +356,6 @@ class Store:
         return self._task(row) if row else None
 
     def by_worktree(self, worktree: str) -> Task | None:
-        """Find a task by its worktree path.
-
-        This is the join the router needs and the only one it can make. A plugin knows
-        the directory it was loaded for and nothing else - not the task name, not the
-        project - so without this it cannot address its own row.
-        """
         row = self.db.execute(
             "SELECT * FROM task WHERE worktree=? ORDER BY updated_at DESC LIMIT 1",
             (str(worktree).rstrip("/"),),

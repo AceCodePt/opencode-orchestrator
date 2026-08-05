@@ -1,27 +1,3 @@
-"""Lifecycle of the single shared `opencode serve`.
-
-One headless server per machine hosts every worktree. That is safe for project
-hooks because plugin loading is per-directory and lazy: a server started in one
-directory, handed a session in another, imports the second directory's plugins and
-passes them a `worktree` pointing there. Verified directly - see
-docs/architecture.md.
-
-Why headless rather than a TUI per task:
-
-- A server always has a port, so "no unobservable agent" stops being a contract
-  that a wrapper script has to enforce and becomes a property of the thing itself.
-- 362 MB against 947 MB for a TUI, so memory stops being the concurrency ceiling.
-- `serve` announces its port on stdout, so nothing has to scan for it.
-
-The TUI is not gone, just demoted to a viewer: `opencode attach <url>` whenever a
-human wants to watch, closed again without touching the agent.
-
-Everything here identifies the process by **recorded pid plus start time**, never
-by command-line pattern. `pkill -f 'opencode serve'` matches the very shell that
-invokes it - it killed one of these commands mid-flight during development, and
-would have taken an unrelated live agent with it had the pattern matched.
-"""
-
 from __future__ import annotations
 
 import json
@@ -57,39 +33,20 @@ def _log_file() -> Path:
 
 
 def _neutral_cwd() -> Path:
-    """A directory that is deliberately not a project.
-
-    The server's own working directory becomes its default project. Starting it
-    inside a real repo would make that repo's config and plugins the ambient
-    default for anything dispatched without an explicit `--dir`, which is a
-    surprising coupling for a process meant to be shared by every project.
-    """
     d = state_dir() / "server-cwd"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-# --------------------------------------------------------------- process identity
-
-
 def proc_start_ticks(pid: int) -> int | None:
-    """Field 22 of /proc/<pid>/stat: process start time in clock ticks.
-
-    Recorded alongside the pid so a recycled pid cannot be mistaken for our
-    server. Without this, `kill` on a stale pid file eventually kills whatever
-    unrelated process inherited that number - which is precisely the class of
-    accident that pattern-killing already caused here once.
-    """
     try:
         raw = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
         return None
-    # The comm field can contain spaces and parentheses, so split after the last ')'.
     close = raw.rfind(")")
     if close == -1:
         return None
     fields = raw[close + 2:].split()
-    # After comm and state, field 22 overall is index 19 in this remainder.
     try:
         return int(fields[19])
     except (IndexError, ValueError):
@@ -104,7 +61,7 @@ def pid_alive(pid: int, start_ticks: int | None = None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists, owned by someone else
+        return True
     if start_ticks is None:
         return True
     return proc_start_ticks(pid) == start_ticks
@@ -148,7 +105,7 @@ def write_state(info: ServerInfo) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(info), indent=2))
-    tmp.replace(p)  # atomic, so a crash mid-write cannot leave a truncated pid file
+    tmp.replace(p)
 
 
 def clear_state() -> None:
@@ -158,16 +115,7 @@ def clear_state() -> None:
         pass
 
 
-# ------------------------------------------------------------------------ current
-
-
 def current() -> ServerInfo | None:
-    """The shared server, if one is genuinely running.
-
-    Three degrees of wrongness are distinguished on purpose: no record at all, a
-    record whose process is gone, and a live process that no longer answers. Only
-    the last is worth alarming about - the others are just cleanup.
-    """
     info = read_state()
     if info is None:
         return None
@@ -193,25 +141,12 @@ def status() -> dict:
         "healthy": caps.healthy,
         "version": ".".join(map(str, caps.version)) if caps.version else None,
         "uptime_s": int(time.time()) - info.started_at if info.started_at else None,
-        # Exposed because plugins are imported once per directory and cached: anything
-        # edited after this timestamp may not be what the server is actually running.
         "started_at": info.started_at,
-        # A live process that does not answer is the interesting failure: the
-        # supervisor must not read it as "up" just because the pid exists.
         "unresponsive": not caps.healthy,
     }
 
 
-# -------------------------------------------------------------------------- start
-
-
 def orch_bin() -> str:
-    """Absolute path to this `orch`, for handing to child processes.
-
-    Prefers the checkout this module was imported from over whatever `orch` PATH
-    resolves to, so a development copy never has its state written by a stale global
-    install standing on a different schema.
-    """
     local = Path(__file__).resolve().parents[2] / "bin" / "orch"
     if local.exists():
         return str(local)
@@ -219,21 +154,11 @@ def orch_bin() -> str:
 
 
 def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
-    """Start the shared server, or return the existing one.
-
-    The port is read from the line `serve` prints on stdout rather than guessed or
-    scanned for. `--port 0` is passed explicitly: for the TUI, omitting it starts no
-    server at all, and while `serve` obviously always listens, being explicit keeps
-    one launch idiom for both.
-    """
     if reuse:
         existing = current()
         if existing and existing.healthy():
             return existing
         if existing:
-            # Alive but not answering. Replace it rather than dispatch into a
-            # server that cannot be observed; a half-dead shared server would
-            # silently break every task on the machine.
             stop()
 
     log = _log_file()
@@ -243,17 +168,10 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
         proc = subprocess.Popen(
             [opencode, "serve", "--port", "0", "--print-logs", "--log-level", "INFO"],
             cwd=str(_neutral_cwd()),
-            # The router plugin loads into this process and reaches its state through
-            # the CLI, so it needs to know where the CLI is. Resolving `orch` from
-            # PATH inside the plugin would depend on whatever shell environment the
-            # server happened to inherit, which is how a gate ends up quietly unable
-            # to record anything.
             env={**os.environ, "ORCH_BIN": orch_bin()},
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            # New session, so the server outlives the shell that started it and is
-            # not killed by a Ctrl-C aimed at the CLI.
             start_new_session=True,
         )
     finally:
@@ -274,12 +192,6 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
 
 
 def record_harness_version(port: int) -> str | None:
-    """Note which harness we just started against, and report a change.
-
-    Called here because starting the server is the moment the version is knowable and
-    is rare enough to be worth a write. Failure is ignored on purpose: not being able
-    to record a version is no reason to refuse to run.
-    """
     try:
         from .store import MIN_HARNESS, Store
 
@@ -296,7 +208,7 @@ def record_harness_version(port: int) -> str | None:
                     f"Minor releases are assumed API-compatible; if something "
                     f"behaves differently, this is when it changed.")
         return None
-    except Exception:  # noqa: BLE001 - recording a version must never break a start
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -325,12 +237,6 @@ def _await_url(log: Path, proc: subprocess.Popen, timeout: float) -> str:
 
 
 def _port_of(url: str) -> int:
-    """Port from an announced URL.
-
-    Parsed properly rather than by trailing-digits regex, which broke on a trailing
-    slash. The announcement format is not something this code controls, so it should
-    tolerate a path, a trailing slash, or a host that is not an IP literal.
-    """
     from urllib.parse import urlsplit
 
     try:
@@ -345,17 +251,7 @@ def _port_of(url: str) -> int:
     return int(m.group(1))
 
 
-# --------------------------------------------------------------------------- stop
-
-
 def stop(timeout: float = STOP_GRACE_S) -> bool:
-    """Stop the shared server by recorded pid. Returns True if anything was killed.
-
-    SIGTERM, then SIGKILL if it outstays the grace period. No pattern matching, and
-    no `tmux kill-session`: killing the process ends its tmux session by itself,
-    verified directly, so tmux is a host for a process and never a handle on its
-    lifetime.
-    """
     info = read_state()
     if info is None:
         return False
@@ -380,8 +276,6 @@ def stop(timeout: float = STOP_GRACE_S) -> bool:
         os.kill(info.pid, signal.SIGKILL)
     except OSError:
         pass
-    # Confirm rather than assume: reporting a kill that did not happen is how a
-    # supervisor ends up with two servers.
     for _ in range(25):
         if not info.alive:
             break

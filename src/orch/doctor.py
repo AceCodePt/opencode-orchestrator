@@ -1,10 +1,3 @@
-"""`orch doctor` - verify the contracts that fail silently.
-
-Every check here exists because its failure mode is invisible. An unobservable
-agent looks exactly like an idle one; a project with no gate looks exactly like a
-project whose checks passed. Loud verification is the only defence.
-"""
-
 from __future__ import annotations
 
 import json
@@ -21,8 +14,6 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 
-# Hooks the CLI fires. A missing one is not necessarily wrong - a project with no
-# database legitimately has no post-task-create.
 TASK_HOOKS = [
     "pre-task-create",
     "post-task-create",
@@ -30,8 +21,6 @@ TASK_HOOKS = [
     "post-task-cleanup",
     "pre-branch-delete",
 ]
-# Hooks the router plugin fires. `session-idle` is the verification gate, and its
-# absence must never be reported as success.
 AGENT_HOOKS = ["session-idle", "session-error"]
 
 
@@ -70,8 +59,6 @@ def check_project(cwd: Path) -> list[Check]:
 
     out.append(Check(OK, ".orchestration/ found", str(orch_dir)))
 
-    # It must be tracked. Untracked orchestration is the exact failure that
-    # motivated this project.
     tracked = subprocess.run(
         ["git", "ls-files", "--error-unmatch", str(orch_dir / "README.md")],
         capture_output=True, text=True, cwd=str(orch_dir.parent), check=False,
@@ -132,7 +119,6 @@ def check_project(cwd: Path) -> list[Check]:
 
 
 def check_server() -> list[Check]:
-    """The one shared headless server every task depends on."""
     out: list[Check] = []
     st = server.status()
     if not st.get("running"):
@@ -144,9 +130,6 @@ def check_server() -> list[Check]:
         return out
 
     if st.get("unresponsive"):
-        # The failure a `kill -0` check calls healthy. Every task on the machine
-        # runs inside this process, so a live-but-deaf server is worse than a dead
-        # one: dispatch appears to succeed and nothing can be observed afterwards.
         out.append(Check(
             FAIL, f"shared server pid {st['pid']} is alive but answers nothing",
             f"port {st['port']} does not respond to /global/health. "
@@ -163,14 +146,6 @@ def check_server() -> list[Check]:
 
 
 def check_daemon() -> list[Check]:
-    """Whether anything is actually supervising.
-
-    This is a silent-failure check, which is why it is a FAIL and not a note. With no
-    daemon, `orch task start` still works, agents still run, gates still fire in-loop -
-    everything looks healthy. But leases are never renewed and no stopped agent is ever
-    verified, so tasks sit at `running` forever and nothing reaches `done`. The system
-    appears to work right up to the point where you ask it for a result.
-    """
     from . import daemon as daemon_mod
 
     info = daemon_mod.unit_status()
@@ -192,9 +167,6 @@ def check_daemon() -> list[Check]:
                          "renews leases, verifies stopped agents, restarts the server"))
     out.extend(_check_daemon_freshness(info))
     if info.get("linger") is False:
-        # Easy to miss and it defeats the whole point: a user unit without linger
-        # starts at login and dies at logout, so an unattended reboot comes back
-        # supervising nothing while `systemctl status` looked fine when you set it up.
         out.append(Check(
             FAIL, "linger is off, so the supervisor dies with your session",
             f"an unattended reboot comes back with nothing supervising. "
@@ -204,14 +176,6 @@ def check_daemon() -> list[Check]:
 
 
 def _check_daemon_freshness(info: dict) -> list[Check]:
-    """Whether the running supervisor is the one currently installed.
-
-    A long-lived process holds the code it imported at startup, so `git pull` changes
-    nothing until the unit restarts. The daemon goes on enforcing the previous release's
-    policy while `systemctl status` says active and every log line looks normal. Seen
-    here: a supervisor fourteen minutes old verified a task by the old rules minutes
-    after the new ones were written.
-    """
     if info.get("ActiveState") != "active":
         return []
     from . import daemon as daemon_mod
@@ -243,14 +207,6 @@ def _check_daemon_freshness(info: dict) -> list[Check]:
 
 
 def check_harness_version(st: dict) -> list[Check]:
-    """Whether the harness is at or above the supported floor, and whether it moved.
-
-    1.18.11 is the contract because that is what the box is pinned to. Newer is a
-    bonus and must not silently become a requirement. Minor releases are assumed
-    API-compatible, so the useful signal is not the current number - it is that the
-    number *changed*, which is otherwise invisible and is the only warning that
-    behaviour may have moved.
-    """
     from .store import MIN_HARNESS, Store
 
     raw = st.get("version")
@@ -295,12 +251,6 @@ def check_harness_version(st: dict) -> list[Check]:
 
 
 def check_gates(cwd: Path) -> list[Check]:
-    """Whether a verdict from this project's gate would mean anything.
-
-    Separate from the hook-existence checks below, because existence is not the
-    question. A hook can be present, correct and completely inert - which is what
-    happened when a worktree predated the router plugin's commit.
-    """
     out: list[Check] = []
     code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True)
@@ -328,13 +278,6 @@ def check_gates(cwd: Path) -> list[Check]:
 
 
 def check_router_contract(cwd: Path) -> list[Check]:
-    """Whether the installed router provides what the supervisor relies on.
-
-    A FAIL rather than a warning, and separate from the drift check, because the failure
-    it prevents is silent and destructive: with a contract-1 router the supervisor cannot
-    tell a running gate from an agent nothing examined, so it marks a task
-    `needs-review` mid-check and then stops supervising it. Measured with a 45s gate.
-    """
     code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True)
     if code.returncode != 0:
@@ -342,7 +285,7 @@ def check_router_contract(cwd: Path) -> list[Check]:
     top = Path(code.stdout.strip())
     version, path = gate.router_contract(top)
     if version is None:
-        return []          # absence is check_gates' business, not this one
+        return []
     if version < gate.MIN_ROUTER_CONTRACT:
         return [Check(
             FAIL,
@@ -358,14 +301,6 @@ def check_router_contract(cwd: Path) -> list[Check]:
 
 
 def check_router_freshness(cwd: Path, st: dict) -> list[Check]:
-    """Whether the shared server could still be holding an older router.
-
-    opencode imports a plugin once per directory and caches the module, so editing the
-    router changes nothing for any directory the server has already touched - including a
-    worktree that was deleted and recreated at the same path. Cost a full test cycle
-    here: the router was upgraded and committed, the worktree was rebuilt, and the server
-    went on running the previous plugin.
-    """
     if not st.get("running") or not st.get("started_at"):
         return []
     code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
@@ -391,13 +326,6 @@ def check_router_freshness(cwd: Path, st: dict) -> list[Check]:
 
 
 def check_router_drift(cwd: Path) -> list[Check]:
-    """Is the installed router the one this `orch` ships?
-
-    Scaffolded files are owned by the consuming project - the shadcn model - so
-    drift is expected and allowed. It still has to be visible, because a router from
-    an older orch may not implement the guarantees this one documents. The committed
-    gate rule, for instance, only exists in routers newer than 2026-08-05.
-    """
     out: list[Check] = []
     template = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
     if not template.exists():
@@ -413,7 +341,7 @@ def check_router_drift(cwd: Path) -> list[Check]:
             installed = top / rel
             break
     if installed is None:
-        return out  # already reported by check_gates
+        return out
     try:
         if installed.read_text() == template.read_text():
             out.append(Check(OK, "router matches the shipped template", str(installed)))
@@ -431,12 +359,6 @@ def check_router_drift(cwd: Path) -> list[Check]:
 
 
 def check_launch() -> list[Check]:
-    """Stray hand-started TUIs.
-
-    No longer a contract, only a courtesy: orchestrated agents are headless servers
-    and always have a port. These checks concern TUIs a human opened, where being
-    blind is merely inconvenient rather than a broken invariant.
-    """
     out: list[Check] = []
     tuis = discover()
     if not tuis:
@@ -452,9 +374,6 @@ def check_launch() -> list[Check]:
                       f"listen - but you cannot see this one without relaunching it")
             )
 
-    # The wrapper is what stops new hand-opened TUIs from being born blind.
-    # `--help` claims `--port [default: 0]`, but omitting the flag starts no
-    # server - verified on 1.18.13.
     zshrc = Path.home() / ".zshrc"
     try:
         body = zshrc.read_text()
@@ -492,13 +411,6 @@ def check_harness() -> list[Check]:
 
 
 def check_tooling() -> list[Check]:
-    """Tools the gate degrades without.
-
-    The shipped session-idle hook exits 0 when shellcheck is missing, warning on
-    stderr. That is a deliberate compromise - a gate that fails because a linter is
-    absent gets disabled by the first person it annoys - but the weakened coverage
-    has to surface somewhere, and this is that place.
-    """
     out: list[Check] = []
     for tool, why in (("shellcheck", "session-idle degrades to syntax-only without it"),
                       ("tmux", "optional now: dispatch is headless, tmux only hosts TUIs you open"),

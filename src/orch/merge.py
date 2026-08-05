@@ -1,26 +1,3 @@
-"""Merge a done task's branch into base, then clean up the worktree and branch.
-
-The lifecycle of a task is::
-
-    todo  ->  running  ->  done  ->  merged
-                         ->  needs-review
-                         ->  stuck
-
-`done` means the daemon ran the committed gate itself and it passed. `merged`
-means the branch was folded into base and the worktree + branch were removed.
-Between the two, the work sits in a worktree that is verifiable by hand; after it,
-only the history remains.
-
-This is the first operation that *writes to the base branch*. Every prior step
-created something new (a worktree, a branch, a lease); merging changes what
-`main` points at. The gate established that the branch is good; this is the
-mechanical step after that.
-
-If the merge fails — because another task landed first and the branches
-conflict — the task stays `done` and the worktree + branch survive. A human
-resolves and re-runs `orch task merge <name>`.
-"""
-
 from __future__ import annotations
 
 import os
@@ -58,12 +35,6 @@ def _git(cwd: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
 
 
 def _find_base_worktree(bare: Path, base: str) -> Path | None:
-    """Find the worktree that is on the base branch.
-
-    `git worktree list --porcelain` prints lines of `worktree <path>` / `branch
-    refs/heads/<name>`. The bare repo itself has no `branch` line, and a detached
-    HEAD shows `detached` instead — both are skipped.
-    """
     code, out = _git(bare, "worktree", "list", "--porcelain")
     if code != 0:
         return None
@@ -95,10 +66,6 @@ def merge_and_cleanup(
     project: str,
     name: str,
 ) -> MergeResult:
-    """Merge a done task's branch into base and remove its worktree + branch.
-
-    Idempotent: a task already `merged` returns ok without touching anything.
-    """
     r = MergeResult()
     t = store.get(project, name)
     if t is None:
@@ -118,20 +85,12 @@ def merge_and_cleanup(
     bare = Path(project)
     base = gate.base_branch(wt) if wt.exists() else "main"
 
-    # The base worktree is where the merge lands. It is the worktree checked out
-    # on the base branch — typically `main`. If it is missing (deleted by hand,
-    # or the repo was restructured), the merge cannot proceed without creating
-    # one, and creating one silently is a side effect beyond this tool's scope.
     base_wt = _find_base_worktree(bare, base)
     if base_wt is None:
         r.fail(f"no worktree on {base} found in {bare}; cannot merge without one")
         return r
     r.step(f"base worktree: {base_wt} on {base}")
 
-    # Commit any uncommitted work in the task worktree before merging. The gate
-    # verified the working tree; `git merge` only moves commits, so uncommitted
-    # work would silently disappear. Agents are not reliable committers — observed
-    # writing correct files and passing the gate without a single `git add`.
     code, out = _git(wt, "add", "-A")
     code, status = _git(wt, "status", "--porcelain")
     if status:
@@ -141,22 +100,13 @@ def merge_and_cleanup(
             r.fail(f"could not commit uncommitted work in {wt}: {out[:300]}")
             return r
         r.step(f"committed uncommitted work on {t.branch}")
-        # Push the branch ref to the bare repo so the merge can see the new commit.
         code, out = _git(wt, "push", "origin", f"{t.branch}:{t.branch}")
         if code != 0:
-            # Worktrees linked to a bare repo share the ref namespace, so push is
-            # usually a no-op. If it fails, the merge will still work if the ref
-            # is visible from the base worktree.
             pass
 
-    # Merge the task branch into base.
     code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", t.branch)
     if code != 0:
-        # Abort the merge so the base worktree is not left in a conflicted state.
         _git(base_wt, "merge", "--abort")
-        # Move to needs-review so the daemon stops retrying and a human can resolve.
-        # A conflict is the normal outcome of two concurrent tasks touching the same
-        # file — the work is verified, the merge is what's blocked.
         store.finish(project, name, NEEDS_REVIEW,
                      f"merge conflict: {out[-200:]}")
         r.fail(f"merge failed: {out[-1500:]}")
@@ -166,17 +116,13 @@ def merge_and_cleanup(
         return r
     r.step(f"merged {t.branch} into {base}")
 
-    # Run pre-task-cleanup from the task worktree before removing it.
     env = _hook_env(name, t.branch, wt, base)
     ok, msg = dispatch.run_hook(wt, "pre-task-cleanup", env)
     r.step(msg)
     if not ok:
         r.fail(f"pre-task-cleanup blocked the cleanup; worktree survives")
-        # The merge already landed. The worktree and branch stay so a human can
-        # inspect them, but the task is not marked merged.
         return r
 
-    # Remove the worktree.
     code, out = _git(bare, "worktree", "remove", str(wt))
     if code != 0:
         r.step(f"worktree remove failed, trying --force: {out[:200]}")
@@ -186,7 +132,6 @@ def merge_and_cleanup(
         return r
     r.step(f"removed worktree {wt}")
 
-    # Run pre-branch-delete from the base worktree (the task worktree is gone).
     env["WORKTREE_PATH"] = str(wt)
     ok, msg = dispatch.run_hook(base_wt, "pre-branch-delete", env)
     r.step(msg)
@@ -194,17 +139,12 @@ def merge_and_cleanup(
         r.fail(f"pre-branch-delete blocked; branch {t.branch} survives")
         return r
 
-    # Delete the branch.
     code, out = _git(base_wt, "branch", "-d", t.branch)
     if code != 0:
-        # -d refuses if the branch is not merged. --force is not appropriate here:
-        # if -d says it's not merged, something is wrong. But the worktree is
-        # already gone, so losing the branch ref would lose the work. Leave it.
         r.fail(f"could not delete branch {t.branch}: {out[:300]}")
         return r
     r.step(f"deleted branch {t.branch}")
 
-    # Run post-task-cleanup from the base worktree.
     ok, msg = dispatch.run_hook(base_wt, "post-task-cleanup", env)
     r.step(msg)
 

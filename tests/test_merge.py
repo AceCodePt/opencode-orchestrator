@@ -1,10 +1,3 @@
-"""Tests for the merge + cleanup lifecycle.
-
-These use real git repos in temp directories because the operations under test
-(worktree management, branch merging, branch deletion) are git commands, and
-mocking them would test the mocks rather than the logic.
-"""
-
 from __future__ import annotations
 
 import os
@@ -27,11 +20,6 @@ def _git(cwd, *args):
 
 
 def _bare_repo(tmp: tempfile.TemporaryDirectory) -> Path:
-    """A bare repo with a main worktree and a config file.
-
-    Mirrors the real orch layout: a bare repo with a `main` worktree checked out
-    on the base branch, and task worktrees as siblings.
-    """
     seed = Path(tmp.name) / "seed"
     _git(Path(tmp.name), "init", "-b", "main", str(seed))
     _git(seed, "config", "user.email", "t@t")
@@ -55,7 +43,6 @@ def _bare_repo(tmp: tempfile.TemporaryDirectory) -> Path:
 
 
 def _done_task(bare: Path, store: Store, name: str) -> Path:
-    """Create a done task with a worktree that has one commit on a branch."""
     main_wt = bare.parent / "main"
     wt = bare.parent / name
     _git(bare, "worktree", "add", "-b", name, str(wt), "main")
@@ -164,7 +151,6 @@ def test_merge_conflict_keeps_worktree_and_branch() -> None:
 
 
 def test_manual_merge_after_resolving_conflict() -> None:
-    """After a conflict, a human resolves in the worktree and re-runs merge."""
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
     st = Store(":memory:")
@@ -175,22 +161,18 @@ def test_manual_merge_after_resolving_conflict() -> None:
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
 
-    # First merge fails -> needs-review
     r1 = merge.merge_and_cleanup(st, str(bare), "task-a")
     assert not r1.ok
 
-    # Human resolves: rebase the task branch onto current main
     subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"],
                        capture_output=True, check=True)
     subprocess.run(["git", "-C", str(wt), "rebase", "main"],
                        capture_output=True, timeout=10)
-    # Resolve the conflict — take the task's version
     (wt / "task.py").write_text("# resolved task-a")
     _git(wt, "add", "-A")
     env = {**os.environ, "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
     subprocess.run(["git", "-C", str(wt), "rebase", "--continue"],
                        capture_output=True, timeout=10, env=env)
-    # Run merge again — now it should work from needs-review
     r2 = merge.merge_and_cleanup(st, str(bare), "task-a")
     assert r2.ok, r2.problems
     assert "merged" in r2.steps[-1]
@@ -262,7 +244,6 @@ def test_post_task_cleanup_hook_runs() -> None:
 
 
 def test_decide_emits_merge_for_done_tasks() -> None:
-    """The daemon should emit MERGE actions for done tasks."""
     from orch import daemon
     from orch.store import Task
     done_task = Task(id=1, project="/tmp/lab.git", name="task-a", status=DONE,
@@ -278,15 +259,13 @@ def test_decide_emits_merge_for_done_tasks() -> None:
 
 
 def test_merge_commits_uncommitted_work_before_merging() -> None:
-    """An agent may pass the gate without committing — the daemon commits for it."""
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
     st = Store(":memory:")
     wt = _done_task(bare, st, "task-a")
 
-    # Add uncommitted work — as an agent would leave it
     (wt / "extra.py").write_text("# extra file")
-    _git(wt, "add", "-A")  # staged but not committed
+    _git(wt, "add", "-A")
 
     r = merge.merge_and_cleanup(st, str(bare), "task-a")
     assert r.ok, r.problems
@@ -300,7 +279,6 @@ def test_merge_commits_uncommitted_work_before_merging() -> None:
 
 
 def test_decide_does_not_merge_running_tasks() -> None:
-    """Running tasks should not get merge actions."""
     from orch import daemon
     from orch.store import Task
     running = Task(id=1, project="/tmp/lab.git", name="task-a", status=RUNNING,

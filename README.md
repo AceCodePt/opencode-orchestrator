@@ -96,7 +96,7 @@ bin/orch events -d 30 -v         # tail SSE, then print a histogram of event typ
 
 bin/orch daemon install          # systemd user unit, enabled, with linger
 bin/orch daemon status           # is anything actually supervising
-bin/orch daemon --once --dry-run # decide and print, change nothing
+bin/orch daemon run --once --dry-run # decide and print, change nothing
 ```
 
 `orch daemon` is one supervisor per machine covering every project, because there is one

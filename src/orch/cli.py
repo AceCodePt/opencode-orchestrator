@@ -1,9 +1,3 @@
-"""`orch` command line.
-
-Deliberately stdlib-only. This has to run on a box that is a pinned-binary
-environment, so a dependency tree is a liability.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -57,18 +51,21 @@ def cmd_observe(args: argparse.Namespace) -> int:
         ))
     else:
         print(observe.render(facts, verbose=args.verbose))
-    # Exit non-zero when something needs a human, so this composes in a shell.
     return 1 if any(f.needs_human or f.is_alarm for f in facts) else 0
 
 
 def cmd_events(args: argparse.Namespace) -> int:
-    """Tail the SSE stream. Polling cannot replace this: a request raised and
-    answered between two samples is invisible forever."""
     tuis = [t for t in discover() if t.observable]
     if args.port:
         tuis = [t for t in tuis if t.port == args.port]
     if not tuis:
         print("no observable TUI found (need one started with --port)", file=sys.stderr)
+        return 2
+    if len(tuis) > 1:
+        print(f"{len(tuis)} observable TUIs; pass --port to choose one:", file=sys.stderr)
+        for t in sorted(tuis, key=lambda t: t.port or 0):
+            where = f", cwd={t.cwd}" if t.cwd else ""
+            print(f"  --port {t.port}  (pid={t.pid}{where})", file=sys.stderr)
         return 2
     tui = tuis[0]
     print(f"# tailing /event on port {tui.port} ({tui.cwd})", file=sys.stderr)
@@ -76,8 +73,6 @@ def cmd_events(args: argparse.Namespace) -> int:
     deadline = time.time() + args.duration if args.duration else None
 
     def _dump(*_a) -> None:
-        # Print the histogram even when killed, otherwise `timeout orch events`
-        # discards everything it collected.
         if seen:
             print("\n# event types observed:", file=sys.stderr)
             for k, v in sorted(seen.items(), key=lambda kv: -kv[1]):
@@ -106,7 +101,7 @@ def cmd_events(args: argparse.Namespace) -> int:
                     print(f"    {k}={s[:160]}")
     except KeyboardInterrupt:
         pass
-    except Exception as e:  # noqa: BLE001 - a dying server must not traceback
+    except Exception as e:  # noqa: BLE001
         print(f"# stream ended: {e}", file=sys.stderr)
     if seen:
         print("\n# event types observed:", file=sys.stderr)
@@ -120,7 +115,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     r = init_mod.run(start, force=args.force, version=__version__,
                      force_hooks=args.force_hooks)
     print(init_mod.render(r))
-    # No worktree resolved means nothing was written; that is a failure, not a no-op.
     return 0 if (r.created or r.skipped) else 2
 
 
@@ -131,7 +125,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_server(args: argparse.Namespace) -> int:
-    """Lifecycle of the one shared headless server."""
+    if args.action is None:
+        args._sparser.print_help()
+        return 0
     if args.action == "start":
         try:
             info = server_mod.start()
@@ -165,9 +161,6 @@ def cmd_server(args: argparse.Namespace) -> int:
             print(f"pid={st['pid']} {st['url']} version={st.get('version') or '?'} "
                   f"uptime={st.get('uptime_s')}s")
             if st.get("unresponsive"):
-                # The dangerous middle state: the pid exists so naive checks call it
-                # up, but it answers nothing, and every task on the machine depends
-                # on this one process.
                 print("  ! process is alive but does not answer /global/health")
     if not st.get("running"):
         return 2
@@ -175,11 +168,6 @@ def cmd_server(args: argparse.Namespace) -> int:
 
 
 def cmd_attach(args: argparse.Namespace) -> int:
-    """Open a TUI onto the shared server.
-
-    The whole reason headless is livable: the viewer is ephemeral and closing it
-    does nothing to the agent.
-    """
     info = server_mod.current()
     if info is None:
         print("no shared server running; `orch server start` first", file=sys.stderr)
@@ -191,8 +179,13 @@ def cmd_attach(args: argparse.Namespace) -> int:
         print(" ".join(cmd))
         return 0
     import os as _os
-    _os.execvp(cmd[0], cmd)  # replace this process; the TUI owns the terminal now
-    return 0  # unreachable
+    _os.execvp(cmd[0], cmd)
+    return 0
+
+
+def cmd_task_help(args: argparse.Namespace) -> int:
+    args._tparser.print_help()
+    return 0
 
 
 def cmd_task_start(args: argparse.Namespace) -> int:
@@ -209,8 +202,6 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     )
     for s in r.steps:
         print(f"  {s}")
-    # Flush before writing to stderr: otherwise a redirected run shows the failure
-    # above the steps that led to it, which reads as if it failed before starting.
     sys.stdout.flush()
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
@@ -236,13 +227,7 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         for t in rows:
             flag = ""
             if t.lease_expired:
-                # Expiry is not permission to reclaim: a busy agent whose renewal
-                # broke looks identical here, which is why this only annotates.
                 flag = "  (lease expired - verify before reclaiming)"
-            # Show who reached the verdict, not just what it was. `done` is only ever
-            # written from a gate the daemon ran itself, and a router `passed` sitting
-            # under a `needs-review` task is the normal, correct combination - the
-            # agent believed it was finished and nothing out-of-loop has agreed yet.
             v = st.last_verdict(str(project), t.name)
             said = f"  {v['source']}:{v['outcome']}" if v else ""
             print(f"  {t.status:12} {t.name:34} pid={t.pid or '-':<8} "
@@ -253,12 +238,6 @@ def cmd_task_list(args: argparse.Namespace) -> int:
 
 
 def cmd_task_reset(args: argparse.Namespace) -> int:
-    """Return a task to available. Deliberately a human action.
-
-    Nothing auto-resets a `failed` or `stuck` task: those states mean a worktree
-    exists and may hold half-finished work, and silently handing it to the next
-    dispatcher would hide that. `orch observe` shows what is there first.
-    """
     start = Path(args.directory) if args.directory else Path.cwd()
     _, project, err = dispatch_mod.project_of(start)
     if err or project is None:
@@ -286,11 +265,6 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
 
 
 def cmd_task_merge(args: argparse.Namespace) -> int:
-    """Merge a done task's branch into base and clean up the worktree + branch.
-
-    The daemon does this automatically, but the command exists for when it is not
-    running, or a merge failed and a human resolved the conflict.
-    """
     from . import merge as merge_mod
     start = Path(args.directory) if args.directory else Path.cwd()
     _, project, err = dispatch_mod.project_of(start)
@@ -311,7 +285,6 @@ def cmd_task_merge(args: argparse.Namespace) -> int:
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
-    """Report whether this project's gates can be trusted."""
     start = Path(args.directory) if args.directory else Path.cwd()
     top, _, err = dispatch_mod.project_of(start)
     if err or top is None:
@@ -335,12 +308,6 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 def cmd_gate_run(args: argparse.Namespace) -> int:
-    """Run the committed gate here and print the verdict, recording it if the
-    worktree belongs to a known task.
-
-    The same code path the daemon uses, exposed so a human can ask the question
-    directly instead of inferring the answer from a log line.
-    """
     wt = Path(args.directory) if args.directory else Path.cwd()
     v = gate_mod.run(wt, args.event)
     print(f"{v.event}: {v.summary}")
@@ -364,22 +331,10 @@ def cmd_gate_run(args: argparse.Namespace) -> int:
 
 
 def cmd_gate_state(args: argparse.Namespace) -> int:
-    """Router state: the gate fingerprint and attempt count for a worktree.
-
-    Exists because the router used to keep this in `.orchestration/.state/` inside the
-    worktree it was judging - two authorities for one question, per-worktree files that
-    could not express a machine-wide limit, and invisible to `orch observe` because
-    that reads the database.
-
-    Addressed by worktree because that is the only identifier a plugin has: it is told
-    the directory it was loaded for, not the task name or the project.
-    """
     st = Store()
     try:
         t = st.by_worktree(args.worktree)
         if t is None:
-            # Not an error. A hand-made worktree that no dispatch created has no row,
-            # and its gate should still run - it just has no baseline to skip against.
             print(json.dumps({"known": False, "fingerprint": None, "attempts": 0}))
             return 0
         print(json.dumps({
@@ -392,12 +347,6 @@ def cmd_gate_state(args: argparse.Namespace) -> int:
 
 
 def cmd_gate_report(args: argparse.Namespace) -> int:
-    """Record what the router's in-loop gate run said, and return the attempt count.
-
-    Advisory by construction. This is written from inside the agent's own server, so
-    it is a self-report and stored as `source=router`; only a verdict the daemon
-    reached itself can promote a task to `done`.
-    """
     st = Store()
     try:
         t = st.by_worktree(args.worktree)
@@ -406,9 +355,6 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
             return 0
         attempts = t.retries
         if args.outcome == "running":
-            # A gate has started. No counter moves: this is a claim about the mechanism
-            # being in flight, so that the supervisor does not read a long check as an
-            # agent nothing ever examined.
             st.record_verdict(t.project, t.name, args.event, "running",
                               args.detail or "", source="router")
             print(json.dumps({"known": True, "task": t.name, "attempts": attempts}))
@@ -421,9 +367,6 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
         elif args.outcome == "failed":
             attempts = st.bump_retry(t.project, t.name)
         elif args.outcome == "stuck" and args.fingerprint:
-            # Baseline it even though it failed: the cap has been reached, and
-            # re-running the same failing gate on every idle event would burn the
-            # machine without changing the answer.
             st.set_fingerprint(t.project, t.name, args.fingerprint)
         st.record_verdict(t.project, t.name, args.event, args.outcome,
                           args.detail or "", diverged=args.diverged,
@@ -435,13 +378,9 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    """Supervise: renew leases, alert, reclaim the definitely dead, restart the shared
-    server, and verify stopped agents against the committed gate.
-
-    Machine-wide by default. There is one shared server, one database and one set of
-    leases per machine, so a per-project daemon has to be remembered once per project
-    and silently supervises nothing for any project nobody started.
-    """
+    if args.action is None:
+        args._dparser.print_help()
+        return 0
     if args.action == "install":
         for line in daemon_mod.install(interval=args.interval,
                                        enable=not args.no_enable):
@@ -462,8 +401,6 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print(f"state   {info.get('ActiveState')}/{info.get('SubState')} "
               f"({info.get('UnitFileState')})  pid={info.get('ExecMainPID')}")
         if info.get("linger") is False:
-            # Worth its own line: without linger the unit starts at login and dies at
-            # logout, so an unattended reboot comes back supervising nothing.
             print("linger  NO - this daemon will not run unless you are logged in")
             return 1
         print("linger  yes - survives logout and reboot")
@@ -491,13 +428,34 @@ def cmd_version(_: argparse.Namespace) -> int:
     return 0
 
 
+class _SubcommandHelpFormatter(argparse.HelpFormatter):
+    def _format_action(self, action: argparse.Action) -> str:
+        if action.nargs == argparse.PARSER:
+            parts: list[str] = []
+            for subaction in self._iter_indented_subactions(action):
+                r = self._format_action(subaction) or ""
+                parts.append("".join(
+                    l[2:] if l.startswith("  ") else l
+                    for l in r.splitlines(keepends=True)
+                ))
+            return "".join(parts)
+        return super()._format_action(action)
+
+
+class _OrchArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _SubcommandHelpFormatter)
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _OrchArgumentParser(
         prog="orch",
         description="Orchestrate opencode agents across bare-repo worktrees.",
     )
     p.add_argument("--version", action="version", version=f"orch {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True,
+                           metavar="<command>", title="commands")
 
     o = sub.add_parser("observe", help="show the live state of every TUI (read-only)")
     o.add_argument("-v", "--verbose", action="store_true")
@@ -530,10 +488,15 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("server", help="the one shared headless opencode server")
-    s.add_argument("action", nargs="?", default="status",
-                   choices=["status", "start", "stop", "restart"])
     s.add_argument("--json", action="store_true")
-    s.set_defaults(func=cmd_server)
+    sa = s.add_subparsers(dest="action", metavar="<action>", title="server actions")
+    ss = sa.add_parser("status",
+                       help="whether the shared server is up and healthy")
+    ss.add_argument("--json", action="store_true")
+    sa.add_parser("start", help="start the shared server (reuse if already up)")
+    sa.add_parser("stop", help="stop the shared server by recorded pid")
+    sa.add_parser("restart", help="stop and start the shared server again")
+    s.set_defaults(func=cmd_server, _sparser=s)
 
     a = sub.add_parser("attach", help="open a TUI onto the shared server (ephemeral)")
     a.add_argument("-C", "--directory", help="worktree to view")
@@ -542,7 +505,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_attach)
 
     t = sub.add_parser("task", help="dispatch and inspect tasks")
-    tsub = t.add_subparsers(dest="task_cmd", required=True)
+    t.set_defaults(func=cmd_task_help, _tparser=t)
+    tsub = t.add_subparsers(dest="task_cmd",
+                            metavar="<command>", title="task commands")
 
     ts = tsub.add_parser("start", help="claim a task and dispatch an agent for it")
     ts.add_argument("name")
@@ -585,10 +550,6 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--event", default="session-idle")
     gr.set_defaults(func=cmd_gate_run)
 
-    # Called by the router plugin, not by hand. Kept as ordinary subcommands rather
-    # than an HTTP endpoint on the daemon: SQLite in WAL mode already serialises
-    # multi-process writes, so a socket would only add a service that can be down -
-    # and "the daemon was unreachable" must never be a way for a gate to pass.
     gs = sub.add_parser("gate-state", help="(internal) gate fingerprint and attempts")
     gs.add_argument("--worktree", required=True)
     gs.add_argument("--event", default="session-idle")
@@ -605,8 +566,13 @@ def build_parser() -> argparse.ArgumentParser:
     gp.set_defaults(func=cmd_gate_report)
 
     dm = sub.add_parser("daemon", help="supervise leases, verdicts and the server")
-    dm.add_argument("action", nargs="?", default="run",
-                    choices=["run", "install", "status"])
+    da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")
+    dr = da.add_parser("run",
+                       help="run the supervision loop (foreground; Ctrl-C stops)")
+    di = da.add_parser("install",
+                       help="write and enable the systemd user unit")
+    ds = da.add_parser("status",
+                       help="report what systemd says is supervising")
     dm.add_argument("-C", "--directory",
                     help="supervise only this project (default: every project)")
     dm.add_argument("--project-only", action="store_true",
@@ -618,7 +584,22 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--no-enable", action="store_true",
                     help="write the systemd unit but do not enable it")
     dm.add_argument("--json", action="store_true")
-    dm.set_defaults(func=cmd_daemon)
+    # The run flags exist on both the parent and the `run` subparser so
+    # `orch daemon <flag> run` and `orch daemon run <flag>` both work, matching
+    # how the actions were called before they became subcommands.
+    dr.add_argument("-C", "--directory",
+                    help="supervise only this project (default: every project)")
+    dr.add_argument("--project-only", action="store_true",
+                    help="supervise only the project of the current directory")
+    dr.add_argument("-n", "--interval", type=float, default=10.0)
+    dr.add_argument("--once", action="store_true", help="one pass, then exit")
+    dr.add_argument("--dry-run", action="store_true",
+                    help="decide and print, change nothing")
+    di.add_argument("-n", "--interval", type=float, default=10.0)
+    di.add_argument("--no-enable", action="store_true",
+                    help="write the systemd unit but do not enable it")
+    ds.add_argument("--json", action="store_true")
+    dm.set_defaults(func=cmd_daemon, _dparser=dm)
 
     v = sub.add_parser("version", help="show orch and harness versions")
     v.set_defaults(func=cmd_version)
@@ -626,6 +607,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None and not sys.argv[1:]:
+        build_parser().print_help()
+        return 0
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 

@@ -1,16 +1,3 @@
-"""Find every opencode TUI on this machine.
-
-There is no registry file, deliberately. The kernel already knows which processes
-exist and which sockets they hold, so a file could only go stale. `ss -ltnp` gives
-port and pid; `/proc/<pid>/cwd` gives the directory.
-
-A TUI started without `--port` cannot be observed at all: no listening socket, no
-unix socket, no lock file, and its pending approvals live only in TUI memory (the
-`permission` table in opencode's SQLite store stays empty). Such a process is
-reported as `observable=False` rather than skipped, because silence that reads as
-health is the failure this whole project exists to prevent.
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,10 +7,6 @@ from dataclasses import dataclass
 
 PROC_NAME = "opencode"
 
-# `ss -ltnp` process field looks like: users:(("opencode",pid=372656,fd=22))
-# Note the opening double quote - omitting it silently matches nothing, which
-# reports an observable TUI as blind. That is the most dangerous direction for this
-# tool to fail, so it is parsed explicitly rather than cleverly.
 _SS_PROC = re.compile(r'\(\("(?P<name>[^"]+)",pid=(?P<pid>\d+)')
 _SS_PORT = re.compile(r":(?P<port>\d+)$")
 
@@ -54,10 +37,6 @@ def _run(cmd: list[str]) -> str:
 
 
 def _listening_ports() -> dict[int, int]:
-    """pid -> port, for listening sockets owned by opencode.
-
-    Fields of `ss -ltnp` are: State Recv-Q Send-Q Local:Port Peer:Port Process.
-    """
     out: dict[int, int] = {}
     for line in _run(["ss", "-ltnp"]).splitlines():
         if PROC_NAME not in line or "Local Address" in line:
@@ -76,12 +55,6 @@ def _listening_ports() -> dict[int, int]:
 
 
 def _pids() -> list[int]:
-    """Every process named exactly `opencode`.
-
-    Exact-name matching matters. `pgrep -f opencode` also matches the shell running
-    the query itself, and it matches plugin subprocesses such as
-    `node .../packages/types`, which are children of a TUI rather than TUIs.
-    """
     out = _run(["pgrep", "-x", PROC_NAME])
     return [int(x) for x in out.split() if x.isdigit()]
 
@@ -113,7 +86,6 @@ def _ppid(pid: int) -> int | None:
 
 
 def _tmux_sessions() -> dict[int, str]:
-    """pane pid -> tmux session name, for attributing a TUI to its session."""
     out = _run(["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}"])
     mapping: dict[int, str] = {}
     for line in out.splitlines():
@@ -124,7 +96,6 @@ def _tmux_sessions() -> dict[int, str]:
 
 
 def _tmux_for(pid: int, panes: dict[int, str]) -> str | None:
-    """Walk up the process tree until a pid matches a tmux pane."""
     seen = 0
     cur: int | None = pid
     while cur and cur > 1 and seen < 12:

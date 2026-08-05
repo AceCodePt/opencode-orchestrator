@@ -1,13 +1,3 @@
-"""`orch init` - scaffold a project so it can be orchestrated.
-
-Installs two things: a tracked `.orchestration/` holding what only this project
-knows, and the generic router plugin into `.opencode/`.
-
-Scaffolded files are owned by the project afterwards - the shadcn model. You may
-edit them freely; the cost is reading a diff at upgrade time, which is what the
-version marker exists for.
-"""
-
 from __future__ import annotations
 
 import json
@@ -88,8 +78,6 @@ are fine; a missing `session-idle` is not, because then nothing verifies the wor
 """
 
 
-
-
 @dataclass
 class InitResult:
     created: list[str]
@@ -104,13 +92,6 @@ def _git(args: list[str], cwd: Path) -> tuple[int, str]:
 
 
 def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
-    """Find the worktree that should receive the scaffold.
-
-    `orch init` cannot write into a bare repository: there is no working tree, and
-    that is exactly how a dispatcher ends up living in an untracked parent
-    directory. So a bare target is refused with an explanation rather than
-    silently writing beside it.
-    """
     notes: list[str] = []
 
     rc, bare = _git(["rev-parse", "--is-bare-repository"], start)
@@ -125,7 +106,6 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
 
     rc, top = _git(["rev-parse", "--show-toplevel"], start)
     if rc != 0 or not top:
-        # A directory that merely *contains* a bare repo is the classic trap.
         bares = sorted(p for p in start.glob("*.git") if p.is_dir())
         if bares:
             notes.append(
@@ -160,10 +140,6 @@ def run(start: Path, force: bool = False, version: str = "0",
             skipped.append(rel)
             return
         if p.exists() and protected and not force_hooks:
-            # `--force` must not clobber a gate. It is the most valuable file in the
-            # project, its loss is unrecoverable, and overwriting it with the
-            # fail-closed scaffold silently replaces real verification with none.
-            # Learned by doing exactly that here while trying to update the router.
             skipped.append(f"{rel} (protected; --force-hooks to overwrite)")
             return
         p.write_text(body)
@@ -181,11 +157,6 @@ def run(start: Path, force: bool = False, version: str = "0",
     plugins.mkdir(parents=True, exist_ok=True)
     src = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
     if src.is_file():
-        # The router is orch's mechanism, not project knowledge, and the supervisor
-        # depends on a declared contract from it. So an out-of-date contract is upgraded
-        # even without `--force`: leaving it stale makes the daemon mark tasks
-        # needs-review while their gates are still running. A router at or above the
-        # floor is left alone, because projects legitimately customise their copy.
         from .gate import MIN_ROUTER_CONTRACT, router_contract
 
         have, _ = router_contract(target)
@@ -205,11 +176,6 @@ def run(start: Path, force: bool = False, version: str = "0",
     else:
         notes.append(f"router plugin template not found at {src}")
 
-    # No .gitignore entry is appended any more. The plugin used to keep fingerprints
-    # and retry counters in `.orchestration/.state/` inside the worktree it was
-    # judging; that state now lives in the one database, so there is nothing here to
-    # ignore. If a project still has the old entry it is harmless, and removing it for
-    # them would be an edit nobody asked for.
     stale = target / ".orchestration" / ".state"
     if stale.exists():
         notes.append(

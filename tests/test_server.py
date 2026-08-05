@@ -1,11 +1,3 @@
-"""Tests for shared-server bookkeeping.
-
-No opencode process is started here. What is tested is the part that decides
-whether to *kill* something, because that is where a mistake is unrecoverable:
-`pkill -f 'opencode serve'` already killed an unrelated shell during development,
-and a stale pid file eventually points at whatever process inherited that number.
-"""
-
 from __future__ import annotations
 
 import os
@@ -34,12 +26,6 @@ def test_start_ticks_reads_own_process() -> None:
 
 
 def test_start_ticks_handles_a_comm_with_spaces() -> None:
-    """/proc/<pid>/stat's comm field can contain spaces and parens.
-
-    Splitting on whitespace from the left mis-indexes every later field, which would
-    silently produce the wrong start time - and a wrong start time means either
-    refusing to kill our own server or agreeing to kill someone else's process.
-    """
     p = subprocess.Popen(["bash", "-c", "exec -a 'we ird (name)' sleep 5"])
     try:
         time.sleep(0.3)
@@ -58,8 +44,6 @@ def test_pid_reuse_is_detected() -> None:
         time.sleep(0.2)
         real = server.proc_start_ticks(p.pid)
         assert server.pid_alive(p.pid, real)
-        # Same pid, wrong start time: this is what a recycled pid looks like, and
-        # treating it as ours is how a supervisor kills a stranger's process.
         assert not server.pid_alive(p.pid, (real or 0) + 999), \
             "a mismatched start time must not count as alive"
     finally:
@@ -89,8 +73,6 @@ def test_state_round_trip_and_stale_clear() -> None:
         assert back and back.pid == info.pid and back.port == 4096
         assert back.alive, "this process is obviously alive"
 
-        # A record whose process is gone must be cleared rather than reported as a
-        # server, otherwise every later call tries to talk to nothing.
         server.write_state(server.ServerInfo(
             pid=999999, port=1, url="http://127.0.0.1:1", started_at=1, start_ticks=1))
         assert server.current() is None
@@ -104,8 +86,6 @@ def test_status_distinguishes_gone_from_unresponsive() -> None:
     tmp = _isolate()
     try:
         assert server.status()["running"] is False
-        # Alive but not an opencode server: the pid answers, the port does not. This
-        # is the dangerous middle state a naive `kill -0` check calls "up".
         server.write_state(server.ServerInfo(
             pid=os.getpid(), port=1, url="http://127.0.0.1:1",
             started_at=int(time.time()),
@@ -125,8 +105,6 @@ def test_port_parsing_matches_the_real_announcement() -> None:
     url = m.group(1)
     assert url == "http://127.0.0.1:39153"
     assert server._port_of(url) == 39153
-    # The announcement format is not ours to control, so tolerate the variations:
-    # a trailing slash broke the original trailing-digits regex.
     assert server._port_of("http://127.0.0.1:4096/") == 4096
     assert server._port_of("http://localhost:8080/api") == 8080
     assert server._port_of(" http://127.0.0.1:1234 ") == 1234

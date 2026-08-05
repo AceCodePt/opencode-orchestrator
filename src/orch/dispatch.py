@@ -1,29 +1,3 @@
-"""Flow A: turn a task into a running agent.
-
-Order is the whole design here, and it is not arbitrary:
-
-1. Claim atomically, so two dispatchers cannot take the same task.
-2. `pre-task-create` from the **dispatcher's** worktree - the new one does not
-   exist yet, so its hooks cannot possibly run.
-3. Create the worktree, after pruning, because a stale registration makes
-   `git worktree add` fail on a directory nobody is using.
-4. `post-task-create` from the **new** worktree - database creation, `.env`
-   rewriting. Different refs run at steps 2 and 4; that is a real consequence, not
-   a bug, and it means a task branch can change its own post-create behaviour but
-   never its pre-create behaviour.
-5. Verify the gate is committed. Skipping this produces work that nothing verified,
-   reported as the mild-sounding `no-gate-configured`.
-6. Only then dispatch. Before step 4 finishes, an agent boots against the wrong
-   database.
-
-The dispatch itself is `opencode run --attach <url> --dir <worktree>` into the one
-shared server. **Its exit code is not task completion**: measured, a run exited 0
-and its session then performed 24 more tool calls over the following 36 seconds
-because the router injected a follow-up prompt. Anything able to inject a prompt
-outlives the dispatcher, so doneness is a property of the session and is observed,
-not returned.
-"""
-
 from __future__ import annotations
 
 import os
@@ -57,12 +31,11 @@ def _git(cwd: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
 
 @dataclass
 class Plan:
-    """What a dispatch intends to do, so `--dry-run` can show it without acting."""
 
     task: str
     branch: str
     worktree: Path
-    project: str            # the bare repo / common git dir: the unit of a project
+    project: str
     dispatcher: Path
     base: str
     prompt: str
@@ -88,17 +61,7 @@ class Result:
         return self
 
 
-# ------------------------------------------------------------------- context
-
-
 def project_of(start: Path) -> tuple[Path | None, Path | None, str | None]:
-    """(dispatcher worktree, project key, error).
-
-    The project key is the **common git dir** - the bare repo shared by every
-    worktree - so that all worktrees of one repo claim against the same namespace.
-    Keying on the worktree path instead would let the same task be claimed once per
-    worktree, which defeats the point of claiming.
-    """
     code, top = _git(start, "rev-parse", "--show-toplevel")
     if code != 0 or not top:
         return None, None, (
@@ -130,8 +93,6 @@ def plan(
         return None, f"{task!r} does not slugify to anything usable"
 
     br = branch or name
-    # Worktrees are siblings of the dispatcher, which is where `gwadd` and the
-    # existing rdk-template layout already put them.
     wt = worktree or (dispatcher.parent / name)
     base = gate.base_branch(dispatcher)
 
@@ -147,13 +108,6 @@ def plan(
 
 
 def task_names(dispatcher: Path) -> list[str]:
-    """Task names as declared in git, which is where intent lives.
-
-    Read from `tasks/*/task.md` rather than parsed out of TASKS.md. The checkbox in
-    TASKS.md is a rendered view for humans and is never read back as authority, so
-    parsing it would resurrect exactly the second source of truth the store exists
-    to remove. A directory with a task.md is an unambiguous declaration.
-    """
     root = dispatcher / "tasks"
     if not root.is_dir():
         return []
@@ -165,17 +119,6 @@ def task_names(dispatcher: Path) -> list[str]:
 def _prompt_from_task_file(
     dispatcher: Path, name: str, base: str
 ) -> tuple[str | None, str | None]:
-    """Point the agent at its task file rather than inlining the whole thing.
-
-    Intent lives in git and is reviewable there. Pasting it into a prompt creates a
-    second copy that drifts, and the agent can read the file itself.
-
-    The file must be committed on the base branch, because the worktree is created
-    *from* that branch. Observed the hard way: dispatching with an uncommitted
-    task.md produced an agent that globbed around for instructions, found none, and
-    stopped - 23 events of nothing, and no error anywhere. The agent cannot see a
-    file that only exists in the dispatcher's working tree.
-    """
     rel = f"tasks/{name}/task.md"
     committed = gate.show(dispatcher, base, rel)
     if committed is not None:
@@ -196,17 +139,8 @@ def _prompt_from_task_file(
     )
 
 
-# --------------------------------------------------------------------- hooks
-
-
 def run_hook(worktree: Path, name: str, env: dict[str, str],
              timeout: int = 900) -> tuple[bool, str]:
-    """Run a lifecycle hook if the project defines one.
-
-    Absent is fine here - unlike a *gate*, where absence must never read as
-    success. A project with no database to create genuinely has no pre-create work,
-    whereas a project with no gate has simply not said what "verified" means.
-    """
     hook = worktree / gate.HOOKS_REL / name
     if not hook.exists():
         return True, f"no {name} hook"
@@ -224,9 +158,6 @@ def run_hook(worktree: Path, name: str, env: dict[str, str],
     return True, f"{name} ok"
 
 
-# ------------------------------------------------------------------ worktree
-
-
 def create_worktree(p: Plan, result: Result) -> bool:
     if p.worktree.exists():
         code, _ = _git(p.worktree, "rev-parse", "--show-toplevel")
@@ -240,15 +171,11 @@ def create_worktree(p: Plan, result: Result) -> bool:
         )
         return False
 
-    # Prune first. A worktree directory deleted by hand stays registered, and the
-    # add then fails complaining about a path that is not there.
     _git(p.dispatcher, "worktree", "prune")
 
     code, out = _git(p.dispatcher, "worktree", "add", "-b", p.branch,
                      str(p.worktree), p.base)
     if code != 0:
-        # Most likely the branch already exists, so try checking it out instead of
-        # inventing a second name for the same work.
         code2, out2 = _git(p.dispatcher, "worktree", "add", str(p.worktree), p.branch)
         if code2 != 0:
             result.fail(f"git worktree add failed: {out}\nand as existing branch: {out2}")
@@ -257,9 +184,6 @@ def create_worktree(p: Plan, result: Result) -> bool:
         return True
     result.step(f"worktree {p.worktree.name} on new branch {p.branch} from {p.base}")
     return True
-
-
-# ------------------------------------------------------------------ dispatch
 
 
 def dispatch_command(p: Plan, url: str, json_stream: bool = True) -> list[str]:
@@ -312,10 +236,6 @@ def start(
     own_store = store is None
     st = store or Store()
     try:
-        # Register what git declares before claiming. The store holds runtime state
-        # only; it is not the list of tasks, so it has to be told what exists. The
-        # requested name is included even without a task.md, so an ad-hoc
-        # `--prompt` dispatch still gets a lease and is therefore still observable.
         declared = task_names(p.dispatcher)
         if p.task not in declared:
             declared.append(p.task)
@@ -323,10 +243,6 @@ def start(
 
         claimed = st.claim(p.project, p.task)
         if claimed is None:
-            # Distinguish the cases rather than guessing: "someone else has it" and
-            # "it is already finished" call for opposite responses, and an
-            # inaccurate message here sends people looking for a dispatcher that
-            # does not exist.
             existing = st.get(p.project, p.task)
             if existing is None:
                 return result.fail(
@@ -360,9 +276,6 @@ def start(
         ok, msg = run_hook(p.dispatcher, HOOK_PRE, env)
         result.step(f"pre-create: {msg}")
         if not ok:
-            # Nothing was created, so release the claim rather than burning the
-            # task. A precondition that failed is not a task that failed, and
-            # conflating them means one bad hook run permanently parks the work.
             st.reclaim(p.project, p.task, f"pre-create hook: {msg}")
             return result.fail(msg)
 
@@ -373,8 +286,6 @@ def start(
         ok, msg = run_hook(p.worktree, HOOK_POST, env)
         result.step(f"post-create: {msg}")
         if not ok:
-            # Deliberately not reclaimed: the worktree exists and may be half
-            # initialised. Handing it to the next dispatcher would hide that.
             st.finish(p.project, p.task, "failed", f"post-create hook: {msg}")
             return result.fail(msg)
 
@@ -382,10 +293,6 @@ def start(
         for f in findings:
             result.step(f"gate {f.name}: {f.state} - {f.detail}")
 
-        # No gate at all is a refusal, not a warning. Invariant 8 says absence of a
-        # gate is not a pass, and a dispatcher that prints a note and proceeds
-        # anyway has already broken it: the work lands, nothing checks it, and the
-        # router reports the mild-sounding `no-gate-configured`.
         reason = None
         if not findings:
             reason = (
@@ -393,18 +300,11 @@ def start(
                 f"task. Commit {gate.HOOKS_REL}/session-idle first."
             )
         elif gate.blocking(findings):
-            # Quote each finding's own detail rather than a generic sentence. The
-            # causes are genuinely different - a missing router means no gate can
-            # fire at all, an uncommitted hook means the router ignores it - and a
-            # summary that blurs them sends people to fix the wrong file.
             reason = "this task would run ungated:\n" + "\n".join(
                 f"      - {f.name} ({f.state}): {f.detail}"
                 for f in gate.blocking(findings)
             )
         if reason and not allow_ungated:
-            # A refusal is not a failure: no agent ran, so the task must go back to
-            # available. Marking it `failed` here made it permanently unclaimable
-            # until someone reset the database by hand.
             st.reclaim(p.project, p.task, "refused: ungated")
             return result.fail(reason + " Pass --allow-ungated to dispatch anyway.")
         if reason:
@@ -425,8 +325,6 @@ def start(
             proc = subprocess.Popen(
                 cmd, cwd=str(p.worktree), stdout=handle,
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                # Detached: a dispatch must survive the shell that started it,
-                # and must not die from a Ctrl-C meant for the CLI.
                 start_new_session=True,
             )
         except OSError as e:
@@ -451,6 +349,5 @@ def start(
 
 
 def poll_once(seconds: float = 0.0) -> None:
-    """Small helper so callers can let a just-spawned process get going."""
     if seconds > 0:
         time.sleep(seconds)

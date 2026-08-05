@@ -1,11 +1,3 @@
-"""Tests for gate trustworthiness.
-
-Every case here corresponds to a way the gate was observed to fail *silently* -
-reporting configured-and-fine while nothing verified anything. That is the only
-failure direction that matters: a gate that wrongly fails gets noticed within
-minutes, and a gate that wrongly passes never does.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -18,8 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import gate  # noqa: E402
 
 GATE_BODY = "#!/usr/bin/env bash\necho ok\n"
-# Must declare a current contract: the supervisor depends on it, so an older
-# router is a blocking finding rather than a cosmetic difference.
 ROUTER_BODY = f"export const ROUTER_CONTRACT = {gate.MIN_ROUTER_CONTRACT};\n"
 
 
@@ -71,7 +61,7 @@ def test_committed_and_clean_is_ok() -> None:
 def test_uncommitted_gate_blocks() -> None:
     root, tmp = _repo()
     (root / "x").write_text("x")
-    _commit(root)          # a commit exists, but the gate is not in it
+    _commit(root)
     _scaffold(root)
     findings = gate.inspect(root)
     f = _by_name(findings, "session-idle")
@@ -83,12 +73,6 @@ def test_uncommitted_gate_blocks() -> None:
 
 
 def test_agent_rewriting_its_own_gate_is_flagged_but_still_trusted() -> None:
-    """The case that motivated all of this.
-
-    An agent rewrote its gate and was reported as passed. Divergence must be
-    surfaced, but the verdict stays valid because the *committed* copy is what runs -
-    treating it as a failure would train people to ignore the flag.
-    """
     root, tmp = _repo()
     _scaffold(root)
     _commit(root)
@@ -103,7 +87,6 @@ def test_agent_rewriting_its_own_gate_is_flagged_but_still_trusted() -> None:
 
 
 def test_config_divergence_is_flagged() -> None:
-    """`exclude: ['**']` switches the gate off without touching a hook."""
     root, tmp = _repo()
     _scaffold(root)
     _commit(root)
@@ -118,11 +101,6 @@ def test_config_divergence_is_flagged() -> None:
 
 
 def test_missing_router_on_disk_is_reported() -> None:
-    """The worst case: a valid committed gate that cannot possibly fire.
-
-    Observed live - the agent worked, the gate was correct, and no gate ran, because
-    the worktree predated the plugin commit.
-    """
     root, tmp = _repo()
     _scaffold(root, router=False)
     _commit(root)
@@ -160,11 +138,6 @@ def test_base_branch_comes_from_config() -> None:
 
 
 def test_absent_gate_yields_no_finding_not_a_pass() -> None:
-    """A project with nothing configured produces no findings at all.
-
-    The dispatcher treats that as a refusal. Encoding "no gate" as a passing finding
-    here is exactly how absence would become a green light.
-    """
     root, tmp = _repo()
     (root / "x").write_text("x")
     _commit(root)
@@ -174,20 +147,7 @@ def test_absent_gate_yields_no_finding_not_a_pass() -> None:
     print("ok: an absent gate yields no finding, never a pass")
 
 
-# ------------------------------------------------------------------ running a gate
-#
-# `gate.run` is what lets the daemon reach a verdict of its own instead of being told
-# one by a plugin living inside the agent's server. So the cases that matter are the
-# ones where the working tree and the committed ref disagree.
-
-
 def test_run_uses_the_committed_gate_not_the_working_copy() -> None:
-    """The case that motivated the whole design, as an assertion.
-
-    An agent was observed rewriting its own gate and then being reported as passed.
-    Here the committed gate fails and the working copy would pass; the verdict must
-    follow the commit.
-    """
     root, tmp = _repo()
     _scaffold(root, "#!/usr/bin/env bash\necho 'committed says no'\nexit 1\n")
     _commit(root)
@@ -204,11 +164,6 @@ def test_run_uses_the_committed_gate_not_the_working_copy() -> None:
 
 
 def test_run_passes_and_reports_divergence_separately() -> None:
-    """Divergence does not veto a pass.
-
-    The committed gate ran, so its verdict is sound. Conflating "was edited" with
-    "cannot be trusted" would train people to ignore the flag.
-    """
     root, tmp = _repo()
     _scaffold(root, "#!/usr/bin/env bash\nexit 0\n")
     _commit(root)
@@ -230,11 +185,6 @@ def test_run_without_a_committed_gate_is_not_a_pass() -> None:
 
 
 def test_run_does_not_leave_anything_in_the_worktree() -> None:
-    """The staged copy lives outside the worktree.
-
-    Two concrete reasons: a copy inside changes the fingerprint the gate is meant to
-    describe, and it appears in `git status` as if the agent had left it behind.
-    """
     root, tmp = _repo()
     _scaffold(root, "#!/usr/bin/env bash\nexit 0\n")
     _commit(root)
@@ -247,11 +197,6 @@ def test_run_does_not_leave_anything_in_the_worktree() -> None:
 
 
 def test_run_treats_a_hanging_gate_as_failure() -> None:
-    """A gate that never finishes has not approved anything.
-
-    Fail rather than inconclusive: treating a hang as "unknown, therefore fine" is how
-    a wedged test suite would start passing work through.
-    """
     root, tmp = _repo()
     _scaffold(root, "#!/usr/bin/env bash\nsleep 30\n")
     _commit(root)
@@ -263,7 +208,6 @@ def test_run_treats_a_hanging_gate_as_failure() -> None:
 
 
 def test_run_reports_a_gate_that_cannot_execute() -> None:
-    """A gate with no interpreter is a failure, not a pass."""
     root, tmp = _repo()
     _scaffold(root, "#!/nonexistent/interpreter\n")
     _commit(root)
@@ -274,14 +218,6 @@ def test_run_reports_a_gate_that_cannot_execute() -> None:
 
 
 def test_an_old_router_contract_blocks_dispatch() -> None:
-    """Contract, not content.
-
-    Projects own their copy of the router, so a byte diff cannot separate a deliberate
-    customisation from a router predating a guarantee the supervisor relies on. A
-    contract-1 router does not report that a gate has started, which makes a slow gate
-    indistinguishable from an agent nothing examined - measured, a 45s gate had its task
-    marked needs-review at 40s and then abandoned.
-    """
     root, tmp = _repo()
     _scaffold(root)
     (root / gate.ROUTER_RELS[0]).write_text("export const ROUTER_CONTRACT = 1;\n")
@@ -296,7 +232,6 @@ def test_an_old_router_contract_blocks_dispatch() -> None:
 
 
 def test_a_router_with_no_marker_is_contract_one() -> None:
-    """Absence dates the file rather than being ambiguous: the marker arrived with 2."""
     root, tmp = _repo()
     _scaffold(root)
     (root / gate.ROUTER_RELS[0]).write_text("export const X = 1;\n")

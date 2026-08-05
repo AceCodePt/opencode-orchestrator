@@ -1,37 +1,3 @@
-"""The supervisor: policy and authority.
-
-Split deliberately into a **pure decision function** and a thin executor. `decide()`
-takes a snapshot and returns actions; it touches no process, no socket and no
-database. That is what makes the policy testable at all - budgets, reclaim rules and
-the difference between "quiet" and "dead" are exactly the parts that are impossible
-to exercise against live agents on demand.
-
-The one rule encoded here that cost the most to learn: **a session outlives its
-dispatch process.** Measured - a run exited 0 and its session then performed 24 more
-tool calls over the following 36 seconds, because the router injected a follow-up
-prompt. So "the dispatch pid is gone" says nothing about whether work is finished,
-and a supervisor that reclaims on that basis destroys live work.
-
-How a task reaches `done`: **this process runs the gate itself.** It does not accept a
-verdict from anywhere.
-
-That is a deliberate refusal of the obvious design. The router already runs gates and
-could simply report the result, which is what the original task described. But the
-router is a plugin inside the agent's own server, and the agent holds a bash tool, so
-a `passed` coming from there is a self-report - the agent would author the answer
-rather than the criterion, which is the same hole in a new place. Reading the gate
-from the base branch removed the agent's authority over *what* is checked; only
-running it out-of-loop removes its authority over *what the result was*.
-
-So the two runs serve different purposes and neither is redundant. The router's run is
-advisory and in-loop: its job is to hand a failure back to the agent while the agent
-is still there to fix it. This one is authoritative and terminal, and it happens after
-the session has stopped, in a process the session never spawned.
-
-The cost is running the suite twice on a passing task. That is the right thing to pay:
-the alternative is a `done` that means "something inside the sandbox said so".
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -44,34 +10,17 @@ from pathlib import Path
 from . import gate, merge, observe, server
 from .store import DONE, NEEDS_REVIEW as ST_NEEDS_REVIEW, RUNNING, Store, Task
 
-# Per-state silence budgets. A blocked agent is not "quiet", it is waiting on a
-# human, so it gets a shorter fuse than one that is legitimately grinding.
 BUDGET_BUSY_S = 20 * 60
 BUDGET_IDLE_S = 2 * 60
 BUDGET_BLOCKED_S = 60
 
-# Why a task stopped, which is not the same as whether it is done.
-#
-# `finished` is a property of the in-loop gate loop having *terminated*, not of the
-# session merely going quiet. Going idle is what fires the gate; a failing gate injects
-# a prompt and the agent works again. So an agent only stays stopped once the loop can
-# no longer move it: the gate passed, or the retry cap was spent.
 FINISHED_COMPLETE = "finished: gate loop settled on a pass"
 FINISHED_GAVE_UP = "finished: retry cap spent"
 STILL_RETRYING = "not finished: the gate loop is still driving it"
 GATE_IN_FLIGHT = "not finished: a gate is running right now"
 NEVER_GATED = "not finished: stopped and no gate ever ran"
 
-# How long an idle agent with no in-loop verdict is given before that is believed.
-#
-# The session is idle for the entire duration of a gate and its dispatch has usually
-# exited, so a running check is indistinguishable from an agent nothing examined. The
-# router announces itself, but not instantly - it fingerprints the worktree first, which
-# on a large repo takes real time. Observed with a 45s gate: the task was declared
-# `needs-review` at 40s while the gate was still running.
 GRACE_UNGATED_S = 90
-# A gate that announced itself and never came back. The gate's own timeout is 900s, so
-# this must sit above it or the supervisor would give up on checks that are still legal.
 BUDGET_GATE_S = 20 * 60
 
 RENEW = "renew"
@@ -80,12 +29,7 @@ NEEDS_REVIEW = "needs-review"
 ALERT = "alert"
 RESTART_SERVER = "restart-server"
 NOTE = "note"
-# Run the committed gate and let its result decide the status. Emitted rather than
-# performed, because `decide` must stay pure - and because that keeps "when do we
-# check" testable separately from "what did the check say".
 VERIFY = "verify"
-# Merge a done task's branch into base and clean up the worktree + branch.
-# Emitted rather than performed, same reason as VERIFY: keeps decide() pure.
 MERGE = "merge"
 
 
@@ -95,47 +39,24 @@ class Action:
     task: str | None = None
     reason: str = ""
     detail: str = ""
-    # Carried per action because one daemon supervises every project on the machine.
-    # Task names are only unique within a project, so an action that named a task
-    # without its project would eventually renew or reclaim the wrong row.
     project: str | None = None
 
 
 @dataclass
 class Snapshot:
-    """Everything `decide` is allowed to know."""
 
     now: int
     server_running: bool
     server_unresponsive: bool
     tasks: list[Task] = field(default_factory=list)
-    # worktree path -> what the shared server says about that worktree's sessions.
-    # Absent key means the server knows no session there, which is not the same as
-    # idle: never dispatched, or dispatched into a server that has been replaced.
     facts: dict[str, observe.TaskFact] = field(default_factory=dict)
-    # pid -> whether the dispatch process is still alive
     dispatch_alive: dict[int, bool] = field(default_factory=dict)
-    # worktree -> seconds since that agent last changed state
     quiet_for: dict[str, int] = field(default_factory=dict)
-    # worktree -> the router's most recent in-loop outcome, or None if it never
-    # reported. This is how "stopped" is told apart from "finished": the router is what
-    # drives an idle agent back to work, so its last word says whether anything more
-    # was ever going to happen.
     router_outcome: dict[str, str | None] = field(default_factory=dict)
-    # Tasks that are `done` and waiting to be merged. The daemon verifies them; it
-    # also folds them into base, because leaving a verified branch in a worktree
-    # forever is just unbounded accumulation.
     done_tasks: list[Task] = field(default_factory=list)
 
 
 def source_fingerprint() -> str:
-    """Hash of the code this process would run if started now.
-
-    A version string is useless for this: it stays `0.1.0` across every commit, so it
-    cannot tell a running daemon from an upgraded checkout. Hashing the sources catches
-    any change, committed or not, which is what the question actually is - is the
-    supervisor in memory the supervisor on disk.
-    """
     h = hashlib.sha256()
     for f in sorted(Path(__file__).resolve().parent.glob("*.py")):
         h.update(f.name.encode())
@@ -147,24 +68,11 @@ def source_fingerprint() -> str:
 
 
 def project_label(project: str) -> str:
-    """A readable name for a project path.
-
-    A project is identified by its git common dir, which for an ordinary clone is
-    `<repo>/.git` - so the last path component is the useless string `.git`. Bare repos
-    end in `<name>.git`, which is fine as-is.
-    """
     p = Path(project)
     return p.parent.name if p.name == ".git" else p.name
 
 
 def stop_reason(outcome: str | None) -> str:
-    """Classify a stopped agent by what the in-loop gate loop last did.
-
-    Deliberately reads the router's outcome rather than asking the agent. The router's
-    verdict cannot be trusted as a statement about *quality* - it runs inside the
-    agent's own server - but it is solid evidence about *mechanism*: whether the loop
-    that would have sent the agent back to work has stopped trying.
-    """
     if outcome == "running":
         return GATE_IN_FLIGHT
     if outcome == "passed":
@@ -173,16 +81,12 @@ def stop_reason(outcome: str | None) -> str:
         return FINISHED_GAVE_UP
     if outcome in ("failed", "gate-modified"):
         return STILL_RETRYING
-    # Includes `no-gate-configured` and the absence of any report at all: no router
-    # installed, a plugin that threw, or a gate that never fired. Idle is what triggers
-    # the gate, so silence here means the mechanism did not run.
     return NEVER_GATED
 
 
 def decide(snap: Snapshot) -> list[Action]:
     actions: list[Action] = []
 
-    # ---------------------------------------------------------------- the server
     if not snap.server_running or snap.server_unresponsive:
         why = ("is not running" if not snap.server_running
                else "is alive but answers nothing")
@@ -195,10 +99,6 @@ def decide(snap: Snapshot) -> list[Action]:
         for t in snap.tasks:
             if t.status != RUNNING:
                 continue
-            # Escalate rather than re-dispatch automatically. The worktree still
-            # exists and may hold partial work, so re-running from scratch and
-            # resuming are different operations, and picking silently would hide
-            # which one happened.
             actions.append(Action(
                 NEEDS_REVIEW, t.name,
                 "the shared server died while this task was running",
@@ -208,7 +108,6 @@ def decide(snap: Snapshot) -> list[Action]:
             ))
         return actions
 
-    # ----------------------------------------------------------------- each task
     for t in snap.tasks:
         if t.status != RUNNING:
             continue
@@ -225,8 +124,6 @@ def decide(snap: Snapshot) -> list[Action]:
                     f"{b.detail} [{b.request_id}]",
                     project=t.project,
                 ))
-            # Still renew: it is waiting on a human, which is the opposite of dead,
-            # and letting the lease lapse here invites a reclaim of live work.
             actions.append(Action(RENEW, t.name, "blocked but alive",
                                   project=t.project))
             if quiet > BUDGET_BLOCKED_S:
@@ -251,22 +148,14 @@ def decide(snap: Snapshot) -> list[Action]:
             continue
 
         if alive:
-            # The dispatch is running but the session is not visibly busy. Normal
-            # during startup, and not something to act on.
             actions.append(Action(RENEW, t.name, "dispatch process is alive",
                                   project=t.project))
             continue
 
-        # Dispatch gone from here on.
         if fact is not None and fact.state == observe.IDLE:
-            # Stopped. Whether it is *finished* depends on the in-loop gate loop: going
-            # idle is what fires the gate, and a failing gate sends the agent back to
-            # work. So the loop's last word decides what happens next.
             why = stop_reason(snap.router_outcome.get(t.worktree or ""))
 
             if why == STILL_RETRYING:
-                # The loop is mid-flight. Injecting a prompt makes the session busy
-                # again, so idle here is a moment between attempts - not an end.
                 actions.append(Action(RENEW, t.name, why, project=t.project))
                 if quiet > BUDGET_IDLE_S:
                     actions.append(Action(
@@ -279,8 +168,6 @@ def decide(snap: Snapshot) -> list[Action]:
                 continue
 
             if why == GATE_IN_FLIGHT:
-                # A check is running. The session is idle for its whole duration, so
-                # this is the state most easily mistaken for "stopped and unexamined".
                 actions.append(Action(RENEW, t.name, why, project=t.project))
                 if quiet > BUDGET_GATE_S:
                     actions.append(Action(
@@ -293,9 +180,6 @@ def decide(snap: Snapshot) -> list[Action]:
                 continue
 
             if why == NEVER_GATED:
-                # The silent hole - but only after a grace period. Acting immediately
-                # would condemn every gate slower than one poll interval, which is
-                # every real gate.
                 if quiet <= GRACE_UNGATED_S:
                     actions.append(Action(
                         RENEW, t.name,
@@ -303,9 +187,6 @@ def decide(snap: Snapshot) -> list[Action]:
                         project=t.project,
                     ))
                     continue
-                # Verifying here would let a gate that never fired be replaced by one
-                # lucky out-of-loop run, and "nothing objected" would become a pass for
-                # work nothing in-loop ever examined.
                 actions.append(Action(
                     NEEDS_REVIEW, t.name, why,
                     f"no in-loop verdict after {quiet}s, so the router did not fire "
@@ -325,8 +206,6 @@ def decide(snap: Snapshot) -> list[Action]:
         if fact is None:
             expired = (t.lease_until is not None and t.lease_until < snap.now)
             if expired:
-                # All three together: lease lapsed, dispatch gone, nothing
-                # listening for this worktree. Only then is it definitely dead.
                 actions.append(Action(
                     RECLAIM, t.name,
                     "definitely dead: lease expired, dispatch gone, no session",
@@ -346,9 +225,6 @@ def decide(snap: Snapshot) -> list[Action]:
         actions.append(Action(RENEW, t.name, f"state {fact.state}",
                               project=t.project))
 
-    # ------------------------------------------------------------- done tasks
-    # A done task is verified work sitting in a worktree. The merge folds it into
-    # base and removes the worktree + branch — otherwise they accumulate forever.
     for t in snap.done_tasks:
         actions.append(Action(
             MERGE, t.name,
@@ -359,18 +235,7 @@ def decide(snap: Snapshot) -> list[Action]:
     return actions
 
 
-# --------------------------------------------------------------------- executor
-
-
 class Supervisor:
-    """One supervisor per machine, not per project.
-
-    There is one shared server, one database and one set of leases per machine, so a
-    per-project daemon would have to be started once per project and would silently
-    supervise nothing for any project nobody remembered to start. `project=None`
-    means every project, which is the mode systemd runs.
-    """
-
     def __init__(self, project: str | None = None, store: Store | None = None,
                  dry_run: bool = False) -> None:
         self.project = project
@@ -383,11 +248,6 @@ class Supervisor:
         tasks_all = self.store.tasks(self.project, status=RUNNING)
         done_tasks = self.store.tasks(self.project, status=DONE)
 
-        # Ask about each task's worktree specifically. Enumerating processes cannot
-        # work here: one shared server has a single cwd and hosts every worktree, so
-        # a per-process view can never say which *task* is busy. `GET /session` is
-        # also global - it returned 33 sessions spanning directories going back
-        # days - so the directory filter is the only usable join.
         by_worktree: dict[str, observe.TaskFact] = {}
         port = st.get("port") if st.get("running") and not st.get("unresponsive") else None
         if port:
@@ -413,9 +273,6 @@ class Supervisor:
             for t in tasks_all if t.pid
         }
 
-        # The router's last in-loop word per worktree. Read from the store rather than
-        # asked of the agent: it is untrustworthy about quality and reliable about
-        # mechanism, and mechanism is all this needs.
         router: dict[str, str | None] = {}
         for t in tasks_all:
             if not t.worktree:
@@ -438,8 +295,6 @@ class Supervisor:
     def apply(self, actions: list[Action]) -> list[str]:
         log: list[str] = []
         for a in actions:
-            # Label with the project, since one daemon now covers all of them and two
-            # projects may hold a task of the same name.
             where = f"[{project_label(a.project)}] " if a.project else ""
             log.append(f"{a.kind}: {where}{a.task or '-'} - {a.reason}"
                        + (f" ({a.detail})" if a.detail else ""))
@@ -453,9 +308,6 @@ class Supervisor:
             elif a.kind == NEEDS_REVIEW and a.task and proj:
                 self.store.finish(proj, a.task, "needs-review", a.reason)
             elif a.kind == ALERT and a.task:
-                # Dedup lives in the store, keyed on the request id: one turn can
-                # raise several requests, and alerting on "is /permission non-empty"
-                # fires repeatedly for what a human experiences as one decision.
                 rid = a.detail.rsplit("[", 1)[-1].rstrip("]") if "[" in a.detail else a.detail
                 if self.store.note_alert(rid, "", a.task, a.reason, a.detail):
                     log.append(f"  -> new alert {rid} (would notify)")
@@ -478,17 +330,6 @@ class Supervisor:
 
     def verify(self, name: str, event: str = "session-idle",
                project: str | None = None, why: str = "") -> list[str]:
-        """Run the committed gate for a finished task and record what it said.
-
-        Only `passed` promotes to `done`. Everything else - a failure, a timeout, or no
-        committed gate at all - lands on `needs-review`, because they share the one
-        property that matters: nobody has established that this branch is good.
-
-        An agent that spent its retry cap never reaches `done` even on a passing gate.
-        A suite that failed three times and then passes untouched has not earned
-        confidence; it has raised a question about flakiness, and that is a human's to
-        answer.
-        """
         proj = project or self.project
         if not proj:
             return [f"cannot verify {name}: no project given"]
@@ -541,11 +382,6 @@ def run(project: str | None = None, interval: float = 10.0, once: bool = False,
     scope = project_label(project) if project else "all projects"
     print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
 
-    # Record which version is actually running. A long-lived daemon holds the code it
-    # imported at startup, so upgrading `orch` on disk changes nothing until the unit is
-    # restarted - and the daemon keeps enforcing the old policy while looking healthy.
-    # Observed here: a supervisor that had been running for fourteen minutes verified a
-    # task using the previous release's rules.
     if not dry_run:
         try:
             sup.store.set_meta("daemon_running_source", source_fingerprint())
@@ -565,8 +401,6 @@ def run(project: str | None = None, interval: float = 10.0, once: bool = False,
         sup.close()
 
 
-# ---------------------------------------------------------------------- systemd
-
 UNIT_NAME = "orch-daemon.service"
 
 UNIT = """\
@@ -577,7 +411,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={orch} daemon --interval {interval:g}
+ExecStart={orch} daemon run --interval {interval:g}
 # Restart always, not on-failure: a supervisor that has exited cleanly is still a
 # supervisor that is not supervising, and nothing else notices its absence.
 Restart=always
@@ -604,16 +438,6 @@ def unit_text(interval: float = 10.0) -> str:
 
 
 def install(interval: float = 10.0, enable: bool = True) -> list[str]:
-    """Install the user unit, and make it survive both logout and reboot.
-
-    A *user* unit rather than a system one: the daemon runs the same gates a human
-    runs, against worktrees in a home directory, and needs no privilege beyond the
-    account that owns them.
-
-    `loginctl enable-linger` is the part that is easy to miss and silently defeats the
-    whole point - without it a user unit starts at login and dies at logout, so a
-    machine that reboots unattended comes back with nothing supervising anything.
-    """
     out: list[str] = []
     path = unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,7 +469,6 @@ def install(interval: float = 10.0, enable: bool = True) -> list[str]:
 
 
 def unit_status() -> dict:
-    """What systemd thinks, rather than what we hope."""
     if not unit_path().exists():
         return {"installed": False}
     info: dict = {"installed": True, "unit": str(unit_path())}

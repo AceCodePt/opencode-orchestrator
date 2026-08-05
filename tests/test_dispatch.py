@@ -1,10 +1,3 @@
-"""Tests for dispatch preconditions.
-
-No model is called. Every case here is a way dispatch was observed to *appear* to
-work while producing nothing verifiable - which is the only failure mode worth
-paying for tests about, since a loud failure gets fixed the same minute.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -53,12 +46,6 @@ def test_slug() -> None:
 
 
 def test_task_names_reads_git_not_tasks_md() -> None:
-    """Intent comes from `tasks/*/task.md`.
-
-    Parsing TASKS.md checkboxes instead would restore the second source of truth
-    that the store exists to remove - and a checkbox is a rendered view that is
-    never read back.
-    """
     root, tmp = _repo()
     _task_file(root, "b-task")
     _task_file(root, "a-task")
@@ -77,9 +64,6 @@ def test_outside_a_worktree_is_refused() -> None:
 
 
 def test_uncommitted_task_file_is_refused_with_the_reason() -> None:
-    """The silent one: the worktree is created from the base branch, so an
-    uncommitted task.md leaves the agent with no instructions. Observed live as 23
-    events of an agent hunting for a file that was never there."""
     root, tmp = _repo()
     _task_file(root, "probe")
     p, err = dispatch.plan(root, "probe")
@@ -120,7 +104,6 @@ def test_dispatch_command_shape() -> None:
     cmd = dispatch.dispatch_command(p, "http://127.0.0.1:4096")
     assert cmd[:3] == ["opencode", "run", "--attach"]
     assert "--dir" in cmd and str(p.worktree) in cmd
-    # --format json is what makes the first leg of the run machine-readable.
     assert cmd[cmd.index("--format") + 1] == "json"
     assert cmd[cmd.index("-m") + 1] == "m/x"
     assert cmd[cmd.index("--agent") + 1] == "builder"
@@ -130,15 +113,6 @@ def test_dispatch_command_shape() -> None:
 
 
 def test_ungated_dispatch_is_refused_and_the_claim_released() -> None:
-    """Two things at once, both learned the hard way.
-
-    Refusing is invariant 8: absence of a gate must not become a green light, and a
-    dispatcher that merely prints a note has already broken it.
-
-    Releasing the claim matters just as much. Marking the task `failed` on a
-    precondition refusal made it permanently unclaimable - nothing had run, yet the
-    task was burned until someone edited the database.
-    """
     root, tmp = _repo()
     _task_file(root, "probe")
     _commit(root)
@@ -148,8 +122,6 @@ def test_ungated_dispatch_is_refused_and_the_claim_released() -> None:
         assert not r.ok
         joined = " ".join(r.problems)
         assert "ungated" in joined, r.problems
-        # The reason must name the actual missing thing. Here there is no router at
-        # all, so telling the user to commit a hook would send them to the wrong file.
         assert "router plugin" in joined, r.problems
 
         _, project, _ = dispatch.project_of(root)
@@ -176,9 +148,6 @@ def test_dry_run_touches_nothing() -> None:
 
 
 def test_hook_absence_is_fine_but_non_executable_is_not() -> None:
-    """A lifecycle hook may be absent - a project with no database has no
-    pre-create work. But a hook that exists and cannot run is a mistake, not a
-    choice, and silently skipping it is how a task boots against no database."""
     root, tmp = _repo()
     ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
     assert ok and "no pre-task-create" in msg
