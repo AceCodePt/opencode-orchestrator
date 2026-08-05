@@ -54,3 +54,51 @@ the gate fails closed instead of reporting success.
 - Do **not** keep both stores "in sync". One authority per question; delete the
   file-based one.
 - Do **not** let an unreachable daemon produce a pass.
+
+## Outcome, and two departures from the above
+
+Done, but not as specified. Recording both, because the requirements were written
+before the shape of the problem was clear and following them literally would have been
+worse.
+
+**1. No HTTP endpoints. The plugin calls the CLI.**
+
+The requirement asked for daemon endpoints and a plugin that calls them. But SQLite in
+WAL mode already serialises writers across processes, so a socket adds nothing except a
+service that can be *down* — and this task's own fail-closed requirement says an
+unreachable dependency must never produce a pass. Removing the dependency is a stronger
+guarantee than handling its absence carefully. The requirement was one authority, not
+one server, and there is now exactly one: the database, addressed through
+`orch gate-state` and `orch gate-report`.
+
+The plugin addresses its row **by worktree**, because that is the only identifier it
+has: a plugin is told the directory it was loaded for and knows neither the task name
+nor the project.
+
+**2. "Submit an outcome" turned out to be the wrong idea entirely.**
+
+The requirement listed submitting an outcome alongside the bookkeeping calls, as though
+a verdict were just another value to persist. It is not, and implementing it that way
+would have reopened the hole `gate-not-agent-writable` had just closed one level up.
+
+The router runs inside the agent's own server. The agent holds a bash tool. So any
+channel the router uses to report `passed` is a channel the agent can use directly —
+verified by doing it: wrong answer written, local gate rewritten to `exit 0`, and
+`orch gate-report --outcome passed` called by hand. Reading the gate from the base
+branch removed the agent's authority over *what is checked*; it did nothing about its
+authority over *what the result was*.
+
+So outcomes are submitted, and stored, and attributed with a `source` — and they decide
+nothing. `done` is written only after the daemon runs the committed gate itself,
+out-of-loop, after the session has stopped. Against the sabotage above the answer was
+`needs-review`, `gate-modified`, and `answer.txt says '41', expected 42`.
+
+The concurrency-slot endpoint was not built. It belongs to
+`tasks/concurrency-semaphore`, which is still blocked on measuring what the limit
+should be, and the database is now the obvious place for it to live.
+
+**Verification performed:** retry counter climbed `0 → 1 → 2` in the store across
+separate router invocations and separate processes, `stuck` at the cap of 2 with no
+third attempt, no `.orchestration/.state/` created anywhere, and `orch init` no longer
+appends the `.gitignore` entry. Durability across a daemon restart is now moot rather
+than tested: no daemon holds the counter.

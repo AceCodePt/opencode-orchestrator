@@ -177,6 +177,46 @@ def test_alerts_dedupe_by_request_id() -> None:
     print("ok: alerts dedupe on request id and resolve individually")
 
 
+def test_verdicts_are_appended_not_overwritten() -> None:
+    """History, because the question a human asks is "did this ever pass, and what did
+    the run before it say". A single column answers only the first half."""
+    s, tmp = _store()
+    s.sync_intent("/p", ["a"])
+    s.record_verdict("/p", "a", "session-idle", "failed", "red", source="router")
+    s.record_verdict("/p", "a", "session-idle", "passed", "green", source="daemon")
+    rows = s.verdicts("/p", "a")
+    assert [r["outcome"] for r in rows] == ["passed", "failed"]
+    assert s.last_verdict("/p", "a")["source"] == "daemon"
+    s.close(); tmp.cleanup()
+    print("ok: verdicts accumulate as evidence rather than replacing each other")
+
+
+def test_verdicts_are_filterable_by_who_ran_the_gate() -> None:
+    """`source` is load-bearing, not decoration: only a gate the daemon ran itself may
+    promote a task, because the router runs inside the agent's own server."""
+    s, tmp = _store()
+    s.sync_intent("/p", ["a"])
+    s.record_verdict("/p", "a", "session-idle", "passed", "", source="router")
+    assert s.last_verdict("/p", "a", source="daemon") is None
+    assert s.last_verdict("/p", "a", source="router")["outcome"] == "passed"
+    s.close(); tmp.cleanup()
+    print("ok: a router verdict is never mistaken for a daemon one")
+
+
+def test_task_is_addressable_by_worktree() -> None:
+    """The only join a plugin can make: it is told the directory it loaded for, and
+    knows neither the task name nor the project."""
+    s, tmp = _store()
+    s.sync_intent("/p", ["a"])
+    s.claim("/p", "a")
+    s.record_launch("/p", "a", worktree="/tmp/wt/a")
+    assert s.by_worktree("/tmp/wt/a").name == "a"
+    assert s.by_worktree("/tmp/wt/a/").name == "a", "a trailing slash must still match"
+    assert s.by_worktree("/tmp/wt/nope") is None
+    s.close(); tmp.cleanup()
+    print("ok: tasks can be found by worktree, trailing slash included")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -160,6 +160,21 @@ opencode. Accepted — harness independence is explicitly not a goal.
 | What work exists, and what does it mean? | **git** — `TASKS.md`, `tasks/*/task.md` |
 | What is running, since when, where, on which port? | **SQLite** — one global DB per machine |
 | Who is this agent's parent? | **SQLite**, not opencode's session parentage |
+| What is checked, and how? | **the base branch** — the committed hook and config |
+| Did this task pass? | **a gate run the daemon performed itself** |
+
+The router plugin used to keep gate fingerprints and retry counters in
+`.orchestration/.state/` inside the worktree being judged, which broke this table
+three ways: two authorities for one question, per-worktree files that cannot express
+a machine-wide limit, and state `orch observe` could not see because it reads the
+database. That state now lives in the one database, reached through the CLI, and
+`orch init` no longer writes a `.gitignore` entry for it.
+
+A subprocess rather than an HTTP endpoint on the daemon, which is a deliberate
+departure from what `tasks/plugin-state-via-daemon` specified. SQLite in WAL mode
+already serialises writers across processes, so a socket buys nothing and adds a
+service that can be **down** — and "the daemon was unreachable" must never become a
+route by which a gate passes. The requirement was one authority, not one server.
 
 `- [-]` in `TASKS.md` is a **rendered convenience**: written back best-effort for
 human readability, never read as authority. That kills two problems at once — the
@@ -313,6 +328,41 @@ Full disclosure, because the same hole applies to this repository: `orch`'s own
 "gate passed: 7 shell, 10 python, tests green" was produced by a gate I authored.
 Read it as a self-report, not an independent check.
 
+### …and must not be able to report its own verdict either
+
+Closing the first hole exposed a second one in the same shape, one step further out.
+
+Reading the gate from the base branch removes the agent's authority over **what is
+checked**. It does nothing about its authority over **what the result was**. The
+router is a plugin loaded into the agent's own server, and the agent holds a bash
+tool, so any channel the router uses to say `passed` is a channel the agent can use
+directly. Verified rather than assumed: playing the agent, three moves — write the
+wrong answer, rewrite the local gate to `exit 0`, then call
+`orch gate-report --outcome passed` by hand.
+
+So `done` is not written by anything that reports a verdict. It is written only after
+**the daemon runs the committed gate itself**, in a process the session never spawned:
+
+| Who ran the gate | Recorded as | May promote to `done` |
+| --- | --- | --- |
+| the router, in-loop, inside the agent's server | `source=router` | no — it is a self-report |
+| the daemon, out-of-loop, after the session stopped | `source=daemon` | yes, and only on `passed` |
+| a human via `orch gate-run` | `source=cli` | no, but it is recorded |
+
+Both runs are kept, and neither is redundant. The router's job is to hand a failure
+back while the agent is still there to fix it — advisory, and harmless if wrong, since
+the worst case is a wasted nudge. The daemon's job is to decide, once, afterwards. The
+cost is running the suite twice on a passing task, which is the right thing to pay: the
+alternative is a `done` that means "something inside the sandbox said so".
+
+Against the three-move sabotage above, the daemon reported
+`failed gate-modified`, `needs-review`, and `answer.txt says '41', expected 42` — the
+forged `passed` is still in the history as `source=router`, which is exactly where a
+lie belongs: recorded, attributed, and not load-bearing.
+
+Verdicts accumulate rather than overwrite, because the question a human actually asks
+is "did this ever pass, and what did the run before it say".
+
 ## Flow C — observation and fallback
 
 1. Observer streams `/event` and polls `/session/status` for every known port.
@@ -454,6 +504,16 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
 10. **Kill by recorded pid, never by pattern.** `pkill -f` matches the invoking
     shell and neighbouring processes. tmux sessions end on their own when their
     process dies, so they need no separate teardown.
+11. **A verdict from inside the agent's server is a self-report.** `done` requires a
+    gate run the daemon performed itself, out-of-loop, after the session stopped.
+    Anything the router reports is recorded and attributed, never load-bearing —
+    because the agent's bash tool can send whatever the router can send.
+12. **Unavailability never produces a pass.** Store unreachable, gate absent, gate
+    timed out, worktree gone: each lands on `needs-review`. A gate that approves
+    unchecked work because a dependency was down is the failure this project exists
+    to prevent, and it is the one direction that cannot be noticed later — a wrongly
+    failed gate gets complained about within minutes, a wrongly passed one never
+    does.
 
 ## Language and distribution
 
@@ -468,8 +528,9 @@ falls out of the component split: **all HTTP knowledge of the harness lives on t
 Python side.** The observer and CLI own `/session/status`, `/permission`,
 `/question`, `/event`, `/api/location`, and version negotiation. The TS plugin
 stays deliberately thin — receive an event, apply the diff gate, invoke a hook,
-POST the outcome to the daemon. It needs no endpoint vocabulary beyond the
-daemon's own, so there is nothing to keep in sync.
+record the outcome by calling `orch`. It needs no HTTP vocabulary at all, so there is
+nothing to keep in sync: the two CLI subcommands it uses (`gate-state`,
+`gate-report`) are versioned with the code that implements them.
 
 Open check before relying on this on the box: plugins execute inside opencode's
 runtime, but the observed plugin subprocess used a mise-managed system node

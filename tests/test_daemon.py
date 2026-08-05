@@ -10,14 +10,16 @@ That case was measured, not imagined, and getting it wrong destroys live work.
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from orch import daemon, observe  # noqa: E402
-from orch.store import RUNNING, Task  # noqa: E402
+from orch.store import RUNNING, Store, Task  # noqa: E402
 
 NOW = 1_700_000_000
 WT = "/tmp/lab/task-a"
@@ -28,6 +30,29 @@ def _task(**kw) -> Task:
                 lease_until=NOW + 300, worktree=WT, port=4096, pid=1234, retries=0)
     base.update(kw)
     return Task(**base)  # type: ignore[arg-type]
+
+
+def _store() -> Store:
+    return Store(":memory:")
+
+
+def _gated_repo(gate_body: str | None) -> tuple[Path, tempfile.TemporaryDirectory]:
+    """A worktree with a gate committed on main, as a dispatched task would have."""
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name)
+    for cmd in (["init", "-q", "-b", "main", str(root)],):
+        subprocess.run(["git", *cmd], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+    if gate_body is not None:
+        h = root / ".orchestration" / "hooks"
+        h.mkdir(parents=True)
+        (h / "session-idle").write_text(gate_body)
+        (h / "session-idle").chmod(0o755)
+    (root / "README").write_text("x")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "c"], check=True)
+    return root, tmp
 
 
 def _fact(state: str, blocked: list | None = None) -> observe.TaskFact:
@@ -100,14 +125,33 @@ def test_session_outliving_its_dispatch_is_not_dead() -> None:
     print("ok: a session still working after its dispatch exited is left alone")
 
 
-def test_stopped_agent_is_reviewed_never_marked_done() -> None:
-    """Nothing here can know the gate passed. The verdict lives in the router, which
-    currently reports to the server log rather than to a daemon endpoint."""
+def test_stopped_agent_is_verified_not_believed() -> None:
+    """A stopped agent triggers a gate run, not a status guess.
+
+    `decide` cannot mark anything done because it cannot run anything - which is the
+    point of it being pure. It says "check this", and the executor checks.
+    """
     acts = daemon.decide(_snap(dispatch_alive={1234: False},
                                facts={WT: _fact(observe.IDLE)}))
-    assert _kinds(acts) == [daemon.NEEDS_REVIEW]
-    assert "gate verdict" in acts[0].reason
-    print("ok: a stopped agent is marked needs-review, never done")
+    assert _kinds(acts) == [daemon.VERIFY]
+    assert daemon.NEEDS_REVIEW not in _kinds(acts), (
+        "needs-review is now an outcome of verification, not a substitute for it")
+    print("ok: a stopped agent is verified rather than assumed either way")
+
+
+def test_dry_run_never_runs_a_gate() -> None:
+    """`--dry-run` must not execute a test suite.
+
+    Running the gate is the one action here with real cost and real side effects, so a
+    mode advertised as changing nothing has to skip it.
+    """
+    sup = daemon.Supervisor("/tmp/lab/lab.git", store=_store(), dry_run=True)
+    ran: list[str] = []
+    sup.verify = lambda *a, **k: ran.append("ran") or []  # type: ignore[assignment]
+    sup.apply([daemon.Action(daemon.VERIFY, "task-a", "stopped")])
+    assert ran == [], "dry-run executed the gate"
+    sup.close()
+    print("ok: dry-run decides without running a gate")
 
 
 def test_reclaim_requires_all_three_proofs() -> None:
@@ -177,6 +221,111 @@ def test_every_action_carries_a_reason() -> None:
         for a in daemon.decide(snap):
             assert a.reason, f"{a.kind} carried no reason"
     print("ok: every action carries a reason")
+
+
+# ------------------------------------------------------------------- verification
+#
+# The executor half. These are the only tests here that touch the disk, because the
+# behaviour under test is precisely "run something the agent did not run".
+
+
+def _running_task(st: Store, project: str, wt: Path) -> None:
+    st.sync_intent(project, ["task-a"])
+    assert st.claim(project, "task-a") == "task-a"
+    st.record_launch(project, "task-a", worktree=str(wt), pid=1234)
+
+
+def test_verify_promotes_only_on_a_pass() -> None:
+    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 0\n")
+    project = str(root / "lab.git")
+    st = _store()
+    _running_task(st, project, root)
+    sup = daemon.Supervisor(project, store=st)
+
+    sup.verify("task-a")
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "done", t
+    v = st.last_verdict(project, "task-a")
+    assert v is not None and v["source"] == "daemon" and v["outcome"] == "passed"
+    sup.close()
+    tmp.cleanup()
+    print("ok: a passing committed gate promotes the task to done")
+
+
+def test_verify_sends_a_failing_gate_to_review() -> None:
+    root, tmp = _gated_repo("#!/usr/bin/env bash\necho 'tests are red'\nexit 1\n")
+    project = str(root / "lab.git")
+    st = _store()
+    _running_task(st, project, root)
+    sup = daemon.Supervisor(project, store=st)
+
+    out = "\n".join(sup.verify("task-a"))
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "needs-review", t
+    assert "tests are red" in out or "gate said no" in out
+    sup.close()
+    tmp.cleanup()
+    print("ok: a failing gate lands on needs-review, never done")
+
+
+def test_verify_refuses_done_when_no_gate_is_committed() -> None:
+    """The failure this project exists to prevent, at the last possible moment.
+
+    An unchecked branch must not receive the same status as a checked one just because
+    nothing objected. Nothing objected because nothing ran.
+    """
+    root, tmp = _gated_repo(None)
+    project = str(root / "lab.git")
+    st = _store()
+    _running_task(st, project, root)
+    sup = daemon.Supervisor(project, store=st)
+
+    out = "\n".join(sup.verify("task-a"))
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "needs-review", t
+    assert "nothing verified" in out
+    v = st.last_verdict(project, "task-a")
+    assert v is not None and v["outcome"] == "no-gate-configured"
+    sup.close()
+    tmp.cleanup()
+    print("ok: no committed gate cannot produce done")
+
+
+def test_verify_ignores_a_router_self_report() -> None:
+    """A `passed` written from inside the agent's server does not decide anything.
+
+    This is the whole reason the daemon runs the gate itself. The router's report is
+    stored - it is useful evidence - but the committed gate here fails, and the failure
+    is what counts.
+    """
+    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 1\n")
+    project = str(root / "lab.git")
+    st = _store()
+    _running_task(st, project, root)
+    st.record_verdict(project, "task-a", "session-idle", "passed",
+                      "all good, honestly", source="router")
+    sup = daemon.Supervisor(project, store=st)
+
+    sup.verify("task-a")
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "needs-review", (
+        "a router self-report was allowed to decide the outcome")
+    sup.close()
+    tmp.cleanup()
+    print("ok: a router self-report cannot override the daemon's own gate run")
+
+
+def test_verify_reviews_a_vanished_worktree() -> None:
+    st = _store()
+    project = "/tmp/lab/lab.git"
+    _running_task(st, project, Path("/tmp/lab/definitely-not-here"))
+    sup = daemon.Supervisor(project, store=st)
+    out = "\n".join(sup.verify("task-a"))
+    t = st.get(project, "task-a")
+    assert t is not None and t.status == "needs-review"
+    assert "no longer exists" in out
+    sup.close()
+    print("ok: a missing worktree is reviewed, not passed")
 
 
 def main() -> int:

@@ -128,16 +128,29 @@ server and escalates the tasks that were inside it, and reclaims a task only on 
 three proofs together — expired lease, gone dispatch process, and no session. The
 policy is a pure function, so those cases are actually tested rather than hoped for.
 
-**It never marks a task `done`.** A finished agent becomes `needs-review`, because
-the gate verdict exists only inside the router, which currently reports it to the
-server log rather than to a daemon endpoint. Calling it `done` would manufacture
-exactly the confidence the gate rules exist to prevent.
+**A task reaches `done` only when the daemon has run the gate itself.** Not when the
+agent says so, and not when the router says so. The router runs gates too, but it is a
+plugin inside the agent's own server, and the agent holds a bash tool — so anything the
+router can report, the agent can report. Router verdicts are stored as `source=router`
+and cannot promote anything; the daemon re-runs the committed gate out-of-loop once the
+session has stopped, and only its `passed` writes `done`. Everything else — a failure, a
+timeout, no committed gate, a vanished worktree — becomes `needs-review`.
 
-Not built yet: outcome routing, the phone-facing server over the tailnet, SSE-driven
-absence detection (the watchdog is poll-only), and the daemon endpoint that would
-retire the `.orchestration/.state/` deviation.
+Tested by playing the agent: wrong answer written, the local gate rewritten to
+`exit 0`, and a hand-forged `orch gate-report --outcome passed`. The result was
+`needs-review`, flagged `gate-modified`, with the real reason printed.
 
-47 tests, all offline: `for t in tests/test_*.py; do python3 "$t"; done`
+```
+bin/orch gate                    # can this project's gates be trusted
+bin/orch gate-run                # run the committed gate here and say why
+bin/orch task list               # status plus who reached the last verdict
+```
+
+Not built yet: outcome routing, the phone-facing server over the tailnet, and
+SSE-driven absence detection (the watchdog is poll-only, so `server.heartbeat` is
+still unused).
+
+62 tests: `for t in tests/test_*.py; do python3 "$t"; done`, plus `bun test`
 
 ## Layout
 

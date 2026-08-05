@@ -238,8 +238,14 @@ def cmd_task_list(args: argparse.Namespace) -> int:
                 # Expiry is not permission to reclaim: a busy agent whose renewal
                 # broke looks identical here, which is why this only annotates.
                 flag = "  (lease expired - verify before reclaiming)"
-            print(f"  {t.status:8} {t.name:34} pid={t.pid or '-':<8} "
-                  f"retries={t.retries}{flag}")
+            # Show who reached the verdict, not just what it was. `done` is only ever
+            # written from a gate the daemon ran itself, and a router `passed` sitting
+            # under a `needs-review` task is the normal, correct combination - the
+            # agent believed it was finished and nothing out-of-loop has agreed yet.
+            v = st.last_verdict(str(project), t.name)
+            said = f"  {v['source']}:{v['outcome']}" if v else ""
+            print(f"  {t.status:12} {t.name:34} pid={t.pid or '-':<8} "
+                  f"retries={t.retries}{said}{flag}")
         return 0
     finally:
         st.close()
@@ -300,6 +306,98 @@ def cmd_gate(args: argparse.Namespace) -> int:
         elif not f.trustworthy:
             worst = max(worst, 2)
     return worst
+
+
+def cmd_gate_run(args: argparse.Namespace) -> int:
+    """Run the committed gate here and print the verdict, recording it if the
+    worktree belongs to a known task.
+
+    The same code path the daemon uses, exposed so a human can ask the question
+    directly instead of inferring the answer from a log line.
+    """
+    wt = Path(args.directory) if args.directory else Path.cwd()
+    v = gate_mod.run(wt, args.event)
+    print(f"{v.event}: {v.summary}")
+    if v.diverged:
+        print("  ! the worktree's gate differs from the committed one; the committed "
+              "one ran")
+    if v.detail:
+        for line in v.detail.strip().splitlines()[-20:]:
+            print(f"  {line}")
+
+    st = Store()
+    try:
+        t = st.by_worktree(str(wt))
+        if t is not None:
+            st.record_verdict(t.project, t.name, v.event, v.outcome, v.detail,
+                              diverged=v.diverged, seconds=v.seconds, source="cli")
+            print(f"  recorded against task {t.name}")
+    finally:
+        st.close()
+    return 0 if v.justifies_done else 1
+
+
+def cmd_gate_state(args: argparse.Namespace) -> int:
+    """Router state: the gate fingerprint and attempt count for a worktree.
+
+    Exists because the router used to keep this in `.orchestration/.state/` inside the
+    worktree it was judging - two authorities for one question, per-worktree files that
+    could not express a machine-wide limit, and invisible to `orch observe` because
+    that reads the database.
+
+    Addressed by worktree because that is the only identifier a plugin has: it is told
+    the directory it was loaded for, not the task name or the project.
+    """
+    st = Store()
+    try:
+        t = st.by_worktree(args.worktree)
+        if t is None:
+            # Not an error. A hand-made worktree that no dispatch created has no row,
+            # and its gate should still run - it just has no baseline to skip against.
+            print(json.dumps({"known": False, "fingerprint": None, "attempts": 0}))
+            return 0
+        print(json.dumps({
+            "known": True, "task": t.name, "project": t.project,
+            "fingerprint": t.fingerprint, "attempts": t.retries,
+        }))
+        return 0
+    finally:
+        st.close()
+
+
+def cmd_gate_report(args: argparse.Namespace) -> int:
+    """Record what the router's in-loop gate run said, and return the attempt count.
+
+    Advisory by construction. This is written from inside the agent's own server, so
+    it is a self-report and stored as `source=router`; only a verdict the daemon
+    reached itself can promote a task to `done`.
+    """
+    st = Store()
+    try:
+        t = st.by_worktree(args.worktree)
+        if t is None:
+            print(json.dumps({"known": False, "attempts": 0}))
+            return 0
+        attempts = t.retries
+        if args.outcome == "passed":
+            if args.fingerprint:
+                st.set_fingerprint(t.project, t.name, args.fingerprint)
+            st.reset_retry(t.project, t.name)
+            attempts = 0
+        elif args.outcome == "failed":
+            attempts = st.bump_retry(t.project, t.name)
+        elif args.outcome == "stuck" and args.fingerprint:
+            # Baseline it even though it failed: the cap has been reached, and
+            # re-running the same failing gate on every idle event would burn the
+            # machine without changing the answer.
+            st.set_fingerprint(t.project, t.name, args.fingerprint)
+        st.record_verdict(t.project, t.name, args.event, args.outcome,
+                          args.detail or "", diverged=args.diverged,
+                          seconds=args.seconds, source="router")
+        print(json.dumps({"known": True, "task": t.name, "attempts": attempts}))
+        return 0
+    finally:
+        st.close()
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -402,6 +500,30 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")
     g.set_defaults(func=cmd_gate)
+
+    gr = sub.add_parser("gate-run", help="run the committed gate here and report")
+    gr.add_argument("-C", "--directory")
+    gr.add_argument("--event", default="session-idle")
+    gr.set_defaults(func=cmd_gate_run)
+
+    # Called by the router plugin, not by hand. Kept as ordinary subcommands rather
+    # than an HTTP endpoint on the daemon: SQLite in WAL mode already serialises
+    # multi-process writes, so a socket would only add a service that can be down -
+    # and "the daemon was unreachable" must never be a way for a gate to pass.
+    gs = sub.add_parser("gate-state", help="(internal) gate fingerprint and attempts")
+    gs.add_argument("--worktree", required=True)
+    gs.add_argument("--event", default="session-idle")
+    gs.set_defaults(func=cmd_gate_state)
+
+    gp = sub.add_parser("gate-report", help="(internal) record a router gate result")
+    gp.add_argument("--worktree", required=True)
+    gp.add_argument("--event", default="session-idle")
+    gp.add_argument("--outcome", required=True)
+    gp.add_argument("--fingerprint")
+    gp.add_argument("--detail")
+    gp.add_argument("--seconds", type=float, default=0.0)
+    gp.add_argument("--diverged", action="store_true")
+    gp.set_defaults(func=cmd_gate_report)
 
     dm = sub.add_parser("daemon", help="supervise leases, alerts and the server")
     dm.add_argument("-C", "--directory")

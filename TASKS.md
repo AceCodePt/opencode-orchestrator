@@ -46,7 +46,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 **Foundations**
 
-- [-] [Dispatch Headlessly via `run --attach`, and Derive Completion From the Session](tasks/headless-dispatch/task.md) — `orch task start` done and verified live; completion still lands on `needs-review` because no component reports the gate verdict to the store
+- [x] [Dispatch Headlessly via `run --attach`, and Derive Completion From the Session](tasks/headless-dispatch/task.md) — a task reached `done` live, from a gate the daemon ran itself after the session stopped
 - [-] [Survive Death of the Shared Server by Re-Dispatching From Leases](tasks/shared-server-recovery/task.md) — the daemon restarts it and escalates affected tasks; re-dispatch/resume is still a human decision
 - [x] [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`](tasks/orch-cli-skeleton/task.md) — plus server, attach, gate, task list/reset, daemon
 - [x] [Add `--port` to Every TUI Launch So Agents Are Observable](tasks/add-port-to-tui-launch/task.md) — superseded: agents are headless servers, which always have a port. The zshrc wrapper stays as a convenience for hand-opened TUIs.
@@ -59,11 +59,11 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 **Acting**
 
-- [ ] [Route Plugin State Through the Daemon Instead of `.orchestration/.state/`](tasks/plugin-state-via-daemon/task.md) 🔒 Blocked by: [Phone-Facing Server: Read Status and Answer Approvals Over the Tailnet]
+- [x] [Route Plugin State Through the Daemon Instead of `.orchestration/.state/`](tasks/plugin-state-via-daemon/task.md) — state moved into the one database, reached through the CLI rather than an HTTP endpoint; see the deviation note in the task file. Unblocked from the phone server as a result.
 
 - [x] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — verified end to end against a live headless agent: event → hook → fail → prompt injection → agent fix → pass
 - [x] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) — observed `failed: attempt 1/3` → `passed` with the counter reset, and `stuck: gave up after 1 attempts` at the cap
-- [-] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — router runs the committed gate and config, `doctor`/`orch gate` report it, `task start` refuses ungated work; routing `gate-modified` to a human remains
+- [-] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — the committed gate is the only one that runs and only the daemon's own run can promote a task; routing `gate-modified` to a human remains, and it is now the last piece
 - [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) 🔒 Blocked by: [Claims, Leases and the Intent/Runtime Split in SQLite]
 - [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) 🔒 Blocked by: [Subscribe to the Event Stream and Capture the Event Vocabulary]
 - [ ] [Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall](tasks/preseed-always-permissions/task.md)

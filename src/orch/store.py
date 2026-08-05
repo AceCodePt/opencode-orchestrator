@@ -39,9 +39,10 @@ TODO = "todo"
 RUNNING = "running"
 DONE = "done"
 STUCK = "stuck"
-# The agent stopped, but nothing told the store whether the gate passed. Distinct
-# from `done` on purpose: only a gate verdict justifies `done`, and the component
-# that would report one (the daemon endpoint) does not exist yet.
+# The agent stopped and the work was not established to be good. Either the daemon's
+# own gate run said no, or there was no committed gate to run - which is not the same
+# as a failure, and still not a pass. Distinct from `done` because only a verdict the
+# daemon reached itself justifies `done`.
 NEEDS_REVIEW = "needs-review"
 FAILED = "failed"
 
@@ -83,6 +84,27 @@ CREATE TABLE IF NOT EXISTS alert (
     resolved_at  INTEGER
 );
 
+-- Gate verdicts, append-only.
+--
+-- A history rather than a column, because "did this ever pass, and what did the run
+-- before it say" is the question a human actually asks when deciding whether to trust
+-- a branch. `source` records who ran the gate: `daemon` verdicts are the only ones
+-- that may promote a task to `done`, since the router runs inside the agent's own
+-- server and its report is a self-report.
+CREATE TABLE IF NOT EXISTS verdict (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project    TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    event      TEXT NOT NULL,
+    outcome    TEXT NOT NULL,          -- passed | failed | no-gate-configured
+    detail     TEXT,
+    diverged   INTEGER NOT NULL DEFAULT 0,
+    seconds    REAL,
+    source     TEXT NOT NULL DEFAULT 'daemon',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS verdict_task ON verdict(project, name, id);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -106,6 +128,9 @@ class Task:
     port: int | None
     pid: int | None
     retries: int
+    branch: str | None = None
+    last_outcome: str | None = None
+    fingerprint: str | None = None
 
     @property
     def lease_expired(self) -> bool:
@@ -284,6 +309,37 @@ class Store:
         ).fetchone()
         return row["fingerprint"] if row else None
 
+    # -------------------------------------------------------------------- verdicts
+    def record_verdict(self, project: str, name: str, event: str, outcome: str,
+                       detail: str = "", diverged: bool = False,
+                       seconds: float = 0.0, source: str = "daemon") -> None:
+        """Append a gate verdict. Never overwrites: the previous answer is evidence."""
+        self.db.execute(
+            "INSERT INTO verdict(project,name,event,outcome,detail,diverged,seconds,"
+            "source,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (project, name, event, outcome, detail[:4000], int(diverged), seconds,
+             source, int(time.time())),
+        )
+        self.db.execute(
+            "UPDATE task SET last_outcome=?, updated_at=? WHERE project=? AND name=?",
+            (f"{event}: {outcome}", int(time.time()), project, name),
+        )
+
+    def last_verdict(self, project: str, name: str,
+                     source: str | None = None) -> sqlite3.Row | None:
+        sql = "SELECT * FROM verdict WHERE project=? AND name=?"
+        args: list[object] = [project, name]
+        if source:
+            sql += " AND source=?"
+            args.append(source)
+        sql += " ORDER BY id DESC LIMIT 1"
+        return self.db.execute(sql, args).fetchone()
+
+    def verdicts(self, project: str, name: str, limit: int = 20) -> list[sqlite3.Row]:
+        return list(self.db.execute(
+            "SELECT * FROM verdict WHERE project=? AND name=?"
+            " ORDER BY id DESC LIMIT ?", (project, name, limit)))
+
     # ---------------------------------------------------------------------- alerts
     def note_alert(self, request_id: str, session_id: str, worktree: str | None,
                    kind: str, detail: str) -> bool:
@@ -320,6 +376,19 @@ class Store:
         ).fetchone()
         return self._task(row) if row else None
 
+    def by_worktree(self, worktree: str) -> Task | None:
+        """Find a task by its worktree path.
+
+        This is the join the router needs and the only one it can make. A plugin knows
+        the directory it was loaded for and nothing else - not the task name, not the
+        project - so without this it cannot address its own row.
+        """
+        row = self.db.execute(
+            "SELECT * FROM task WHERE worktree=? ORDER BY updated_at DESC LIMIT 1",
+            (str(worktree).rstrip("/"),),
+        ).fetchone()
+        return self._task(row) if row else None
+
     def tasks(self, project: str | None = None,
               status: str | None = None) -> list[Task]:
         sql = "SELECT * FROM task WHERE 1=1"
@@ -339,5 +408,6 @@ class Store:
             id=row["id"], project=row["project"], name=row["name"],
             status=row["status"], lease_until=row["lease_until"],
             worktree=row["worktree"], port=row["port"], pid=row["pid"],
-            retries=row["retries"],
+            retries=row["retries"], branch=row["branch"],
+            last_outcome=row["last_outcome"], fingerprint=row["fingerprint"],
         )

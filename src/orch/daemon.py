@@ -12,11 +12,24 @@ tool calls over the following 36 seconds, because the router injected a follow-u
 prompt. So "the dispatch pid is gone" says nothing about whether work is finished,
 and a supervisor that reclaims on that basis destroys live work.
 
-What this does not do: decide that a task *passed*. Nothing here can know that. The
-gate verdict exists only inside the router, which currently reports it to the server
-log rather than to a daemon endpoint. Until that is wired up, a finished agent is
-marked `needs-review`, not `done`. Marking it `done` would be the same manufactured
-confidence the gate rules exist to prevent.
+How a task reaches `done`: **this process runs the gate itself.** It does not accept a
+verdict from anywhere.
+
+That is a deliberate refusal of the obvious design. The router already runs gates and
+could simply report the result, which is what the original task described. But the
+router is a plugin inside the agent's own server, and the agent holds a bash tool, so
+a `passed` coming from there is a self-report - the agent would author the answer
+rather than the criterion, which is the same hole in a new place. Reading the gate
+from the base branch removed the agent's authority over *what* is checked; only
+running it out-of-loop removes its authority over *what the result was*.
+
+So the two runs serve different purposes and neither is redundant. The router's run is
+advisory and in-loop: its job is to hand a failure back to the agent while the agent
+is still there to fix it. This one is authoritative and terminal, and it happens after
+the session has stopped, in a process the session never spawned.
+
+The cost is running the suite twice on a passing task. That is the right thing to pay:
+the alternative is a `done` that means "something inside the sandbox said so".
 """
 
 from __future__ import annotations
@@ -25,8 +38,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import observe, server
-from .store import RUNNING, Store, Task
+from . import gate, observe, server
+from .store import DONE, NEEDS_REVIEW as ST_NEEDS_REVIEW, RUNNING, Store, Task
 
 # Per-state silence budgets. A blocked agent is not "quiet", it is waiting on a
 # human, so it gets a shorter fuse than one that is legitimately grinding.
@@ -40,6 +53,10 @@ NEEDS_REVIEW = "needs-review"
 ALERT = "alert"
 RESTART_SERVER = "restart-server"
 NOTE = "note"
+# Run the committed gate and let its result decide the status. Emitted rather than
+# performed, because `decide` must stay pure - and because that keeps "when do we
+# check" testable separately from "what did the check say".
+VERIFY = "verify"
 
 
 @dataclass
@@ -141,12 +158,14 @@ def decide(snap: Snapshot) -> list[Action]:
 
         # Dispatch gone from here on.
         if fact is not None and fact.state == observe.IDLE:
+            # The agent stopped and its dispatch is gone: the work is as finished as
+            # it is going to get. Check it here rather than believe anything reported
+            # from inside the session.
             actions.append(Action(
-                NEEDS_REVIEW, t.name,
-                "the agent stopped and nothing reported a gate verdict",
-                "not marked done: no component currently tells the store whether "
-                "the gate passed, and assuming it did is exactly the confidence "
-                "the gate rules exist to prevent",
+                VERIFY, t.name,
+                "the agent stopped, so run the committed gate and let it decide",
+                "verified out-of-loop on purpose: a verdict from the router would be "
+                "the agent's own report",
             ))
             continue
 
@@ -248,6 +267,9 @@ class Supervisor:
                 rid = a.detail.rsplit("[", 1)[-1].rstrip("]") if "[" in a.detail else a.detail
                 if self.store.note_alert(rid, "", a.task, a.reason, a.detail):
                     log.append(f"  -> new alert {rid} (would notify)")
+            elif a.kind == VERIFY and a.task:
+                for line in self.verify(a.task):
+                    log.append(f"  -> {line}")
             elif a.kind == RESTART_SERVER:
                 try:
                     info = server.restart()
@@ -255,6 +277,44 @@ class Supervisor:
                 except (RuntimeError, TimeoutError, OSError) as e:
                     log.append(f"  -> could not restart the shared server: {e}")
         return log
+
+    def verify(self, name: str, event: str = "session-idle") -> list[str]:
+        """Run the committed gate for a stopped task and record what it said.
+
+        Only `passed` promotes to `done`. Everything else - a failure, a timeout, or no
+        committed gate at all - lands on `needs-review`, because they share the one
+        property that matters: nobody has established that this branch is good.
+        """
+        t = self.store.get(self.project, name)
+        if t is None or not t.worktree:
+            return [f"cannot verify {name}: no recorded worktree"]
+        wt = Path(t.worktree)
+        if not wt.exists():
+            self.store.finish(self.project, name, ST_NEEDS_REVIEW,
+                              "worktree is gone")
+            return [f"worktree {wt} no longer exists -> needs-review"]
+
+        v = gate.run(wt, event)
+        self.store.record_verdict(
+            self.project, name, v.event, v.outcome, v.detail,
+            diverged=v.diverged, seconds=v.seconds, source="daemon",
+        )
+        out = [f"gate {v.summary}"]
+        if v.diverged:
+            out.append("the worktree's gate differs from the committed one; the "
+                       "committed gate ran, but review the diff")
+        if v.justifies_done:
+            self.store.finish(self.project, name, DONE, f"{v.event}: {v.outcome}")
+            out.append(f"{name} -> done")
+        else:
+            self.store.finish(self.project, name, ST_NEEDS_REVIEW,
+                              f"{v.event}: {v.outcome}")
+            reason = ("no committed gate, so nothing verified this work"
+                      if v.outcome == gate.NO_GATE else "the gate said no")
+            out.append(f"{name} -> needs-review ({reason})")
+            if v.detail:
+                out.append(v.detail.strip().splitlines()[-1][:200])
+        return out
 
     def step(self) -> list[str]:
         return self.apply(decide(self.snapshot()))

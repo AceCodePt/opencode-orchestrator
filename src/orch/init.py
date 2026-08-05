@@ -87,7 +87,7 @@ A project with no database legitimately needs no `post-task-create`. Absent hook
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
 """
 
-GITIGNORE_ENTRY = ".orchestration/.state/"
+
 
 
 @dataclass
@@ -175,23 +175,19 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     else:
         notes.append(f"router plugin template not found at {src}")
 
-    # Runtime state must not be committed. The plugin keeps fingerprints and retry
-    # counters here as an interim measure; see the note below.
-    gi = target / ".gitignore"
-    body = gi.read_text() if gi.exists() else ""
-    if GITIGNORE_ENTRY not in body:
-        gi.write_text(
-            body + ("" if body.endswith("\n") or not body else "\n")
-            + f"\n# orch runtime state (not intent)\n{GITIGNORE_ENTRY}\n"
+    # No .gitignore entry is appended any more. The plugin used to keep fingerprints
+    # and retry counters in `.orchestration/.state/` inside the worktree it was
+    # judging; that state now lives in the one database, so there is nothing here to
+    # ignore. If a project still has the old entry it is harmless, and removing it for
+    # them would be an edit nobody asked for.
+    stale = target / ".orchestration" / ".state"
+    if stale.exists():
+        notes.append(
+            f"{stale} is left over from the file-based router state and is no longer "
+            f"read. Delete it; fingerprints and retry counters are in the orch "
+            f"database now, which is what makes them visible to `orch task list`."
         )
-        created.append(".gitignore (appended)")
 
-    notes.append(
-        "KNOWN DEVIATION: the plugin writes fingerprints and retry counters to "
-        ".orchestration/.state/, while the CLI keeps runtime state in SQLite. That is "
-        "two authorities for one question, and it exists only because the daemon it "
-        "should report to does not exist yet. See tasks/plugin-state-via-daemon."
-    )
     notes.append(
         "the scaffolded session-idle hook exits non-zero on purpose: an unconfigured "
         "gate must not report success. Edit it before dispatching real work."

@@ -172,6 +172,105 @@ def test_absent_gate_yields_no_finding_not_a_pass() -> None:
     print("ok: an absent gate yields no finding, never a pass")
 
 
+# ------------------------------------------------------------------ running a gate
+#
+# `gate.run` is what lets the daemon reach a verdict of its own instead of being told
+# one by a plugin living inside the agent's server. So the cases that matter are the
+# ones where the working tree and the committed ref disagree.
+
+
+def test_run_uses_the_committed_gate_not_the_working_copy() -> None:
+    """The case that motivated the whole design, as an assertion.
+
+    An agent was observed rewriting its own gate and then being reported as passed.
+    Here the committed gate fails and the working copy would pass; the verdict must
+    follow the commit.
+    """
+    root, tmp = _repo()
+    _scaffold(root, "#!/usr/bin/env bash\necho 'committed says no'\nexit 1\n")
+    _commit(root)
+    (root / gate.HOOKS_REL / "session-idle").write_text(
+        "#!/usr/bin/env bash\nexit 0\n")
+
+    v = gate.run(root)
+    assert v.outcome == gate.FAILED, v
+    assert not v.justifies_done
+    assert v.diverged, "an edited gate must be reported even though the commit ran"
+    assert "committed says no" in v.detail
+    tmp.cleanup()
+    print("ok: run judges by the committed gate, and flags that it was edited")
+
+
+def test_run_passes_and_reports_divergence_separately() -> None:
+    """Divergence does not veto a pass.
+
+    The committed gate ran, so its verdict is sound. Conflating "was edited" with
+    "cannot be trusted" would train people to ignore the flag.
+    """
+    root, tmp = _repo()
+    _scaffold(root, "#!/usr/bin/env bash\nexit 0\n")
+    _commit(root)
+    v = gate.run(root)
+    assert v.outcome == gate.PASSED and v.justifies_done and not v.diverged
+    tmp.cleanup()
+    print("ok: a clean committed gate passes")
+
+
+def test_run_without_a_committed_gate_is_not_a_pass() -> None:
+    root, tmp = _repo()
+    (root / "x").write_text("x")
+    _commit(root)
+    v = gate.run(root)
+    assert v.outcome == gate.NO_GATE
+    assert not v.justifies_done, "absence of a gate must never justify done"
+    tmp.cleanup()
+    print("ok: no committed gate is neither a pass nor an error")
+
+
+def test_run_does_not_leave_anything_in_the_worktree() -> None:
+    """The staged copy lives outside the worktree.
+
+    Two concrete reasons: a copy inside changes the fingerprint the gate is meant to
+    describe, and it appears in `git status` as if the agent had left it behind.
+    """
+    root, tmp = _repo()
+    _scaffold(root, "#!/usr/bin/env bash\nexit 0\n")
+    _commit(root)
+    gate.run(root)
+    out = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                         capture_output=True, text=True).stdout
+    assert out.strip() == "", f"gate run dirtied the worktree: {out!r}"
+    tmp.cleanup()
+    print("ok: running a gate leaves the worktree clean")
+
+
+def test_run_treats_a_hanging_gate_as_failure() -> None:
+    """A gate that never finishes has not approved anything.
+
+    Fail rather than inconclusive: treating a hang as "unknown, therefore fine" is how
+    a wedged test suite would start passing work through.
+    """
+    root, tmp = _repo()
+    _scaffold(root, "#!/usr/bin/env bash\nsleep 30\n")
+    _commit(root)
+    v = gate.run(root, timeout=1)
+    assert v.outcome == gate.FAILED and not v.justifies_done
+    assert "timed out" in v.detail
+    tmp.cleanup()
+    print("ok: a hanging gate fails closed")
+
+
+def test_run_reports_a_gate_that_cannot_execute() -> None:
+    """A gate with no interpreter is a failure, not a pass."""
+    root, tmp = _repo()
+    _scaffold(root, "#!/nonexistent/interpreter\n")
+    _commit(root)
+    v = gate.run(root)
+    assert v.outcome == gate.FAILED and not v.justifies_done
+    tmp.cleanup()
+    print("ok: an unexecutable gate fails closed")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

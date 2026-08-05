@@ -14,15 +14,37 @@ rewrite was honest; nothing structurally stopped it from being `exit 0`.
 change ever looks worth checking, and a large `retryCap` turns a deliberately
 bounded loop into a billable one. So both come from the committed ref.
 
-This module only *reports*. `doctor` surfaces it, `task start` refuses on it. That
-split matters because the failure is silent: an uncommitted gate degrades to
+`inspect` only *reports*: `doctor` surfaces it, `task start` refuses on it. That
+split matters because the failure is silent - an uncommitted gate degrades to
 `no-gate-configured`, which reads like a configuration note rather than "nothing
 verified this work".
+
+`run` is the other half, and it exists so that **the daemon can reach its own
+verdict instead of being told one**. The router also runs gates, but the router is a
+plugin loaded into the agent's own server: the agent holds a bash tool, so anything
+the router can report, the agent can report just as easily. A `passed` arriving from
+inside the session is a self-report, and building `done` on it would relocate the
+hole that reading the gate from the base branch just closed - the agent would no
+longer author the criterion, it would author the answer.
+
+So the two callers ask different questions:
+
+- the router asks *"should I hand this agent a failure to fix right now?"* - advisory,
+  in-loop, and harmless if wrong, because the worst case is a wasted nudge;
+- the daemon asks *"is this task done?"* - authoritative, out-of-loop, in a process
+  the session did not spawn and cannot see.
+
+Same function, because the gate should not behave differently depending on who is
+asking. Only the consequences differ.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +68,14 @@ OK = "ok"
 UNCOMMITTED = "uncommitted"
 DIVERGED = "diverged"
 MISSING = "missing"
+
+# Verdict outcomes. `NO_GATE` is deliberately not a pass and not an error: nothing
+# went wrong, and nothing verified the work either.
+PASSED = "passed"
+FAILED = "failed"
+NO_GATE = "no-gate-configured"
+
+DEFAULT_TIMEOUT_S = 900
 
 
 def _git(worktree: Path, *args: str) -> tuple[int, str]:
@@ -201,6 +231,120 @@ def inspect(worktree: Path, base: str | None = None) -> list[GateFinding]:
             pass
 
     return findings
+
+
+@dataclass
+class Verdict:
+    event: str
+    outcome: str          # PASSED | FAILED | NO_GATE
+    detail: str
+    seconds: float = 0.0
+    diverged: bool = False
+    exit_code: int | None = None
+
+    @property
+    def justifies_done(self) -> bool:
+        """Whether this verdict is enough to call a task finished.
+
+        `NO_GATE` is excluded on purpose, and it is the whole point of having a
+        verdict type at all. The tempting reading of "no gate configured" is "nothing
+        objected", which is how unchecked work acquires the same green tick as
+        checked work. Nothing objected because nothing looked.
+
+        `DIVERGED` does not disqualify: the committed gate is what ran, so its result
+        stands. It travels in the detail so a human sees it.
+        """
+        return self.outcome == PASSED
+
+    @property
+    def summary(self) -> str:
+        bits = [self.outcome]
+        if self.diverged:
+            bits.append("gate-modified")
+        if self.seconds:
+            bits.append(f"{self.seconds:.1f}s")
+        return " ".join(bits)
+
+
+def run(
+    worktree: Path,
+    event: str = "session-idle",
+    base: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT_S,
+    session_id: str = "",
+) -> Verdict:
+    """Run the gate committed on the base branch against this worktree.
+
+    Staged into a temp dir **outside** the worktree, for two reasons that both bit
+    earlier: a copy inside the worktree changes the fingerprint the gate is meant to
+    describe, and it shows up in `git status` as if the agent had left it there.
+
+    The worktree is still the cwd - the gate has to see the work it is judging. Only
+    the *judge* comes from elsewhere.
+    """
+    worktree = Path(worktree)
+    base = base or base_branch(worktree)
+    rel = f"{HOOKS_REL}/{event}"
+
+    committed = show(worktree, base, rel)
+    if committed is None or not committed.strip():
+        return Verdict(
+            event, NO_GATE,
+            f"no {rel} committed on {base}. This is not a pass: nothing objected "
+            f"because nothing looked.",
+        )
+
+    diverged = False
+    try:
+        diverged = (worktree / rel).read_text() != committed
+    except OSError:
+        diverged = True  # deleted or unreadable locally is itself a divergence
+
+    tmp = Path(tempfile.mkdtemp(prefix="orch-gate-"))
+    exe = tmp / event
+    try:
+        exe.write_text(committed)
+        exe.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "WORKTREE_PATH": str(worktree),
+            "WORKTREE_NAME": worktree.name,
+            "ORCH_EVENT": event,
+            "ORCH_SESSION_ID": session_id,
+            # So a gate can tell an out-of-loop verification from the router's
+            # in-loop nudge, e.g. to skip prompting or to run a longer suite.
+            "ORCH_VERIFIER": "daemon",
+        }
+        started = time.monotonic()
+        try:
+            p = subprocess.run(
+                [str(exe)], cwd=str(worktree), env=env,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            secs = time.monotonic() - started
+            output = ((p.stdout or "") + (p.stderr or "")).strip()
+            if p.returncode == 0:
+                return Verdict(event, PASSED, output[-2000:], secs, diverged, 0)
+            return Verdict(event, FAILED, output[-2000:], secs, diverged, p.returncode)
+        except subprocess.TimeoutExpired as e:
+            # Fail, not "unknown". A gate that never finishes has not approved
+            # anything, and treating a hang as inconclusive-therefore-fine is how
+            # a wedged test suite would start passing work through.
+            secs = time.monotonic() - started
+            partial = (e.stdout or b"") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf8", "replace")
+            return Verdict(
+                event, FAILED,
+                f"gate timed out after {timeout}s\n{str(partial)[-1500:]}",
+                secs, diverged, None,
+            )
+        except OSError as e:
+            return Verdict(event, FAILED, f"could not execute the gate: {e}",
+                           time.monotonic() - started, diverged, None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def blocking(findings: list[GateFinding]) -> list[GateFinding]:

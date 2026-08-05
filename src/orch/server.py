@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -201,6 +202,19 @@ def status() -> dict:
 # -------------------------------------------------------------------------- start
 
 
+def orch_bin() -> str:
+    """Absolute path to this `orch`, for handing to child processes.
+
+    Prefers the checkout this module was imported from over whatever `orch` PATH
+    resolves to, so a development copy never has its state written by a stale global
+    install standing on a different schema.
+    """
+    local = Path(__file__).resolve().parents[2] / "bin" / "orch"
+    if local.exists():
+        return str(local)
+    return shutil.which("orch") or "orch"
+
+
 def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
     """Start the shared server, or return the existing one.
 
@@ -226,6 +240,12 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
         proc = subprocess.Popen(
             [opencode, "serve", "--port", "0", "--print-logs", "--log-level", "INFO"],
             cwd=str(_neutral_cwd()),
+            # The router plugin loads into this process and reaches its state through
+            # the CLI, so it needs to know where the CLI is. Resolving `orch` from
+            # PATH inside the plugin would depend on whatever shell environment the
+            # server happened to inherit, which is how a gate ends up quietly unable
+            # to record anything.
+            env={**os.environ, "ORCH_BIN": orch_bin()},
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

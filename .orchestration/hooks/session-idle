@@ -121,6 +121,23 @@ for t in tests/test_*.py; do
     status=1
   fi
 done
+
+# TypeScript tests too, and discovered the same way. The plugin's fail-closed rules
+# are the ones with no second chance: a wrongly skipped gate cannot be recovered by
+# anything downstream, because the check simply never happened.
+tstests=(tests/*.test.ts)
+if [ "${#tstests[@]}" -gt 0 ]; then
+  if command -v bun >/dev/null 2>&1; then
+    ran=$((ran + ${#tstests[@]}))
+    if ! out=$(bun test "${tstests[@]}" 2>&1); then
+      echo "FAILED: bun test"
+      echo "$out"
+      status=1
+    fi
+  else
+    echo "note: bun not installed, ${#tstests[@]} ts test file(s) unchecked" >&2
+  fi
+fi
 shopt -u nullglob
 
 if [ "$ran" -eq 0 ]; then
