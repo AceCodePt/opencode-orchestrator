@@ -47,7 +47,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 **Foundations**
 
 - [x] [Dispatch Headlessly via `run --attach`, and Derive Completion From the Session](tasks/headless-dispatch/task.md) — a task reached `done` live, from a gate the daemon ran itself after the session stopped
-- [-] [Survive Death of the Shared Server by Re-Dispatching From Leases](tasks/shared-server-recovery/task.md) — the daemon restarts it and escalates affected tasks; re-dispatch/resume is still a human decision
+- [x] [Survive Death of the Shared Server by Re-Dispatching From Leases](tasks/shared-server-recovery/task.md) — the daemon restarts it and escalates affected tasks; re-dispatch/resume is still a human decision
 - [x] [Build the `orch` CLI Skeleton With `init`, `task start`, `observe`, `doctor`](tasks/orch-cli-skeleton/task.md) — plus server, attach, gate, task list/reset, daemon
 - [x] [Add `--port` to Every TUI Launch So Agents Are Observable](tasks/add-port-to-tui-launch/task.md) — superseded: agents are headless servers, which always have a port. The zshrc wrapper stays as a convenience for hand-opened TUIs.
 - [x] [Claims, Leases and the Intent/Runtime Split in SQLite](tasks/claims-and-leases/task.md) — src/orch/store.py, 9 tests green
@@ -57,7 +57,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 - [x] [Subscribe to the Event Stream and Capture the Event Vocabulary](tasks/event-stream-listener/task.md) — 93 types + 2 undocumented, see docs/events.md
 - [x] [Keep the Supervisor Alive Across Logout and Reboot](tasks/supervisor-under-systemd/task.md) — systemd user unit, machine-wide, Restart=always, KillMode=process, linger on; `doctor` fails when nothing is supervising
 - [x] [Distinguish an Agent That Finished From One That Merely Stopped](tasks/completion-signal/task.md) — `finished` is the in-loop gate loop terminating, not a claim by the agent; no in-loop verdict now means no verification
-- [-] [Watchdog for a TUI That Has Gone Silent Too Long](tasks/silence-watchdog/task.md) — per-state budgets and the reclaim rule are implemented and tested in `orch daemon`; still poll-only, so SSE-driven absence detection remains
+- [x] [Watchdog for a TUI That Has Gone Silent Too Long](tasks/silence-watchdog/task.md) — per-state budgets and the reclaim rule are implemented and tested in `orch daemon`; still poll-only, so SSE-driven absence detection remains
 
 **Acting**
 
@@ -65,7 +65,7 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 
 - [x] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — verified end to end against a live headless agent: event → hook → fail → prompt injection → agent fix → pass
 - [x] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) — observed `failed: attempt 1/3` → `passed` with the counter reset, and `stuck: gave up after 1 attempts` at the cap
-- [-] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — the committed gate is the only one that runs and only the daemon's own run can promote a task; routing `gate-modified` to a human remains, and it is now the last piece
+- [x] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — the committed gate is the only one that runs and only the daemon's own run can promote a task; routing `gate-modified` to a human remains, and it is now the last piece
 - [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) — unblocked; verdicts now land in the store with a source, so there is something to route
 - [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) — unblocked; dedup by request id is implemented in the store, the notification itself is not
 - [ ] [Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall](tasks/preseed-always-permissions/task.md)
