@@ -18,7 +18,13 @@ import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
-type Outcome = 'passed' | 'failed' | 'stuck' | 'no-gate-configured' | 'gate-modified';
+type Outcome =
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'stuck'
+  | 'no-gate-configured'
+  | 'gate-modified';
 
 interface GateConfig {
   include?: string[];
@@ -32,8 +38,25 @@ interface OrchConfig {
   daemon?: string;
 }
 
+/**
+ * Contract version of this router. Bump it whenever the daemon starts relying on
+ * something the router does.
+ *
+ * Projects own their copy of this file (the shadcn model), so a byte-level diff against
+ * the shipped template cannot distinguish a deliberate customisation from a router that
+ * predates a guarantee the supervisor now depends on. A declared number can, and
+ * `doctor` fails - not warns - when it is too old.
+ *
+ *   1 - runs the committed base-branch gate; reports outcomes; bounded retries.
+ *   2 - reports `running` *before* the gate executes. Without this the supervisor
+ *       cannot tell a slow check from an agent nothing ever examined: the session is
+ *       idle for the whole duration of a gate and the dispatch has usually exited.
+ *       Measured with a 45s gate on a contract-1 router - the task was marked
+ *       needs-review at 40s, mid-check, and then abandoned.
+ */
+export const ROUTER_CONTRACT = 2;
+
 const ORCH_DIR = '.orchestration';
-const STATE_DIR = path.join(ORCH_DIR, '.state');
 
 /** Map an opencode event type to a hook filename: `session.idle` -> `session-idle`. */
 function hookName(eventType: string): string {
@@ -189,18 +212,49 @@ function globOne(file: string, pattern: string): boolean {
   return new RegExp(`^${rx}$`).test(file);
 }
 
-async function readState(worktree: string, key: string): Promise<string | null> {
-  try {
-    return (await fs.readFile(path.join(worktree, STATE_DIR, key), 'utf8')).trim();
-  } catch {
-    return null;
-  }
+/**
+ * Router state lives in the orchestrator's database, reached through its CLI.
+ *
+ * It used to live in `.orchestration/.state/` inside the worktree being judged, which
+ * was wrong three ways: two authorities for one question, per-worktree files that
+ * cannot express a machine-wide concurrency limit, and state `orch observe` could not
+ * see because it reads the database.
+ *
+ * A subprocess rather than an HTTP call to the daemon, deliberately. SQLite in WAL
+ * mode already serialises writers across processes, so a socket would buy nothing and
+ * add a service that can be *down* - and "the daemon was unreachable" must never
+ * become a route by which a gate passes.
+ */
+const ORCH = process.env.ORCH_BIN || 'orch';
+
+/**
+ * Whether the gate can be skipped because nothing has changed since it last passed.
+ *
+ * Named and exported so the fail-closed rule is testable rather than incidental. The
+ * only unsafe direction here is skipping: a needless run costs time, a wrongly skipped
+ * run means work went out unchecked. So anything short of a known baseline that
+ * matches exactly - state unavailable, no baseline recorded, empty string - must run
+ * the gate.
+ */
+export function shouldSkipGate(
+  state: { fingerprint?: string | null } | null,
+  current: string,
+): boolean {
+  if (!state?.fingerprint || !current) return false;
+  return state.fingerprint === current;
 }
 
-async function writeState(worktree: string, key: string, value: string): Promise<void> {
-  const dir = path.join(worktree, STATE_DIR);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, key), value);
+async function orchJSON($: any, args: string[]): Promise<any | null> {
+  try {
+    const r = await $`${ORCH} ${args}`.nothrow().quiet();
+    if (r.exitCode !== 0) return null;
+    return JSON.parse(r.stdout.toString());
+  } catch {
+    // Unreachable CLI is not fatal here, and must not be: every caller below treats
+    // null as "no baseline known", which makes the gate *run* rather than skip.
+    // Failing open on the skip decision would be the one unsafe direction.
+    return null;
+  }
 }
 
 export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => {
@@ -211,7 +265,22 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
 
   let running = false;
 
-  async function report(outcome: Outcome, event: string, detail: string) {
+  /**
+   * Retry ceiling that survives the database being unreachable.
+   *
+   * The store holds the real counter, but if `orch` cannot be reached the cap would
+   * otherwise be unenforceable and a failing gate would retry forever - the exact
+   * unbounded billable loop the cap exists to prevent. In-memory only lasts as long as
+   * this server does, which is weaker than the store and strictly better than nothing.
+   */
+  const memAttempts = new Map<string, number>();
+
+  async function report(
+    outcome: Outcome,
+    event: string,
+    detail: string,
+    extra: { fingerprint?: string; diverged?: boolean; seconds?: number } = {},
+  ) {
     // The plugin decides nothing about who is told. It produces a result; routing
     // is the daemon's job, which is why there is no report_back message here and
     // no notion of whether a human is in the loop.
@@ -224,6 +293,19 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
         },
       })
       .catch(() => undefined);
+
+    // Also to the store, so the outcome is visible to `orch task list` rather than
+    // only to whoever greps the server log. Recorded as `source=router`: this runs
+    // inside the agent's own server, so it is a self-report and cannot promote
+    // anything to `done` - the daemon runs the gate again out-of-loop for that.
+    const args = ['gate-report', '--worktree', root, '--event', event,
+                  '--outcome', outcome];
+    if (extra.fingerprint) args.push('--fingerprint', extra.fingerprint);
+    if (extra.diverged) args.push('--diverged');
+    if (extra.seconds) args.push('--seconds', String(extra.seconds));
+    if (detail) args.push('--detail', detail.slice(0, 2000));
+    const res = await orchJSON($, args);
+    return res?.attempts as number | undefined;
   }
 
   async function runHook(event: string, sessionID: string) {
@@ -253,16 +335,27 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
       );
     }
 
-    const fpKey = `fingerprint-${hookName(event)}`;
-    const previous = await readState(root, fpKey);
+    const state = await orchJSON($, [
+      'gate-state', '--worktree', root, '--event', event,
+    ]);
     const current = await fingerprint($, root, gate);
 
     // Persisted, so a TUI restart cannot silently re-baseline and skip the first
-    // check of a session.
-    if (previous === current) return;
+    // check of a session. A null state means the baseline is unknown, which runs the
+    // gate rather than skipping it.
+    if (shouldSkipGate(state, current)) return;
 
     running = true;
     try {
+      // Announce before running, not after.
+      //
+      // The session is idle for the whole duration of the gate, and the dispatch
+      // process has usually exited by now, so from outside this looks exactly like an
+      // agent that stopped without anything ever checking it. With a fast gate the
+      // window is invisible; with a real suite it is minutes long. Observed: a 45s gate
+      // had its task marked `needs-review` at 40s, while the gate was still running.
+      await report('running', event, 'gate started');
+
       const started = Date.now();
       const result = await $`${gate.exec}`
         .cwd(root)
@@ -276,28 +369,40 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
         .nothrow();
       const secs = ((Date.now() - started) / 1000).toFixed(1);
 
+      const key = hookName(event);
+
       if (result.exitCode === 0) {
-        await writeState(root, fpKey, current);
-        await writeState(root, `retries-${hookName(event)}`, '0');
-        await report('passed', event, `${secs}s`);
+        memAttempts.set(key, 0);
+        await report('passed', event, `${secs}s`, {
+          fingerprint: current,
+          diverged: gate.diverged,
+          seconds: Number(secs),
+        });
         return;
       }
-
-      const attempts = Number((await readState(root, `retries-${hookName(event)}`)) ?? '0') + 1;
-      await writeState(root, `retries-${hookName(event)}`, String(attempts));
 
       const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.toString();
       const tail = output.slice(-2000);
 
+      // The store owns the counter, but take whichever is higher: a CLI that could not
+      // be reached returns undefined, and trusting that would reset the cap.
+      const local = (memAttempts.get(key) ?? (state?.attempts ?? 0)) + 1;
+      memAttempts.set(key, local);
+      const reported = await report(
+        'failed', event, `attempt ${local}/${retryCap} (${secs}s)\n${tail}`,
+        { diverged: gate.diverged, seconds: Number(secs) },
+      );
+      const attempts = Math.max(reported ?? 0, local);
+
       if (attempts >= retryCap) {
         // The loop is self-inflicted, so it is bounded on purpose. An agent that
         // cannot fix a failure would otherwise retry forever and bill for it.
-        await writeState(root, fpKey, current);
-        await report('stuck', event, `gave up after ${attempts} attempts: ${tail}`);
+        await report('stuck', event, `gave up after ${attempts} attempts: ${tail}`, {
+          fingerprint: current,
+          diverged: gate.diverged,
+        });
         return;
       }
-
-      await report('failed', event, `attempt ${attempts}/${retryCap} (${secs}s)`);
 
       // Inject via the session API, never `tui.appendPrompt` + `tui.submitPrompt`.
       // Driving the TUI text box erases whatever the human was typing, requires a

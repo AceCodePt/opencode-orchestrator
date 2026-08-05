@@ -193,6 +193,9 @@ def status() -> dict:
         "healthy": caps.healthy,
         "version": ".".join(map(str, caps.version)) if caps.version else None,
         "uptime_s": int(time.time()) - info.started_at if info.started_at else None,
+        # Exposed because plugins are imported once per directory and cached: anything
+        # edited after this timestamp may not be what the server is actually running.
+        "started_at": info.started_at,
         # A live process that does not answer is the interesting failure: the
         # supervisor must not read it as "up" just because the pid exists.
         "unresponsive": not caps.healthy,

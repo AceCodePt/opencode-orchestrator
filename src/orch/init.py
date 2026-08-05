@@ -140,7 +140,8 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
     return Path(top), notes
 
 
-def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
+def run(start: Path, force: bool = False, version: str = "0",
+        force_hooks: bool = False) -> InitResult:
     target, notes = resolve_target(start)
     if target is None:
         return InitResult([], [], notes)
@@ -152,10 +153,18 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     hooks = orch / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
 
-    def write(p: Path, body: str, executable: bool = False) -> None:
+    def write(p: Path, body: str, executable: bool = False,
+              protected: bool = False) -> None:
         rel = str(p.relative_to(target))
         if p.exists() and not force:
             skipped.append(rel)
+            return
+        if p.exists() and protected and not force_hooks:
+            # `--force` must not clobber a gate. It is the most valuable file in the
+            # project, its loss is unrecoverable, and overwriting it with the
+            # fail-closed scaffold silently replaces real verification with none.
+            # Learned by doing exactly that here while trying to update the router.
+            skipped.append(f"{rel} (protected; --force-hooks to overwrite)")
             return
         p.write_text(body)
         if executable:
@@ -164,14 +173,35 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
 
     write(orch / "README.md", TEMPLATE_README)
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
-    write(hooks / "session-idle", TEMPLATE_SESSION_IDLE, executable=True)
+    write(hooks / "session-idle", TEMPLATE_SESSION_IDLE, executable=True,
+          protected=True)
     write(orch / ".version", version + "\n")
 
     plugins = target / ".opencode" / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
     src = Path(__file__).resolve().parents[2] / "plugin" / "orch-router.ts"
     if src.is_file():
-        write(plugins / "orch-router.ts", src.read_text())
+        # The router is orch's mechanism, not project knowledge, and the supervisor
+        # depends on a declared contract from it. So an out-of-date contract is upgraded
+        # even without `--force`: leaving it stale makes the daemon mark tasks
+        # needs-review while their gates are still running. A router at or above the
+        # floor is left alone, because projects legitimately customise their copy.
+        from .gate import MIN_ROUTER_CONTRACT, router_contract
+
+        have, _ = router_contract(target)
+        dest = plugins / "orch-router.ts"
+        if have is not None and have < MIN_ROUTER_CONTRACT and not force:
+            dest.write_text(src.read_text())
+            created.append(f".opencode/plugins/orch-router.ts (contract {have} "
+                           f"-> {MIN_ROUTER_CONTRACT})")
+            notes.append(
+                f"upgraded the router from contract {have} to {MIN_ROUTER_CONTRACT} "
+                f"without being asked: the supervisor relies on it reporting when a "
+                f"gate starts, and without that a slow gate is read as an agent "
+                f"nothing checked. COMMIT it, or dispatched worktrees keep the old one."
+            )
+        else:
+            write(dest, src.read_text())
     else:
         notes.append(f"router plugin template not found at {src}")
 

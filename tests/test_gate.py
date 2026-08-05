@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import gate  # noqa: E402
 
 GATE_BODY = "#!/usr/bin/env bash\necho ok\n"
-ROUTER_BODY = "export const X = 1;\n"
+# Must declare a current contract: the supervisor depends on it, so an older
+# router is a blocking finding rather than a cosmetic difference.
+ROUTER_BODY = f"export const ROUTER_CONTRACT = {gate.MIN_ROUTER_CONTRACT};\n"
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -269,6 +271,40 @@ def test_run_reports_a_gate_that_cannot_execute() -> None:
     assert v.outcome == gate.FAILED and not v.justifies_done
     tmp.cleanup()
     print("ok: an unexecutable gate fails closed")
+
+
+def test_an_old_router_contract_blocks_dispatch() -> None:
+    """Contract, not content.
+
+    Projects own their copy of the router, so a byte diff cannot separate a deliberate
+    customisation from a router predating a guarantee the supervisor relies on. A
+    contract-1 router does not report that a gate has started, which makes a slow gate
+    indistinguishable from an agent nothing examined - measured, a 45s gate had its task
+    marked needs-review at 40s and then abandoned.
+    """
+    root, tmp = _repo()
+    _scaffold(root)
+    (root / gate.ROUTER_RELS[0]).write_text("export const ROUTER_CONTRACT = 1;\n")
+    _commit(root)
+
+    findings = gate.inspect(root)
+    f = _by_name(findings, "router contract")
+    assert f is not None and not f.trustworthy, findings
+    assert gate.blocking(findings), "an old contract must stop a dispatch"
+    tmp.cleanup()
+    print("ok: a router below the required contract blocks dispatch")
+
+
+def test_a_router_with_no_marker_is_contract_one() -> None:
+    """Absence dates the file rather than being ambiguous: the marker arrived with 2."""
+    root, tmp = _repo()
+    _scaffold(root)
+    (root / gate.ROUTER_RELS[0]).write_text("export const X = 1;\n")
+    _commit(root)
+    version, path = gate.router_contract(root)
+    assert version == 1 and path is not None
+    tmp.cleanup()
+    print("ok: a router with no contract marker is treated as contract 1")
 
 
 def main() -> int:

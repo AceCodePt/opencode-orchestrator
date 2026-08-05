@@ -18,7 +18,13 @@ import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
-type Outcome = 'passed' | 'failed' | 'stuck' | 'no-gate-configured' | 'gate-modified';
+type Outcome =
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'stuck'
+  | 'no-gate-configured'
+  | 'gate-modified';
 
 interface GateConfig {
   include?: string[];
@@ -31,6 +37,31 @@ interface OrchConfig {
   gate?: GateConfig;
   daemon?: string;
 }
+
+/**
+ * Contract version of this router. Bump it whenever the daemon starts relying on
+ * something the router does.
+ *
+ * Projects own their copy of this file (the shadcn model), so a byte-level diff against
+ * the shipped template cannot distinguish a deliberate customisation from a router that
+ * predates a guarantee the supervisor now depends on. A declared number can, and
+ * `doctor` fails - not warns - when it is too old.
+ *
+ *   1 - runs the committed base-branch gate; reports outcomes; bounded retries.
+ *   2 - reports `running` *before* the gate executes. Without this the supervisor
+ *       cannot tell a slow check from an agent nothing ever examined: the session is
+ *       idle for the whole duration of a gate and the dispatch has usually exited.
+ *       Measured with a 45s gate on a contract-1 router - the task was marked
+ *       needs-review at 40s, mid-check, and then abandoned.
+ *
+ * NOT exported, and that is load-bearing rather than stylistic: opencode requires every
+ * export of a plugin file to be a function and rejects the whole file otherwise -
+ * `failed to load plugin ... Plugin export is not a function`. Exporting this as a
+ * number silently disabled the entire router, so no gate fired at all and the only
+ * evidence was one line in the server log. `orch` reads the number by pattern, which
+ * needs no export.
+ */
+const ROUTER_CONTRACT = 2;
 
 const ORCH_DIR = '.orchestration';
 
@@ -323,6 +354,15 @@ export const OrchRouter: Plugin = async ({ $, client, directory, worktree }) => 
 
     running = true;
     try {
+      // Announce before running, not after.
+      //
+      // The session is idle for the whole duration of the gate, and the dispatch
+      // process has usually exited by now, so from outside this looks exactly like an
+      // agent that stopped without anything ever checking it. With a fast gate the
+      // window is invisible; with a real suite it is minutes long. Observed: a 45s gate
+      // had its task marked `needs-review` at 40s, while the gate was still running.
+      await report('running', event, 'gate started');
+
       const started = Date.now();
       const result = await $`${gate.exec}`
         .cwd(root)

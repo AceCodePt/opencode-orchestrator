@@ -117,7 +117,8 @@ def cmd_events(args: argparse.Namespace) -> int:
 
 def cmd_init(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = init_mod.run(start, force=args.force, version=__version__)
+    r = init_mod.run(start, force=args.force, version=__version__,
+                     force_hooks=args.force_hooks)
     print(init_mod.render(r))
     # No worktree resolved means nothing was written; that is a failure, not a no-op.
     return 0 if (r.created or r.skipped) else 2
@@ -379,6 +380,14 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
             print(json.dumps({"known": False, "attempts": 0}))
             return 0
         attempts = t.retries
+        if args.outcome == "running":
+            # A gate has started. No counter moves: this is a claim about the mechanism
+            # being in flight, so that the supervisor does not read a long check as an
+            # agent nothing ever examined.
+            st.record_verdict(t.project, t.name, args.event, "running",
+                              args.detail or "", source="router")
+            print(json.dumps({"known": True, "task": t.name, "attempts": attempts}))
+            return 0
         if args.outcome == "passed":
             if args.fingerprint:
                 st.set_fingerprint(t.project, t.name, args.fingerprint)
@@ -484,7 +493,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     i = sub.add_parser("init", help="scaffold .orchestration/ and install the router plugin")
     i.add_argument("-C", "--directory")
-    i.add_argument("--force", action="store_true", help="overwrite existing files")
+    i.add_argument("--force", action="store_true",
+                   help="overwrite existing files, except gates")
+    i.add_argument("--force-hooks", action="store_true",
+                   help="also overwrite hooks, replacing a real gate with "
+                        "the fail-closed scaffold")
     i.set_defaults(func=cmd_init)
 
     d = sub.add_parser("doctor", help="verify the contracts that fail silently")

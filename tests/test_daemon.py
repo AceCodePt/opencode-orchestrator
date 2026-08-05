@@ -179,6 +179,42 @@ def test_spending_the_retry_cap_counts_as_finished() -> None:
     print("ok: a spent retry cap ends the loop, so the task is finished")
 
 
+def test_a_running_gate_is_not_an_unexamined_agent() -> None:
+    """The bug that only a slow gate reveals.
+
+    The session is idle for the whole duration of a gate and the dispatch has usually
+    exited, so a running check looks exactly like an agent nothing ever examined.
+    Measured with a 45s gate: the task was marked needs-review at 40s, mid-check, and
+    then abandoned - so the verdict that arrived later was never considered.
+    """
+    acts = _stopped("running", quiet=200)
+    assert _kinds(acts) == [daemon.RENEW]
+    assert acts[0].reason == daemon.GATE_IN_FLIGHT
+    assert daemon.NEEDS_REVIEW not in _kinds(acts)
+    print("ok: a gate that is still running is not mistaken for an unchecked agent")
+
+
+def test_a_gate_running_past_its_own_timeout_is_escalated() -> None:
+    """Patience has a limit: the gate's timeout is 900s, so beyond that the run itself
+    is wedged or the server hosting it died mid-check."""
+    acts = _stopped("running", quiet=daemon.BUDGET_GATE_S + 1)
+    assert daemon.NEEDS_REVIEW in _kinds(acts)
+    assert daemon.BUDGET_GATE_S * 1.0 > 900, "must exceed the gate's own timeout"
+    print("ok: a gate running past its own timeout is escalated")
+
+
+def test_never_gated_waits_out_a_grace_period_first() -> None:
+    """Acting immediately would condemn every gate slower than one poll interval.
+
+    The router announces a gate before running it, but not instantly - it fingerprints
+    the worktree first, which on a large repo takes real time.
+    """
+    early = _stopped(None, quiet=1)
+    assert _kinds(early) == [daemon.RENEW]
+    assert daemon.NEEDS_REVIEW not in _kinds(early)
+    print("ok: a missing verdict is given a grace period before it is believed")
+
+
 def test_an_agent_that_was_never_gated_is_not_verified() -> None:
     """The silent hole, and the reason `finished` is defined by the loop.
 
@@ -186,7 +222,7 @@ def test_an_agent_that_was_never_gated_is_not_verified() -> None:
     threw. Verifying would let one lucky out-of-loop run stand in for a gate that never
     ran, turning "nothing objected" into a pass.
     """
-    acts = _stopped(None)
+    acts = _stopped(None, quiet=daemon.GRACE_UNGATED_S + 1)
     assert _kinds(acts) == [daemon.NEEDS_REVIEW]
     assert acts[0].reason == daemon.NEVER_GATED
     assert daemon.VERIFY not in _kinds(acts)
@@ -194,18 +230,18 @@ def test_an_agent_that_was_never_gated_is_not_verified() -> None:
 
 
 def test_no_gate_configured_is_not_finished_either() -> None:
-    acts = _stopped("no-gate-configured")
+    acts = _stopped("no-gate-configured", quiet=daemon.GRACE_UNGATED_S + 1)
     assert _kinds(acts) == [daemon.NEEDS_REVIEW]
     print("ok: an ungated project cannot produce a finished task")
 
 
 def test_stop_reasons_are_exhaustive() -> None:
     """Every outcome the router can report must classify, including ones added later."""
-    for outcome in ("passed", "failed", "stuck", "gate-modified",
+    for outcome in ("running", "passed", "failed", "stuck", "gate-modified",
                     "no-gate-configured", None, "something-new"):
         assert daemon.stop_reason(outcome) in (
             daemon.FINISHED_COMPLETE, daemon.FINISHED_GAVE_UP,
-            daemon.STILL_RETRYING, daemon.NEVER_GATED)
+            daemon.STILL_RETRYING, daemon.GATE_IN_FLIGHT, daemon.NEVER_GATED)
     # An unrecognised outcome must fall to the cautious side, not to "finished".
     assert daemon.stop_reason("something-new") == daemon.NEVER_GATED
     print("ok: unknown router outcomes classify as not-finished")

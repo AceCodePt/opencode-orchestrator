@@ -327,6 +327,69 @@ def check_gates(cwd: Path) -> list[Check]:
     return out
 
 
+def check_router_contract(cwd: Path) -> list[Check]:
+    """Whether the installed router provides what the supervisor relies on.
+
+    A FAIL rather than a warning, and separate from the drift check, because the failure
+    it prevents is silent and destructive: with a contract-1 router the supervisor cannot
+    tell a running gate from an agent nothing examined, so it marks a task
+    `needs-review` mid-check and then stops supervising it. Measured with a 45s gate.
+    """
+    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if code.returncode != 0:
+        return []
+    top = Path(code.stdout.strip())
+    version, path = gate.router_contract(top)
+    if version is None:
+        return []          # absence is check_gates' business, not this one
+    if version < gate.MIN_ROUTER_CONTRACT:
+        return [Check(
+            FAIL,
+            f"router contract {version}, but {gate.MIN_ROUTER_CONTRACT} is required",
+            f"{path} predates a guarantee the supervisor depends on: reporting that a "
+            f"gate has started. Without it a slow gate is read as an agent nothing "
+            f"checked, and the task is marked needs-review while its gate is still "
+            f"running. `orch init --force`, then commit the result",
+        )]
+    return [Check(OK, f"router contract {version}",
+                  "reports gate starts, so a slow check is not mistaken for an "
+                  "unexamined agent")]
+
+
+def check_router_freshness(cwd: Path, st: dict) -> list[Check]:
+    """Whether the shared server could still be holding an older router.
+
+    opencode imports a plugin once per directory and caches the module, so editing the
+    router changes nothing for any directory the server has already touched - including a
+    worktree that was deleted and recreated at the same path. Cost a full test cycle
+    here: the router was upgraded and committed, the worktree was rebuilt, and the server
+    went on running the previous plugin.
+    """
+    if not st.get("running") or not st.get("started_at"):
+        return []
+    code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if code.returncode != 0:
+        return []
+    top = Path(code.stdout.strip())
+    _, path = gate.router_contract(top)
+    if not path:
+        return []
+    try:
+        edited = int(Path(path).stat().st_mtime)
+    except OSError:
+        return []
+    if edited > int(st["started_at"]):
+        return [Check(
+            WARN, "the router changed after the shared server started",
+            f"the server imports a plugin once per directory and caches it, so any "
+            f"worktree it has already touched is still running the old router - "
+            f"recreating the worktree does not help. `orch server restart`",
+        )]
+    return []
+
+
 def check_router_drift(cwd: Path) -> list[Check]:
     """Is the installed router the one this `orch` ships?
 
@@ -453,6 +516,8 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_server()
     checks += check_daemon()
     checks += check_gates(cwd)
+    checks += check_router_contract(cwd)
+    checks += check_router_freshness(cwd, server.status())
     checks += check_router_drift(cwd)
     checks += check_launch()
     checks += check_tooling()

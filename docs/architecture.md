@@ -592,6 +592,66 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
     failed gate gets complained about within minutes, a wrongly passed one never
     does.
 
+## Found by running a realistic gate
+
+Every gate in every lab until now returned in 0.0s. That single unrealistic condition hid
+three bugs, and a 45-second gate surfaced all of them in one run. Recorded because the
+lesson generalises: an instant gate is not a small version of a real one, it is a
+different test.
+
+**A running gate looked exactly like an unexamined agent.** The session is idle for the
+whole duration of a check and the dispatch process has usually exited, so the supervisor
+read a 45s gate as "stopped, and nothing ever verified this" - marking the task
+`needs-review` at 40s, mid-check, and then abandoning it, so the verdict that arrived
+five seconds later was never considered. Fixed on both sides: the router now reports
+`running` *before* executing, and a missing verdict is given a grace period before it is
+believed. The announcement is the real mechanism; the grace period only covers the delay
+before it arrives, because no fixed timeout can be both prompt for a fast gate and
+patient for a slow one.
+
+**A non-function export silently disabled the entire router.** opencode requires every
+export of a plugin file to be a function and rejects the whole file otherwise:
+
+```
+level=ERROR message="failed to load plugin" error="Plugin export is not a function"
+```
+
+Declaring the contract version as `export const ROUTER_CONTRACT = 2` therefore stopped
+every gate from firing, with one line in the server log as the only evidence. The rule is
+about the exported *value*, not the syntax - `export const OrchRouter = async …` is fine
+because it holds a function. Now a test asserts every export is callable, and it was
+confirmed to catch this exact mistake.
+
+**Plugins are imported once per directory and cached.** Upgrading the router changes
+nothing for any directory the server has already touched, and deleting and recreating a
+worktree at the same path does not help either - the module is keyed by path. This cost a
+full cycle: router upgraded, committed, worktree rebuilt, server still running the old
+plugin. `doctor` now warns when the router is newer than the running server.
+
+Two consequences worth stating plainly, because both are the same shape as the daemon
+staleness problem:
+
+| Long-lived process | Holds | Fix |
+| --- | --- | --- |
+| `orch daemon` | the Python it imported at startup | `systemctl --user restart orch-daemon` |
+| `opencode serve` | one plugin module per directory | `orch server restart` |
+
+`doctor` fails on the first and warns on the second, because neither is visible in logs
+that otherwise look completely normal.
+
+**Router contracts, and why a byte diff was not enough.** Projects own their copy of the
+plugin, so a content diff cannot separate a deliberate customisation from a router that
+predates a guarantee the supervisor depends on. The router therefore declares a contract
+number, `doctor` **fails** below the floor, and `task start` refuses to dispatch. A
+contract cannot express "same contract, bug fixed" - that is what drift detection and
+`orch init --force` are for.
+
+**`orch init --force` used to overwrite the gate.** Found by doing it to this repository
+while trying to update the router. The gate is the most valuable file in a project and its
+loss is unrecoverable, so `--force` now refuses to touch hooks; `--force-hooks` is a
+separate, explicit act. A router below the contract floor is upgraded even without
+`--force`, since that is a safety fix rather than a customisation.
+
 ## Settled: threat model, scope, and versions
 
 Recorded so they stop being reopened.

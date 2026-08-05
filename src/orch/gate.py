@@ -41,6 +41,7 @@ asking. Only the consequences differ.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,6 +59,33 @@ ROUTER_RELS = (
     ".opencode/plugins/orch-router.ts",
     ".opencode/plugin/orch-router.ts",
 )
+
+# The router contract this orch requires. Projects own their copy of the plugin, so a
+# byte diff cannot separate a deliberate customisation from a router that predates a
+# guarantee the supervisor depends on. The declared number can.
+#
+# 2 is the floor because the supervisor needs `running` reported before a gate executes;
+# without it a slow check is indistinguishable from an agent nothing examined.
+MIN_ROUTER_CONTRACT = 2
+_CONTRACT_RE = re.compile(r"ROUTER_CONTRACT\s*=\s*(\d+)")
+
+
+def router_contract(worktree: Path) -> tuple[int | None, str | None]:
+    """The contract version of the router installed in this worktree.
+
+    Returns `(version, path)`. A router with no declared contract is version 1: the
+    marker was introduced with 2, so its absence dates the file rather than being
+    ambiguous.
+    """
+    for rel in ROUTER_RELS:
+        p = worktree / rel
+        try:
+            text = p.read_text()
+        except OSError:
+            continue
+        m = _CONTRACT_RE.search(text)
+        return (int(m.group(1)) if m else 1), str(p)
+    return None, None
 
 # Only these are gates. Anything else in hooks/ is a lifecycle script that the
 # dispatcher runs directly, and its authority comes from the dispatcher, not the
@@ -165,7 +193,20 @@ def inspect(worktree: Path, base: str | None = None) -> list[GateFinding]:
                 f"commit the result."
             ),
         ))
-    elif not router_committed:
+    else:
+        # Contract, not content. A router old enough to lack `running` reporting makes
+        # the supervisor mark tasks needs-review mid-gate, so dispatching into it
+        # produces confident wrong answers rather than an obvious failure.
+        version, path = router_contract(worktree)
+        if version is not None and version < MIN_ROUTER_CONTRACT:
+            findings.append(GateFinding(
+                "router contract", MISSING,
+                f"{path} is contract {version}, and {MIN_ROUTER_CONTRACT} is required. "
+                f"It does not report that a gate has started, so a slow gate is read as "
+                f"an agent nothing checked. Run `orch init --force` and commit it",
+            ))
+
+    if router_local and not router_committed:
         findings.append(GateFinding(
             "router plugin", UNCOMMITTED,
             f"{ROUTER_RELS[0]} is on disk here but not committed on {base}, so gates "

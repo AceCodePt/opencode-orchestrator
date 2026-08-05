@@ -59,7 +59,20 @@ BUDGET_BLOCKED_S = 60
 FINISHED_COMPLETE = "finished: gate loop settled on a pass"
 FINISHED_GAVE_UP = "finished: retry cap spent"
 STILL_RETRYING = "not finished: the gate loop is still driving it"
+GATE_IN_FLIGHT = "not finished: a gate is running right now"
 NEVER_GATED = "not finished: stopped and no gate ever ran"
+
+# How long an idle agent with no in-loop verdict is given before that is believed.
+#
+# The session is idle for the entire duration of a gate and its dispatch has usually
+# exited, so a running check is indistinguishable from an agent nothing examined. The
+# router announces itself, but not instantly - it fingerprints the worktree first, which
+# on a large repo takes real time. Observed with a 45s gate: the task was declared
+# `needs-review` at 40s while the gate was still running.
+GRACE_UNGATED_S = 90
+# A gate that announced itself and never came back. The gate's own timeout is 900s, so
+# this must sit above it or the supervisor would give up on checks that are still legal.
+BUDGET_GATE_S = 20 * 60
 
 RENEW = "renew"
 RECLAIM = "reclaim"
@@ -145,6 +158,8 @@ def stop_reason(outcome: str | None) -> str:
     agent's own server - but it is solid evidence about *mechanism*: whether the loop
     that would have sent the agent back to work has stopped trying.
     """
+    if outcome == "running":
+        return GATE_IN_FLIGHT
     if outcome == "passed":
         return FINISHED_COMPLETE
     if outcome == "stuck":
@@ -256,14 +271,38 @@ def decide(snap: Snapshot) -> list[Action]:
                     ))
                 continue
 
+            if why == GATE_IN_FLIGHT:
+                # A check is running. The session is idle for its whole duration, so
+                # this is the state most easily mistaken for "stopped and unexamined".
+                actions.append(Action(RENEW, t.name, why, project=t.project))
+                if quiet > BUDGET_GATE_S:
+                    actions.append(Action(
+                        NEEDS_REVIEW, t.name,
+                        f"a gate has been running for {quiet}s",
+                        "past the gate's own timeout, so the run itself is wedged or "
+                        "the server hosting it died mid-check",
+                        project=t.project,
+                    ))
+                continue
+
             if why == NEVER_GATED:
-                # The silent hole. Verifying here would let a gate that never fired
-                # be replaced by one lucky out-of-loop run, and "nothing objected"
-                # would become a pass for work nothing in-loop ever examined.
+                # The silent hole - but only after a grace period. Acting immediately
+                # would condemn every gate slower than one poll interval, which is
+                # every real gate.
+                if quiet <= GRACE_UNGATED_S:
+                    actions.append(Action(
+                        RENEW, t.name,
+                        f"no in-loop verdict yet, {quiet}s into the grace period",
+                        project=t.project,
+                    ))
+                    continue
+                # Verifying here would let a gate that never fired be replaced by one
+                # lucky out-of-loop run, and "nothing objected" would become a pass for
+                # work nothing in-loop ever examined.
                 actions.append(Action(
                     NEEDS_REVIEW, t.name, why,
-                    "no in-loop verdict was ever recorded, so the router did not "
-                    "fire here: check that it is installed and the gate is committed",
+                    f"no in-loop verdict after {quiet}s, so the router did not fire "
+                    f"here: check that it is installed and the gate is committed",
                     project=t.project,
                 ))
                 continue
