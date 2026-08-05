@@ -266,7 +266,35 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
         start_ticks=proc_start_ticks(proc.pid),
     )
     write_state(info)
+    record_harness_version(info.port)
     return info
+
+
+def record_harness_version(port: int) -> str | None:
+    """Note which harness we just started against, and report a change.
+
+    Called here because starting the server is the moment the version is knowable and
+    is rare enough to be worth a write. Failure is ignored on purpose: not being able
+    to record a version is no reason to refuse to run.
+    """
+    try:
+        from .store import MIN_HARNESS, Store
+
+        v = harness.version(port)
+        if not v:
+            return None
+        st = Store()
+        try:
+            previous = st.note_harness(v, below_min=v < MIN_HARNESS)
+        finally:
+            st.close()
+        if previous:
+            return (f"harness changed: {previous} -> {'.'.join(map(str, v))}. "
+                    f"Minor releases are assumed API-compatible; if something "
+                    f"behaves differently, this is when it changed.")
+        return None
+    except Exception:  # noqa: BLE001 - recording a version must never break a start
+        return None
 
 
 def _await_url(log: Path, proc: subprocess.Popen, timeout: float) -> str:

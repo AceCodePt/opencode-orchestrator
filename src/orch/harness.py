@@ -16,8 +16,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-# The oldest opencode this code has been checked against. Local is 1.18.13; the box
-# is pinned to 1.18.11. Endpoints must degrade rather than lie across that gap.
+# The supported floor, not merely "what has been tested". The box is pinned to 1.18.11,
+# so 1.18.11 is the contract; anything above it is a bonus and must not become a
+# requirement by accident. Minor releases are assumed API-compatible - an assumption,
+# so every version actually seen is recorded in the database (`harness_seen`), which
+# turns a surprise into a dated dependency change. Endpoints must degrade rather than
+# lie across the gap.
 MIN_VERSION = (1, 18, 11)
 
 DEFAULT_TIMEOUT = 5.0

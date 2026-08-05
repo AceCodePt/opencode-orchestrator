@@ -94,9 +94,21 @@ bin/orch observe -w --json
 bin/orch attach                  # open a TUI onto the shared server, close it freely
 bin/orch events -d 30 -v         # tail SSE, then print a histogram of event types
 
+bin/orch daemon install          # systemd user unit, enabled, with linger
+bin/orch daemon status           # is anything actually supervising
 bin/orch daemon --once --dry-run # decide and print, change nothing
-bin/orch daemon                  # supervise: renew, alert, reclaim, restart
 ```
+
+`orch daemon` is one supervisor per machine covering every project, because there is one
+shared server, one database and one set of leases per machine. Without it no lease is
+renewed and no stopped agent is verified, so nothing reaches `done` — and everything
+else still looks healthy, which is why `doctor` fails rather than warns when it is
+missing.
+
+Requires opencode **1.18.11 or newer**. That is the box's pin; newer is a bonus, not a
+requirement. Minor releases are assumed API-compatible, so every version actually run
+against is recorded in the database — a change then shows up as a dated fact instead of
+inexplicable behaviour.
 
 `observe` and `doctor` exit non-zero when something needs a human or when the
 machinery itself is wrong, so they compose in a shell.

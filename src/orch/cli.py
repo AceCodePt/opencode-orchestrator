@@ -401,14 +401,49 @@ def cmd_gate_report(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    """Supervise: renew leases, alert, reclaim the definitely dead, restart the
-    shared server. Deliberately does not mark anything `done` - see daemon.py."""
-    start = Path(args.directory) if args.directory else Path.cwd()
-    _, project, err = dispatch_mod.project_of(start)
-    if err or project is None:
-        print(err or "not in a worktree", file=sys.stderr)
-        return 2
-    return daemon_mod.run(str(project), interval=args.interval,
+    """Supervise: renew leases, alert, reclaim the definitely dead, restart the shared
+    server, and verify stopped agents against the committed gate.
+
+    Machine-wide by default. There is one shared server, one database and one set of
+    leases per machine, so a per-project daemon has to be remembered once per project
+    and silently supervises nothing for any project nobody started.
+    """
+    if args.action == "install":
+        for line in daemon_mod.install(interval=args.interval,
+                                       enable=not args.no_enable):
+            print(line)
+        print("\nlogs: journalctl --user -u orch-daemon -f")
+        return 0
+
+    if args.action == "status":
+        info = daemon_mod.unit_status()
+        if args.json:
+            print(json.dumps(info, indent=2))
+            return 0
+        if not info.get("installed"):
+            print("not installed under systemd - nothing supervises tasks across a "
+                  "reboot. `orch daemon install` fixes that.")
+            return 1
+        print(f"unit    {info['unit']}")
+        print(f"state   {info.get('ActiveState')}/{info.get('SubState')} "
+              f"({info.get('UnitFileState')})  pid={info.get('ExecMainPID')}")
+        if info.get("linger") is False:
+            # Worth its own line: without linger the unit starts at login and dies at
+            # logout, so an unattended reboot comes back supervising nothing.
+            print("linger  NO - this daemon will not run unless you are logged in")
+            return 1
+        print("linger  yes - survives logout and reboot")
+        return 0 if info.get("ActiveState") == "active" else 1
+
+    project: str | None = None
+    if args.directory or args.project_only:
+        start = Path(args.directory) if args.directory else Path.cwd()
+        _, p, err = dispatch_mod.project_of(start)
+        if err or p is None:
+            print(err or "not in a worktree", file=sys.stderr)
+            return 2
+        project = str(p)
+    return daemon_mod.run(project, interval=args.interval,
                           once=args.once, dry_run=args.dry_run)
 
 
@@ -525,12 +560,20 @@ def build_parser() -> argparse.ArgumentParser:
     gp.add_argument("--diverged", action="store_true")
     gp.set_defaults(func=cmd_gate_report)
 
-    dm = sub.add_parser("daemon", help="supervise leases, alerts and the server")
-    dm.add_argument("-C", "--directory")
+    dm = sub.add_parser("daemon", help="supervise leases, verdicts and the server")
+    dm.add_argument("action", nargs="?", default="run",
+                    choices=["run", "install", "status"])
+    dm.add_argument("-C", "--directory",
+                    help="supervise only this project (default: every project)")
+    dm.add_argument("--project-only", action="store_true",
+                    help="supervise only the project of the current directory")
     dm.add_argument("-n", "--interval", type=float, default=10.0)
     dm.add_argument("--once", action="store_true", help="one pass, then exit")
     dm.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
+    dm.add_argument("--no-enable", action="store_true",
+                    help="write the systemd unit but do not enable it")
+    dm.add_argument("--json", action="store_true")
     dm.set_defaults(func=cmd_daemon)
 
     v = sub.add_parser("version", help="show orch and harness versions")

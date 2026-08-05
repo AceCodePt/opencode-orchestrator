@@ -328,6 +328,62 @@ def test_verify_reviews_a_vanished_worktree() -> None:
     print("ok: a missing worktree is reviewed, not passed")
 
 
+# ------------------------------------------------------------- machine-wide scope
+#
+# One daemon covers every project, because there is one shared server, one database
+# and one set of leases per machine. A per-project daemon has to be remembered once
+# per project, and supervises nothing for any project nobody started.
+
+
+def test_actions_carry_their_project() -> None:
+    """Task names are unique only within a project.
+
+    Without the project on the action, a machine-wide daemon eventually renews or
+    reclaims a same-named task in the wrong repository.
+    """
+    a = _task(project="/a/one.git", worktree="/wt/a", pid=1)
+    b = _task(project="/b/two.git", worktree="/wt/b", pid=2)
+    acts = daemon.decide(_snap(
+        tasks=[a, b],
+        dispatch_alive={1: True, 2: True},
+        facts={"/wt/a": _fact(observe.BUSY), "/wt/b": _fact(observe.BUSY)},
+    ))
+    assert len(acts) == 2
+    assert {x.project for x in acts} == {"/a/one.git", "/b/two.git"}
+    print("ok: every per-task action names its project")
+
+
+def test_same_name_in_two_projects_is_not_confused() -> None:
+    st = _store()
+    for p in ("/a/one.git", "/b/two.git"):
+        st.sync_intent(p, ["task-a"])
+        st.claim(p, "task-a")
+    sup = daemon.Supervisor(store=st)          # no project: machine-wide
+    sup.apply([daemon.Action(daemon.RECLAIM, "task-a", "dead", project="/a/one.git")])
+    assert st.get("/a/one.git", "task-a").status == "todo"
+    assert st.get("/b/two.git", "task-a").status == "running", (
+        "reclaiming one project's task disturbed another's")
+    sup.close()
+    print("ok: identically named tasks in two projects stay independent")
+
+
+def test_systemd_unit_survives_logout_and_keeps_children() -> None:
+    """Two properties that are silent when wrong.
+
+    `Restart=always` because a supervisor that exited cleanly is still not
+    supervising, and nothing else notices. `KillMode=process` because the shared
+    server and the agents are deliberately started in their own sessions and must not
+    be killed when the unit is restarted.
+    """
+    text = daemon.unit_text(interval=10)
+    assert "Restart=always" in text
+    assert "KillMode=process" in text
+    assert "WantedBy=default.target" in text
+    assert "daemon --interval 10" in text
+    assert Path(text.split("ExecStart=")[1].split()[0]).name == "orch"
+    print("ok: the unit restarts always and does not kill the server it supervises")
+
+
 def main() -> int:
     assert time.time() > 0
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

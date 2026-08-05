@@ -35,6 +35,14 @@ from pathlib import Path
 
 DEFAULT_LEASE_SECONDS = 900
 
+# The supported harness floor. The box is pinned to 1.18.11, so that is the minimum;
+# anything newer is a bonus. Minor releases are assumed not to change the API, and that
+# assumption is recorded in `harness_seen` rather than trusted - if a release does move
+# behaviour, it is handled like any other dependency change, with evidence of when it
+# arrived. Kept here rather than only in `harness.py` because the database is what
+# outlives any single process.
+MIN_HARNESS = (1, 18, 11)
+
 TODO = "todo"
 RUNNING = "running"
 DONE = "done"
@@ -108,6 +116,21 @@ CREATE INDEX IF NOT EXISTS verdict_task ON verdict(project, name, id);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- Which harness this database has been operated against.
+--
+-- The floor is 1.18.11 because that is the version the box is pinned to; anything
+-- above it is a bonus and minor releases are assumed API-compatible. That assumption
+-- is recorded rather than trusted: every version actually seen is written here, so
+-- when a release does change behaviour there is a history saying when the change
+-- arrived and what it replaced, instead of a guess. A harness is a dependency like
+-- any other, and this is its lockfile evidence.
+CREATE TABLE IF NOT EXISTS harness_seen (
+    version    TEXT PRIMARY KEY,      -- dotted, e.g. "1.18.13"
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL,
+    below_min  INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -339,6 +362,40 @@ class Store:
         return list(self.db.execute(
             "SELECT * FROM verdict WHERE project=? AND name=?"
             " ORDER BY id DESC LIMIT ?", (project, name, limit)))
+
+    # ------------------------------------------------------------------ meta / deps
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def note_harness(self, version: tuple[int, ...], below_min: bool) -> str | None:
+        """Record a harness version we have run against. Returns the previous one when
+        it differs, so a caller can say so out loud.
+
+        The point is not the current value - `orch version` can ask the server. It is
+        having a record that the version changed *between* runs, which is otherwise
+        invisible and is the only warning that behaviour may have moved under us.
+        """
+        dotted = ".".join(map(str, version))
+        now = int(time.time())
+        previous = self.get_meta("harness_version")
+        self.db.execute(
+            "INSERT INTO harness_seen(version,first_seen,last_seen,below_min)"
+            " VALUES(?,?,?,?) ON CONFLICT(version) DO UPDATE SET last_seen=excluded.last_seen",
+            (dotted, now, now, int(below_min)),
+        )
+        self.set_meta("harness_version", dotted)
+        self.set_meta("harness_min", ".".join(map(str, MIN_HARNESS)))
+        return previous if previous and previous != dotted else None
+
+    def harness_history(self) -> list[sqlite3.Row]:
+        return list(self.db.execute(
+            "SELECT * FROM harness_seen ORDER BY first_seen"))
 
     # ---------------------------------------------------------------------- alerts
     def note_alert(self, request_id: str, session_id: str, worktree: str | None,

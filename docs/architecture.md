@@ -11,6 +11,21 @@
 | **`.orchestration/`** | Per-project, tracked, project-specific hooks and config. |
 | **Router plugin** | Installed into a project's `.opencode/` by `orch init`. Turns harness events into hook invocations. |
 
+Three words that are easy to use interchangeably and must not be:
+
+| Term | Means | Established by |
+| --- | --- | --- |
+| **stopped** | The session is idle and its dispatch has exited. | Observation. Says nothing about the work. |
+| **finished** | The agent considers the task complete. | A claim by the agent. **Currently not captured at all.** |
+| **done** | The work was checked and the check passed. | A gate the daemon ran itself. |
+
+The gap is `finished`. Nothing asks the agent whether it completed the task, so
+`stopped` is currently read as if it were `finished`, and any stopped agent gets its
+gate run. That conflates completion with correctness: an agent that did a fifth of the
+work and quit can still leave a green suite behind, and would then be called `done`.
+The gate answers "is this broken", not "is this the task". See
+`tasks/completion-signal`.
+
 ## The criterion
 
 Every "where does this go" question is answered by one rule:
@@ -114,13 +129,36 @@ Consumes observer facts, decides, and is the only component permitted to act.
   here, and the same pattern would have killed an unrelated live task had the
   string matched. tmux needs no separate teardown: killing the process ends the
   session on its own (verified — pane process killed, session gone).
+- **Verdicts:** runs the committed gate itself once a task stops, and is the only
+  component whose `passed` may write `done`.
 - **Server:** faces the phone over the tailnet. Read status *and* take action —
-  approving an approval from your phone is the point, not a bonus.
+  approving an approval from your phone is the point, not a bonus. Not built.
 - **Routing:** decides who learns about an outcome — parent agent, human, or
-  nobody.
+  nobody. Not built.
 - **Stateless in memory.** Rebuilds everything on restart from SQLite plus
   `ss -ltnp`. A crash loses nothing, including children dispatched while it was
   down.
+
+**One per machine, under systemd, with linger.** Not one per project: there is a
+single shared server, a single database and a single set of leases per machine, so a
+per-project daemon would have to be remembered once per project and would silently
+supervise nothing for any project nobody started. Actions therefore carry their
+project, because task names are unique only within one.
+
+`orch daemon install` writes a **user** unit — the daemon runs the same gates a human
+runs, against worktrees in a home directory, and needs no privilege beyond the account
+that owns them. Three settings are load-bearing:
+
+| Setting | Why |
+| --- | --- |
+| `Restart=always` | A supervisor that exited *cleanly* is still not supervising, and nothing else notices its absence. |
+| `KillMode=process` | The shared server and every agent are started with `start_new_session` and must survive a unit restart. Verified: restarting the unit left the server untouched. |
+| `loginctl enable-linger` | Without it a user unit starts at login and dies at logout, so an unattended reboot comes back supervising nothing — while `systemctl status` looked correct when you set it up. |
+
+The absence of a daemon is a **silent** failure, which is why `doctor` fails on it
+rather than noting it. Dispatch still works, agents still run, in-loop gates still
+fire. But no lease is renewed and no stopped agent is ever verified, so tasks sit at
+`running` forever. Everything looks healthy until you ask for a result.
 
 ### 3. CLI — per-invocation action
 
@@ -497,10 +535,17 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
 8. **Absence of a gate is not a pass.** A missing hook yields
    `no-gate-configured`, never `passed`. Otherwise every unconfigured project
    receives automatic green lights.
-9. **The gate is not part of the agent's writable surface.** The committed
-   base-branch version is what runs; an uncommitted gate counts as no gate; a
-   diverging working-tree copy is reported as `gate-modified`. Learned by watching
-   a dispatched agent rewrite its own gate and then be told it passed.
+9. **The gate's *entry point* comes from the base branch.** The committed version is
+   what runs; an uncommitted gate counts as no gate; a diverging working-tree copy is
+   reported as `gate-modified`. Learned by watching a dispatched agent rewrite its own
+   gate and then be told it passed.
+
+   Scoped deliberately, because an earlier draft of this invariant overclaimed. What
+   the hook *invokes* — test files, scripts, linters — is read from the worktree and is
+   writable by the agent. That is accepted, not overlooked: hooks and the scripts they
+   call are maintained on the base branch and inherited by every worktree created from
+   it, so the ordinary route to changing them is a reviewable merge. Deeper pinning
+   would mean a gate could not test the code under test, which is incoherent.
 10. **Kill by recorded pid, never by pattern.** `pkill -f` matches the invoking
     shell and neighbouring processes. tmux sessions end on their own when their
     process dies, so they need no separate teardown.
@@ -514,6 +559,49 @@ edit their hooks freely, and the cost is reading a diff at upgrade time.
     to prevent, and it is the one direction that cannot be noticed later — a wrongly
     failed gate gets complained about within minutes, a wrongly passed one never
     does.
+
+## Settled: threat model, scope, and versions
+
+Recorded so they stop being reopened.
+
+**The threat model is a lazy agent, not a hostile one.** An agent takes the shortest
+route to looking finished; it is not assumed to attack the machine. It holds a bash
+tool and could in principle kill the daemon or the server — that is accepted, and
+restricting what the agent may run is a separate concern handled at the permission
+layer, when the time comes. Nothing here should be designed as if the agent were an
+adversary with intent.
+
+**Authority against GitHub is the operator's, not this system's.** Push rights, branch
+protection and who may write to `main` are maintained outside `orch` and are not
+enforced here.
+
+**The scope is infrastructure, not agent workflow.** What an agent is and is not
+allowed to do, which model it uses, what its prompt says — all deliberately out of
+scope. `orch` supplies dispatch, observation, verdicts, leases and supervision. A
+project supplies its own checks through `.orchestration/`.
+
+**The supported harness floor is 1.18.11**, because that is what the box is pinned to.
+Anything newer is a bonus and must not become a requirement by accident. Minor
+releases are assumed API-compatible — an assumption, so it is recorded rather than
+trusted: every version actually run against is written to `harness_seen`, with the
+floor in `meta`. A version change is then a dated fact instead of a mystery, and is
+handled like any other dependency moving. Below the floor is a `doctor` failure, not a
+warning.
+
+**Deferred, with nothing built on either:**
+
+- What happens to a branch that passed — merge, PR, or nothing — pending a decision on
+  whether a human belongs in that loop. `done` is currently a terminus.
+- Notification routing and the phone-facing server. Recorded as
+  `tasks/outcome-routing`, `tasks/permission-burst-keying` and `tasks/phone-server`.
+- Concurrency limits. Known and accepted; nothing caps parallel agents or gate runs.
+
+**Recursion is possible and not sanctioned.** `orch` can dispatch agents onto its own
+backlog: its repo is a bare repo with worktrees, its tasks are in `TASKS.md`, and
+`orch task start` on one of them produces a valid dispatch. Verified as a mechanism
+only. It has never been used, because agents editing the gate, router and daemon that
+supervise them makes this system's own safety properties the work product of the
+agents it supervises. Not a technical blocker — an unmade decision.
 
 ## Language and distribution
 
@@ -601,5 +689,8 @@ default behaviour that policy assumes; it only happens where a project's
 permission config actually demands it. Getting agents to stop and ask is a
 configuration job, not something the absence of `--auto` achieves by itself.
 
-**Known skew:** local opencode is 1.18.13, the box is pinned 1.18.11. Endpoint
-calls need a declared minimum version and must degrade rather than lie.
+**Version skew is now a declared contract, not a known risk.** The floor is 1.18.11
+(the box's pin); local runs 1.18.13. `harness.MIN_VERSION` and `store.MIN_HARNESS`
+carry it, `doctor` fails below it, and every version seen is recorded in
+`harness_seen` so a change is dated rather than discovered. Endpoint calls must still
+degrade rather than lie across the gap.

@@ -203,6 +203,28 @@ def test_verdicts_are_filterable_by_who_ran_the_gate() -> None:
     print("ok: a router verdict is never mistaken for a daemon one")
 
 
+def test_harness_versions_accumulate_and_a_change_is_reported() -> None:
+    """The floor is 1.18.11 and newer is a bonus, so the current number is not the
+    interesting fact. The interesting fact is that it *changed*, which is otherwise
+    invisible and is the first thing to suspect when behaviour moves."""
+    s, tmp = _store()
+    assert s.note_harness((1, 18, 11), below_min=False) is None
+    assert s.note_harness((1, 18, 11), below_min=False) is None, "no change, no noise"
+    assert s.note_harness((1, 18, 13), below_min=False) == "1.18.11"
+    assert [r["version"] for r in s.harness_history()] == ["1.18.11", "1.18.13"]
+    assert s.get_meta("harness_min") == "1.18.11"
+    s.close(); tmp.cleanup()
+    print("ok: harness versions are recorded and a change is reported once")
+
+
+def test_a_harness_below_the_floor_is_recorded_as_such() -> None:
+    s, tmp = _store()
+    s.note_harness((1, 18, 10), below_min=True)
+    assert s.harness_history()[0]["below_min"] == 1
+    s.close(); tmp.cleanup()
+    print("ok: running below the supported floor is recorded, not just warned about")
+
+
 def test_task_is_addressable_by_worktree() -> None:
     """The only join a plugin can make: it is told the directory it loaded for, and
     knows neither the task name nor the project."""

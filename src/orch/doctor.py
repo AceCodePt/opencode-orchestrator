@@ -158,6 +158,99 @@ def check_server() -> list[Check]:
         OK, f"shared server pid {st['pid']}",
         f"{st['url']} version {st.get('version') or '?'} up {st.get('uptime_s')}s",
     ))
+    out.extend(check_harness_version(st))
+    return out
+
+
+def check_daemon() -> list[Check]:
+    """Whether anything is actually supervising.
+
+    This is a silent-failure check, which is why it is a FAIL and not a note. With no
+    daemon, `orch task start` still works, agents still run, gates still fire in-loop -
+    everything looks healthy. But leases are never renewed and no stopped agent is ever
+    verified, so tasks sit at `running` forever and nothing reaches `done`. The system
+    appears to work right up to the point where you ask it for a result.
+    """
+    from . import daemon as daemon_mod
+
+    info = daemon_mod.unit_status()
+    if not info.get("installed"):
+        return [Check(
+            FAIL, "no supervisor installed",
+            "nothing renews leases or verifies stopped agents, so no task will ever "
+            "reach done. `orch daemon install`",
+        )]
+    out: list[Check] = []
+    if info.get("ActiveState") != "active":
+        out.append(Check(
+            FAIL, f"supervisor is {info.get('ActiveState')}/{info.get('SubState')}",
+            "installed but not running. `systemctl --user status orch-daemon` and "
+            "`journalctl --user -u orch-daemon`",
+        ))
+    else:
+        out.append(Check(OK, f"supervisor running pid {info.get('ExecMainPID')}",
+                         "renews leases, verifies stopped agents, restarts the server"))
+    if info.get("linger") is False:
+        # Easy to miss and it defeats the whole point: a user unit without linger
+        # starts at login and dies at logout, so an unattended reboot comes back
+        # supervising nothing while `systemctl status` looked fine when you set it up.
+        out.append(Check(
+            FAIL, "linger is off, so the supervisor dies with your session",
+            f"an unattended reboot comes back with nothing supervising. "
+            f"`loginctl enable-linger {os.environ.get('USER', '$USER')}`",
+        ))
+    return out
+
+
+def check_harness_version(st: dict) -> list[Check]:
+    """Whether the harness is at or above the supported floor, and whether it moved.
+
+    1.18.11 is the contract because that is what the box is pinned to. Newer is a
+    bonus and must not silently become a requirement. Minor releases are assumed
+    API-compatible, so the useful signal is not the current number - it is that the
+    number *changed*, which is otherwise invisible and is the only warning that
+    behaviour may have moved.
+    """
+    from .store import MIN_HARNESS, Store
+
+    raw = st.get("version")
+    if not raw:
+        return [Check(WARN, "harness version unknown",
+                      "cannot compare against the supported floor "
+                      f"{'.'.join(map(str, MIN_HARNESS))}")]
+    try:
+        v = tuple(int(x) for x in str(raw).split(".")[:3])
+    except ValueError:
+        return [Check(WARN, f"harness version {raw} is unparseable", "")]
+
+    floor = ".".join(map(str, MIN_HARNESS))
+    if v < MIN_HARNESS:
+        return [Check(FAIL, f"harness {raw} is below the supported floor {floor}",
+                      "the box is pinned to that floor, so anything older is "
+                      "untested here - treat it as an unsatisfied dependency")]
+
+    out = [Check(OK, f"harness {raw} meets the floor {floor}",
+                 "newer is a bonus, not a requirement")]
+    try:
+        s = Store()
+        try:
+            history = s.harness_history()
+            seen = [r["version"] for r in history]
+            recorded = s.get_meta("harness_version")
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001
+        return out
+
+    if len(seen) > 1:
+        out.append(Check(
+            WARN, f"this database has seen {len(seen)} harness versions",
+            f"{', '.join(seen)} - minor releases are assumed API-compatible; if "
+            f"something behaves oddly, a version change is the first suspect",
+        ))
+    elif recorded is None:
+        out.append(Check(WARN, "no harness version recorded yet",
+                         "starting the shared server records it"))
     return out
 
 
@@ -318,6 +411,7 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks: list[Check] = []
     checks += check_harness()
     checks += check_server()
+    checks += check_daemon()
     checks += check_gates(cwd)
     checks += check_router_drift(cwd)
     checks += check_launch()

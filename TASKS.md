@@ -55,6 +55,8 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 **Sensing**
 
 - [x] [Subscribe to the Event Stream and Capture the Event Vocabulary](tasks/event-stream-listener/task.md) — 93 types + 2 undocumented, see docs/events.md
+- [x] [Keep the Supervisor Alive Across Logout and Reboot](tasks/supervisor-under-systemd/task.md) — systemd user unit, machine-wide, Restart=always, KillMode=process, linger on; `doctor` fails when nothing is supervising
+- [ ] [Distinguish an Agent That Finished From One That Merely Stopped](tasks/completion-signal/task.md) — the gate answers "is this broken", not "is this the task"
 - [-] [Watchdog for a TUI That Has Gone Silent Too Long](tasks/silence-watchdog/task.md) — per-state budgets and the reclaim rule are implemented and tested in `orch daemon`; still poll-only, so SSE-driven absence detection remains
 
 **Acting**
@@ -64,8 +66,8 @@ Seeded in rough execution order. Later additions go at the top per the protocol.
 - [x] [Generic Event→Hook Router Plugin](tasks/event-hook-router/task.md) — verified end to end against a live headless agent: event → hook → fail → prompt injection → agent fix → pass
 - [x] [Bounded Retries on the Check Gate, Then Halt](tasks/check-gate-retry-cap/task.md) — observed `failed: attempt 1/3` → `passed` with the counter reset, and `stuck: gave up after 1 attempts` at the cap
 - [-] [Take the Gate Out of the Agent's Writable Surface](tasks/gate-not-agent-writable/task.md) — the committed gate is the only one that runs and only the daemon's own run can promote a task; routing `gate-modified` to a human remains, and it is now the last piece
-- [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) 🔒 Blocked by: [Claims, Leases and the Intent/Runtime Split in SQLite]
-- [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) 🔒 Blocked by: [Subscribe to the Event Stream and Capture the Event Vocabulary]
+- [ ] [Outcome Routing With a Per-Event Human-in-the-Loop Toggle](tasks/outcome-routing/task.md) — unblocked; verdicts now land in the store with a source, so there is something to route
+- [ ] [Key Approval Notifications on Request ID and Survive Bursts](tasks/permission-burst-keying/task.md) — unblocked; dedup by request id is implemented in the store, the notification itself is not
 - [ ] [Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall](tasks/preseed-always-permissions/task.md)
 - [ ] [Phone-Facing Server: Read Status and Answer Approvals Over the Tailnet](tasks/phone-server/task.md) 🔒 Blocked by: [Key Approval Notifications on Request ID and Survive Bursts]
 
