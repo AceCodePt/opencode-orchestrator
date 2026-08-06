@@ -37,15 +37,18 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                    # scaffold .orchestration/ (config + gate template)
+bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples)
 bin/orch gate                    # can this project's gate be trusted
 bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart
 bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md)
+bin/orch task add <name> --assist "<intent>"  # draft the spec with an opencode agent
+bin/orch task import list.txt    # bulk-create specs from a list (or `-` for stdin)
 bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
+bin/orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
 bin/orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
@@ -83,9 +86,10 @@ the worktree state by the daemon, after the session settles. Watch `orch task li
 declared task, in name order:
 
 ```json
-"scheduler": { "enabled": true, "maxConcurrent": 1, "model": "opencode/…" }
+"scheduler": { "enabled": true, "maxConcurrent": 1 }
 ```
 
+The model is opencode's choice, not orch's — the scheduler just spawns the agent.
 Without it, dispatching stays a human act (`orch task start`). The scheduler never
 dispatches ungated work, and it never dispatches a task you didn't opt in: a task
 needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
@@ -94,18 +98,23 @@ needs a human by default (`hitl: true` in the task.md front matter); only `hitl:
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
-`task add`/`start`/`list`/`reset`/`archive`/`merge`,
+`task add`/`start`/`list`/`answer`/`reset`/`archive`/`merge`,
 and the daemon — including the full loop of settle → gate → commit-on-pass → merge →
 archive, the failure loop of gate-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
 of `todo` tasks, opt-in per project). A slow agent that spends minutes inside a tool is
-held, not torn down: the daemon treats a live `orch:<task>` run process as the agent
-working and only settles once it exits.
+held, not torn down: the daemon treats a live detached `opencode run` process in the
+worktree as the agent working and only settles once it exits.
 
 `orch daemon` supervises: it settles tasks, runs the committed gate itself, retriggers
 failing agents up to `retryCap`, merges verified work, archives done work, restarts a
-dead or unresponsive shared server, and flags blocked permissions. The policy is a pure
-function of a snapshot, so those cases are tested rather than hoped for.
+dead or unresponsive shared server, and flags blocked permissions. A **merge conflict**
+is left in progress and the task reads `needs-review (merge-conflict)`. Who resolves it
+follows the `hitl` flag: a `hitl: true` task needs a human in the base worktree
+(`git add`/`git commit`); a `hitl: false` task gets an agent dispatched into the base
+worktree to resolve and commit on its own (up to `retryCap` tries, then it escalates to
+a human). Either way, once the merge lands the daemon archives the task. The policy is
+a pure function of a snapshot, so those cases are tested rather than hoped for.
 
 **Stopped, finished and done are different things, and all three are derived.** Stopped
 means the session is idle. Finished means the gate loop settled — a passing gate commits
@@ -118,7 +127,8 @@ Not built yet: routing `needs-review` onwards or unblocking a parent agent, and 
 machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
 
 When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
-`needs-review` tasks from the scan, and the daemon journal logs every `alert:` and
+`needs-review` tasks from the scan, `orch task answer` lets you reply to a blocked
+permission or question directly, and the daemon journal logs every `alert:` and
 `needs-review`. Notify add-ons integrate **with** `orch`, not the other way around:
 the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux) polls
 `orch task list --json` or tails the journal, and only it knows about the phone.

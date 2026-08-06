@@ -96,7 +96,7 @@ def test_merge_refuses_a_dirty_worktree() -> None:
     print("ok: a dirty worktree is never merged")
 
 
-def test_merge_conflict_keeps_worktree_and_branch() -> None:
+def test_merge_conflict_is_left_for_a_human_and_marked() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
     wt = _claim_task(bare, "task-a")
@@ -108,11 +108,34 @@ def test_merge_conflict_keeps_worktree_and_branch() -> None:
 
     r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
-    assert any("merge failed" in p for p in r.problems), r.problems
+    assert r.conflicted, "a conflict must be marked, not silently retried"
+    assert any("conflicts" in p for p in r.problems), r.problems
     assert wt.exists(), "worktree should survive a failed merge"
     assert "task-a" in _git(main_wt, "branch", "--list"), "branch survives"
+    head = _git(main_wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+    assert head, "the merge is left in progress so the state is derivable"
     tmp.cleanup()
-    print("ok: a merge conflict keeps the worktree and branch for a human")
+    print("ok: a merge conflict is left in progress and marked, branch kept")
+
+
+def test_merge_refuses_while_the_base_is_mid_merge() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    bare = _bare_repo(tmp)
+    wt = _claim_task(bare, "task-a")
+    wt2 = _claim_task(bare, "task-b")
+
+    main_wt = bare.parent / "main"
+    (main_wt / "task.py").write_text("# conflicting")
+    _git(main_wt, "add", "-A")
+    _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
+
+    r1 = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
+    assert r1.conflicted
+    r2 = merge.merge_and_cleanup(bare, "task-b", "task-b", wt2, "main")
+    assert not r2.ok and any("mid-merge" in p for p in r2.problems), r2.problems
+    assert wt2.exists(), "the second task must not be torn down either"
+    tmp.cleanup()
+    print("ok: the daemon cannot merge a second task over a mid-merge base")
 
 
 def test_remove_task_handles_the_noop_case() -> None:

@@ -24,6 +24,7 @@ MERGE = "merge"
 REMOVE = "remove"
 VERIFY = "verify"
 DISPATCH = "dispatch"
+RESOLVE = "resolve"
 ALERT = "alert"
 NOTE = "note"
 
@@ -43,8 +44,6 @@ class Action:
     session_ids: list[str] = field(default_factory=list)
     blocked: list[observe.Blocked] = field(default_factory=list)
     start: str | None = None
-    model: str | None = None
-    agent: str | None = None
 
 
 @dataclass
@@ -61,6 +60,8 @@ class LoopState:
     dispatch_error: dict[tuple[str, str], str] = field(default_factory=dict)
     dispatch_seen: dict[tuple[str, str], int] = field(default_factory=dict)
     dispatch_escaped: set[tuple[str, str]] = field(default_factory=set)
+    resolve_retries: dict[tuple[str, str], int] = field(default_factory=dict)
+    resolve_at: dict[tuple[str, str], int] = field(default_factory=dict)
 
 
 @dataclass
@@ -149,6 +150,58 @@ def decide(snap: Snapshot) -> list[Action]:
             _reset_loop(mem, key, keep=("wait_until",))
             continue
 
+        if t.conflicted:
+            if t.hitl:
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name, "merge-conflict",
+                    "the merge into base conflicts and is left in progress; resolve it "
+                    "in the base worktree (fix the files, git add, git commit). The "
+                    "branch is kept so the work is not lost.",
+                    project=t.project, worktree=t.worktree,
+                    branch=t.branch, base=t.base,
+                ))
+                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                _reset_loop(mem, key, keep=("wait_until",))
+                continue
+
+            base_wt = state._base_worktree(Path(t.project), t.base)
+            res = state.resolution_pid(str(base_wt), t.name) if base_wt else None
+            if res is not None:
+                _reset_loop(mem, key)
+                continue
+            if snap.now - mem.resolve_at.get(key, 0) < DISPATCH_BACKOFF_S:
+                _reset_loop(mem, key)
+                continue
+            if state._base_merging(Path(t.project), t.base):
+                retries = mem.resolve_retries.get(key, 0)
+                if retries >= t.retry_cap:
+                    actions.append(Action(
+                        NEEDS_REVIEW, t.name, "merge-conflict",
+                        f"auto-resolution failed after {retries} attempt(s); resolve it "
+                        "in the base worktree (fix the files, git add, git commit)",
+                        project=t.project, worktree=t.worktree,
+                        branch=t.branch, base=t.base,
+                    ))
+                    mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                    _reset_loop(mem, key, keep=("wait_until",))
+                    continue
+                actions.append(Action(
+                    RESOLVE, t.name,
+                    "merge-conflict: dispatching the AI to resolve it in base",
+                    project=t.project, base=t.base,
+                    start=str(base_wt) if base_wt else None,
+                    retry_cap=t.retry_cap,
+                ))
+                mem.resolve_at[key] = snap.now
+                mem.resolve_retries[key] = retries + 1
+                _reset_loop(mem, key)
+                continue
+
+            mem.resolve_retries.pop(key, None)
+            mem.resolve_at.pop(key, None)
+            _reset_loop(mem, key)
+            continue
+
         if snap.now < mem.wait_until.get(key, 0):
             continue
 
@@ -225,7 +278,6 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
                 detail="auto-dispatched by the scheduler",
                 project=project, base=t.base,
                 start=str(pol.start),
-                model=pol.model, agent=pol.agent,
             ))
             in_flight += 1
 
@@ -381,8 +433,7 @@ class Supervisor:
             log.append(f"-> {a.task}: no base worktree to dispatch from")
             self.mem.dispatch_backoff[key] = int(time.time()) + DISPATCH_BACKOFF_S
             return log
-        r = dispatch.start(Path(a.start), a.task or "",
-                           model=a.model, agent=a.agent)
+        r = dispatch.start(Path(a.start), a.task or "")
         for s in r.steps:
             log.append(s)
         if r.ok:
@@ -394,6 +445,21 @@ class Supervisor:
             self.mem.dispatch_backoff[key] = int(time.time()) + DISPATCH_BACKOFF_S
             self.mem.dispatch_error[key] = (r.problems[-1] if r.problems
                                             else "dispatch failed")
+        return log
+
+    def _resolve(self, a: Action) -> list[str]:
+        key = (a.project or "", a.task or "")
+        log: list[str] = []
+        if not a.start:
+            log.append(f"-> {a.task}: no base worktree to resolve in; retrying later")
+            return log
+        r = dispatch.start_resolve(Path(a.start), a.task or "")
+        for s in r.steps:
+            log.append(s)
+        if not r.ok:
+            for p in r.problems:
+                log.append(f"! {p}")
+            self.mem.resolve_at[key] = int(time.time())
         return log
 
     def apply(self, actions: list[Action]) -> list[str]:
@@ -421,6 +487,8 @@ class Supervisor:
                 log.append(f"  -> {a.task} needs-review ({a.reason})")
             elif a.kind == DISPATCH and a.project:
                 log.extend(f"  -> {l}" for l in self._dispatch(a))
+            elif a.kind == RESOLVE and a.project:
+                log.extend(f"  -> {l}" for l in self._resolve(a))
             elif a.kind == VERIFY:
                 self._verify(a)
                 log.extend(f"  -> {l}" for l in self._verify_log)

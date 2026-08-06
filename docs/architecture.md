@@ -24,7 +24,7 @@ backlog file. Nothing can drift because there is nothing to drift from.
 | dirty / diff | `git status --porcelain` in the worktree; `rev-list --count base..branch` |
 | session state | the shared server: `/session?directory=<worktree>` |
 | dispatch alive | `/proc` — the process whose cmdline is `opencode run … --dir <worktree>` |
-| dispatch orchestrated | `/proc` — a `opencode run … --title orch:<task> …` process: one the daemon or CLI dispatched |
+| dispatch orchestrated | `/proc` — such a process **with no controlling terminal**: one the daemon or CLI started detached |
 | which projects exist | a live scan of `$HOME` and `/mnt` (env `ORCH_ROOTS`) for `.orchestration/` dirs |
 | retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
 
@@ -76,10 +76,11 @@ function of a snapshot, so every branch above is testable.
 sitting inside a long-running tool shows up idle. The reliable signal for **orchestrated**
 agents — the ones `orch task start` or the scheduler spawned — is the run process
 itself: `opencode run` stays alive for the whole agent loop and exits when it is done.
-The daemon marks those with the title `orch:<task>` and treats the process as the agent
-working. A human-attached client (no such title) is not the agent working, so the daemon
-settles on session state alone; the `orch:` title is the human-switch for what "busy"
-means.
+Orch spawns those **detached** (`start_new_session`, stdin from `/dev/null`), so a run
+process is orchestrated when it matches the worktree **and** has no controlling
+terminal — a process property read from `/proc`, not a title. A human-attached client
+(one running in a terminal) is not the agent working, so the daemon settles on session
+state alone; the process's tty is the human-switch for what "busy" means.
 
 Per claimed task, each cycle:
 
@@ -200,8 +201,10 @@ ungated project.
 - `hooks/session-idle` — the gate: verify, and on success commit the work. The daemon
   fires it on settle; the CLI fires it via `gate-run`.
 - Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
-  `pre-branch-delete`, `post-task-cleanup`.
-- `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`.
+  `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
+  `hooks/*.sample` references for all five — inert until copied to the real name,
+  made executable, and committed.
+- `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`, `scheduler`.
 
 Two dispatchers fire hooks from one directory under one env-var contract
 (`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the CLI fires
@@ -215,22 +218,28 @@ task-lifecycle events, the daemon fires `session-idle`.
 4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
 5. CLI runs `hooks/post-task-create` from the new worktree.
 6. CLI refuses ungated work (no committed gate) unless `--allow-ungated`.
-7. CLI dispatches into the shared server, marking the session with the title
-   `orch:<task>`:
+7. CLI dispatches into the shared server, **detached** (its own session, stdin from
+   `/dev/null`) — that detached start is what marks the process as an orchestrated
+   agent, so the daemon can find it by "matching the worktree, no controlling tty":
 
    ```
-   opencode run --attach $URL --dir <worktree> --format json --title orch:<task> [-m model] "<prompt>"
+   opencode run --attach $URL --dir <worktree> --format json --title <name> "<prompt>"
    ```
 
 The dispatch process exiting is not the task finishing. Completion is derived later
 from the worktree state, by the daemon.
+
+`orch task add <name> --assist "<intent>"` drafts the spec with a one-shot opencode
+agent (attached to the shared server, editing `tasks/<name>/task.md` in place). It
+never claims or dispatches the task — the human reviews and commits the draft. It is
+spec-writing help, not automation: model and wording stay opencode's and the human's.
 
 ## Flow A′ — the scheduler
 
 The daemon can dispatch `todo` tasks itself. A project opts in via `.orchestration/config.json`:
 
 ```json
-"scheduler": { "enabled": true, "maxConcurrent": 1, "model": "opencode/…" }
+"scheduler": { "enabled": true, "maxConcurrent": 1 }
 ```
 
 Each cycle, per project, the daemon fills free slots (claimed, in-flight tasks count
@@ -259,6 +268,17 @@ auto-grant a task.
    agent to work again. This is bounded by `gate.retryCap`, tracked in memory.
 5. **Cap spent** → `needs-review` (`retries-exhausted`). No gate → `needs-review`
    (`no-gate-configured`), because absence of checks must never be a pass.
+6. **Merge conflicts** → the daemon leaves the merge **in progress** (so the state is
+   derivable: the scan sees `MERGE_HEAD` and reads the task as
+   `needs-review` (`merge-conflict`)) and never re-runs it. **Who resolves follows
+   `hitl`**: a human resolves a `hitl: true` task in the base worktree
+   (`git add`/`git commit`); a `hitl: false` task gets its own agent dispatched into
+   the base worktree (`opencode run --title <name>-merge-conflict`) to resolve and
+   commit, bounded by the same `retryCap` before it escalates to a human. Once the
+   merge lands either way, the branch is an ancestor of base and the daemon's no-op
+   path archives the task. A conflicted task is never re-gated, re-merged, or torn
+   down; the resolution agent is detected by worktree + task title so a task agent in
+   a sibling worktree is never mistaken for it.
 
 The agent may assert it is done; the gate verifies and commits. Neither side can
 declare success alone — and there is no side inside the agent's server that reports
@@ -285,6 +305,8 @@ logs it. `orch` knows nothing about phones, Termux, or notify add-ons — it onl
 
 - `orch task list` renders the scan — blocked sessions and every `needs-review`
   task (`--json` for machines).
+- `orch task answer <name> allow|deny` replies to the blocked permission (or the
+  answer text, for a question) over the shared server, unblocking the agent directly.
 - The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
 
 The phone add-on (`~/stuff/phone-approval` — `notify-phone` → Termux, plus the
@@ -329,7 +351,7 @@ history store any more.
 
 **Deferred, with nothing built on either:**
 - Routing `needs-review` onwards or unblocking a parent agent. (The "human needed"
-  signal exists — `orch observe` exit code/JSON and the daemon journal — and the
-  phone add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
+  signal exists — `orch task list --json` and the daemon journal — and the phone
+  add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
 - Global concurrency limits across projects (per-project `scheduler.maxConcurrent`
   exists today; a machine-wide budget is a future daemon setting).

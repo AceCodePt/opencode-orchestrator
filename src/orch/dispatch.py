@@ -226,7 +226,7 @@ def dispatch_command(p: Plan, url: str, json_stream: bool = True) -> list[str]:
         cmd += ["-m", p.model]
     if p.agent:
         cmd += ["--agent", p.agent]
-    cmd += ["--title", f"orch:{p.task}", p.prompt]
+    cmd += ["--title", p.task, p.prompt]
     return cmd
 
 
@@ -234,6 +234,60 @@ def log_path(p: Plan) -> Path:
     d = server.state_dir() / "tasks"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{p.task}.jsonl"
+
+
+RESOLVE_PROMPT = (
+    "A merge into the base branch is in progress and conflicts. Resolve every "
+    "conflict marker in this worktree so the tree is coherent, then commit the "
+    "resolution with `git add -A && git commit`. Leave the worktree clean. Do "
+    "not add unrelated changes."
+)
+
+
+def resolve_command(base_wt: Path, task: str, url: str) -> list[str]:
+    return [
+        "opencode", "run", "--attach", url, "--dir", str(base_wt),
+        "--format", "json", "--title", f"{slug(task)}-merge-conflict",
+        RESOLVE_PROMPT,
+    ]
+
+
+def resolve_log_path(task: str) -> Path:
+    d = server.state_dir() / "tasks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{slug(task)}.merge.jsonl"
+
+
+def start_resolve(base_wt: Path, task: str) -> Result:
+    """Spawn an agent to resolve <task>'s merge conflict in the base worktree,
+    which is mid-merge (MERGE_HEAD set). The agent must resolve and commit."""
+    result = Result(ok=True)
+    try:
+        srv = server.current()
+    except (RuntimeError, TimeoutError, OSError) as e:
+        return result.fail(f"could not reach the shared server: {e}")
+    if srv is None:
+        return result.fail("no shared server is running, so nothing to attach to")
+
+    cmd = resolve_command(base_wt, task, srv.url)
+    out = resolve_log_path(task)
+    handle = open(out, "wb", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(base_wt), stdout=handle,
+            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        handle.close()
+        return result.fail(f"could not spawn the resolution agent: {e}")
+    finally:
+        handle.close()
+
+    result.pid = proc.pid
+    result.step(f"resolution agent pid={proc.pid} resolving {slug(task)} in {base_wt}")
+    result.step(f"events -> {out}")
+    return result
 
 
 def start(
@@ -260,8 +314,8 @@ def start(
     if branch_exists(Path(p.project), p.branch):
         return result.fail(
             f"{p.task} is already claimed: branch {p.branch} exists in {p.project}. "
-            f"A branch is the claim. Use `orch observe` to see it, or `orch task "
-            f"reset` after confirming it is dead."
+            f"A branch is the claim. Use `orch task list` to see it, or `orch "
+            f"task reset` after confirming it is dead."
         )
 
     if dry_run:
@@ -338,6 +392,6 @@ def start(
     result.step(f"dispatched pid={proc.pid}, events -> {out}")
     result.step(
         "completion is NOT this process exiting: the daemon settles on a clean, "
-        "committed, diffing branch. Watch `orch observe`."
+        "committed, diffing branch. Watch `orch task list`."
     )
     return result

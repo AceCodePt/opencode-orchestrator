@@ -109,6 +109,16 @@ def abort(port: int, session_id: str) -> Any:
     return post(port, f"/session/{session_id}/abort")
 
 
+def reply_permission(port: int, session_id: str, permission_id: str,
+                     response: str, remember: bool = False) -> Any:
+    return post(port, f"/session/{session_id}/permissions/{permission_id}",
+                {"response": response, "remember": remember})
+
+
+def reply_question(port: int, request_id: str, answers: Any) -> Any:
+    return post(port, f"/question/{request_id}/reply", {"answers": answers})
+
+
 def prompt_async(port: int, session_id: str, text: str) -> Any:
     return post(port, f"/session/{session_id}/prompt_async",
                 {"parts": [{"type": "text", "text": text}]})

@@ -77,13 +77,15 @@ in one source file has one place to check.
 - **"Busy" is the orchestrated run process, not the session status.** `/session/status`
   only lists sessions streaming tokens, so an agent inside a long-running tool looks
   idle. `opencode run` stays alive for the whole agent loop and exits when done, so the
-  daemon treats a live `--title orch:<task>` process as the agent working and holds
-  settling until it exits — no premature teardown of a slow agent. A human-attached
-  client carries no `orch:` title and is ignored for settling (the session is the
-  truth). A run client stuck alive past `MAX_ORCHESTRATED_S` is escaped, so it can
-  never stall a task forever. This restores the original dispatch-process signal that
-  the earlier "session idle is always the truth" fix removed after misreading a
-  5-second SIGTERM grace as a lingering client.
+  daemon treats a live **detached** `opencode run` process in the worktree as the agent
+  working and holds settling until it exits — no premature teardown of a slow agent.
+  Detached means `start_new_session` with stdin from `/dev/null`, read from
+  `/proc` (no controlling terminal) — a process property, not a title. A human-attached
+  client (one running in a terminal) is not the agent working and is ignored for
+  settling (the session is the truth). A run client stuck alive past
+  `MAX_ORCHESTRATED_S` is escaped, so it can never stall a task forever. This restores
+  the original dispatch-process signal that the earlier "session idle is always the
+  truth" fix removed after misreading a 5-second SIGTERM grace as a lingering client.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
@@ -101,6 +103,11 @@ in one source file has one place to check.
   knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch by polling
   `orch task list --json` or tailing the journal — the coupling points the right
   way, so adding a notifier costs orch nothing.
+- **The human answers a block through the CLI, not through orch's memory.**
+  `orch task answer <name> allow|deny` (or a question's text) posts to the shared
+  server's permission/question endpoint for the pending request the scan already
+  surfaced. It is a human act against the live server, not stored state; the daemon
+  notices the unblock on its next scan.
 
 ## `dispatch.py`
 
@@ -111,14 +118,15 @@ in one source file has one place to check.
   verify the gate is committed → only then dispatch.
 - **No gate is a refusal, not a warning.** Absence of a gate is not a pass; a
   dispatcher that proceeds would break the invariant.
-- **Dispatch is detached** (`start_new_session`): it must survive the shell that
-  started it and must not die from a Ctrl-C meant for the CLI.
+- **Dispatch is detached** (`start_new_session`, stdin from `/dev/null`): it must
+  survive the shell that started it and must not die from a Ctrl-C meant for the CLI —
+  and the detachment doubles as the orchestration marker.
 - **`--format json` makes the first leg of a run machine-readable**, but the dispatch
   exit code is never task completion — completion is derived from the worktree.
-- **The session title is the orchestration marker.** Dispatches get `--title orch:<task>`.
-  It is the exact token `dispatch_pid` requires before a run process counts as the
-  agent working, and it is the same token `_kill_dispatch` uses to find the right
-  process at teardown. Human-attached runs pick their own title and are never matched.
+- **"Orchestrated" is a process property, not a title.** `dispatch_pid` counts a run
+  process as the agent working only if it also has no controlling terminal (read from
+  `/proc`) — exactly how orch starts it. A human-attached run in a terminal is never
+  matched. `_kill_dispatch` finds the same process by worktree alone at teardown.
 
 ## `gate.py`
 
@@ -155,9 +163,16 @@ in one source file has one place to check.
 - **The archive is `git mv tasks/<name>/task.md archive/<name>/task.md` + a commit.**
   The spec survives, the merge commit is the log, and the active `tasks/` tree stays
   light. `git mv` needs the destination directory to exist first.
-- **The merge is `--no-ff` and a conflict aborts cleanly**, leaving the worktree and
-  branch for a human; `task merge` re-runs it after resolution, and the daemon backs
-  off for a while so it does not retry the conflict every cycle.
+- **The merge is `--no-ff` and a conflict is left in progress, never silently retried.**
+  On conflict the daemon does not abort: `MERGE_HEAD` stays, the scan derives the task
+  as `needs-review (merge-conflict)`, and the daemon backs off instead of re-running
+  the merge every cycle. **Resolution follows `hitl`**: a human resolves a `hitl: true`
+  task in the base worktree; a `hitl: false` task gets an agent dispatched into the
+  base worktree to resolve and commit, bounded by `retryCap` before it escalates to a
+  human. Either way, once the merge lands the branch is merged into base and the
+  no-op path archives the task. The resolution agent is detected by base-worktree path
+  **and** task title, because the base worktree is shared with every task. `task merge`
+  still re-runs a merge after a human has aborted or fixed one.
 - **`remove_task` and `reset_task` force-delete the branch** — they are explicit
   removal acts (a no-op task produced nothing; a human decided to discard). Only
   `merge_and_cleanup` uses `-d`, preserving "a `-d` refusal means real unmerged work".
@@ -174,6 +189,11 @@ in one source file has one place to check.
   feature branch is not dispatchable, and hiding that would be a silent surprise.
 - **Names go through `slug`** so the directory and the branch cannot disagree about
   what the task is called.
+- **`--assist` drafts, it never claims.** A one-shot opencode agent rewrites
+  `tasks/<name>/task.md` from a one-line intent, attached to the shared server, in
+  the worktree where the spec lives. It does not create a branch, run hooks, or
+  dispatch — the human reviews and commits, so assist lowers the cost of a good spec
+  without removing the human from the loop.
 
 ## `harness.py`
 

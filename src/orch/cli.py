@@ -9,6 +9,7 @@ from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import doctor as doctor_mod
 from . import gate as gate_mod
+from . import harness
 from . import init as init_mod
 from . import server as server_mod
 from . import state
@@ -221,8 +222,21 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
+    if args.assist and len(args.name) != 1:
+        print("--assist drafts one spec, so it needs exactly one task name",
+              file=sys.stderr)
+        return 2
     r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto)
     print(tasks_mod.render(r))
+    if args.assist and r.created:
+        task_name = dispatch_mod.slug(args.name[0])
+        rel = tasks_mod.task_rel(task_name)
+        a = tasks_mod.assist_spec(start, task_name, args.assist)
+        print(f"  {rel}:")
+        for n in a.notes:
+            print(f"    {'! ' if not a.ok else '  '}{n}")
+        if not a.ok:
+            return 1
     return 0 if r.ok else 2
 
 
@@ -245,6 +259,71 @@ def cmd_task_merge(args: argparse.Namespace) -> int:
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
     return 0 if r.ok else 1
+
+
+def cmd_task_answer(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
+        return 2
+    st = server_mod.status()
+    port = (st.get("port") if st.get("running")
+            and not st.get("unresponsive") else None)
+    if not port:
+        print("no shared server; `orch server start` first", file=sys.stderr)
+        return 2
+    tasks = proj.scan(port)
+    t = next((x for x in tasks if x.name == args.name), None)
+    if t is None:
+        print(f"no such task: {args.name}", file=sys.stderr)
+        return 2
+    if not t.blocked:
+        print(f"{args.name} is not blocked (status {t.status})", file=sys.stderr)
+        return 1
+    b = (next((x for x in t.blocked if x.request_id == args.request), None)
+         if args.request else t.blocked[0])
+    if b is None:
+        print(f"no pending request {args.request}", file=sys.stderr)
+        return 2
+    try:
+        if b.kind == "question":
+            harness.reply_question(port, b.request_id, [{"value": args.reply}])
+            print(f"answered question {b.request_id} for {args.name}")
+        else:
+            reply = args.reply.lower()
+            if reply not in ("allow", "deny"):
+                print("a permission takes `allow` or `deny`", file=sys.stderr)
+                return 2
+            harness.reply_permission(port, b.session_id, b.request_id, reply,
+                                     remember=args.remember)
+            print(f"{reply}ed permission {b.request_id} for {args.name}")
+    except Exception as e:  # noqa: BLE001
+        print(f"could not answer {b.request_id}: {e}", file=sys.stderr)
+        return 1
+    if len(t.blocked) > 1:
+        print(f"{len(t.blocked) - 1} more pending request(s); pass --request <id> "
+              "to answer a specific one", file=sys.stderr)
+    return 0
+
+
+def cmd_task_import(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    if args.file == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(args.file).read_text()
+        except OSError as e:
+            print(f"could not read {args.file}: {e}", file=sys.stderr)
+            return 2
+    items = tasks_mod.parse_items(text)
+    if not items:
+        print("no task lines found", file=sys.stderr)
+        return 2
+    r = tasks_mod.import_specs(start, items, auto=args.auto)
+    print(tasks_mod.render(r))
+    return 0 if r.ok else 2
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -435,6 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--auto", action="store_true",
                     help="let the scheduler pick this task; by default a task "
                          "needs a human to start it")
+    ta.add_argument("--assist", metavar="DESCRIPTION",
+                    help="draft the spec with an opencode agent from this "
+                         "intent; you review and commit it")
     ta.set_defaults(func=cmd_task_add)
 
     tm = tsub.add_parser("merge",
@@ -442,6 +524,26 @@ def build_parser() -> argparse.ArgumentParser:
     tm.add_argument("name")
     tm.add_argument("-C", "--directory")
     tm.set_defaults(func=cmd_task_merge)
+
+    ta2 = tsub.add_parser("answer",
+                          help="answer a blocked permission or question for a task")
+    ta2.add_argument("name")
+    ta2.add_argument("reply",
+                     help="allow|deny for a permission; the answer text for a question")
+    ta2.add_argument("-C", "--directory")
+    ta2.add_argument("--request", help="answer a specific pending request id")
+    ta2.add_argument("--remember", action="store_true",
+                     help="remember a permission decision, not just this once")
+    ta2.set_defaults(func=cmd_task_answer)
+
+    ti = tsub.add_parser("import",
+                         help="create task specs from a list file (or - for stdin)")
+    ti.add_argument("file", help="path to a list file, or - to read stdin")
+    ti.add_argument("-C", "--directory",
+                    help="write into this worktree instead of the current one")
+    ti.add_argument("--auto", action="store_true",
+                    help="mark every imported spec scheduler-eligible (hitl: false)")
+    ti.set_defaults(func=cmd_task_import)
 
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")

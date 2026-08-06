@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import pty
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -208,6 +210,54 @@ def test_default_roots_include_home_and_mnt() -> None:
         else:
             os.environ.pop("ORCH_ROOTS", None)
     print("ok: default roots are $HOME and /mnt")
+
+
+def test_detached_detects_orch_spawned_processes() -> None:
+    p = subprocess.Popen(["sleep", "30"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    time.sleep(0.2)
+    try:
+        assert state._detached(p.pid), "orch starts agents detached (no tty)"
+    finally:
+        p.kill()
+    print("ok: a detached process (orch-spawned) is detected")
+
+
+def test_detached_excludes_a_pty_process() -> None:
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp("sleep", ["sleep", "30"])
+    time.sleep(0.2)
+    try:
+        assert not state._detached(pid), "a human's session has a controlling tty"
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+        os.close(fd)
+    print("ok: a process with a controlling tty is not orchestrated")
+
+
+def test_scan_marks_a_mid_merge_conflict_as_needs_review() -> None:
+    from orch import merge as merge_mod
+    root, tmp = _repo()
+    _task(root, "a-task")
+    wt = _claim(root, "a-task")
+    (wt / "task.py").write_text("x = 1\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "work")
+    (root / "task.py").write_text("x = 2\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "conflict")
+    r = merge_mod.merge_and_cleanup(root, "a-task", "a-task", wt, "main")
+    assert r.conflicted, "the merge must be left in progress"
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert t.conflicted, "the scan must derive the conflict from MERGE_HEAD"
+    assert t.status == state.NEEDS_REVIEW, t.status
+    assert any("merge-conflict" in n for n in t.notes), t.notes
+    tmp.cleanup()
+    print("ok: a mid-merge conflict is derived by the scan as needs-review")
 
 
 def main() -> int:

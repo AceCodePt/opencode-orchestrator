@@ -79,6 +79,31 @@ it, put the project's real checks in `hooks/session-idle` above the commit block
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
+
+Reference samples for the task-lifecycle hooks live in `hooks/*.sample` — inert until
+you copy one to its real name, make it executable, and commit it.
+"""
+
+TASK_HOOKS = {
+    "pre-task-create": "before the task worktree is created, from the dispatching "
+                       "worktree; non-zero refuses the dispatch",
+    "post-task-create": "right after the task worktree is created, from the new "
+                        "worktree",
+    "pre-task-cleanup": "before the task worktree is removed at teardown",
+    "post-task-cleanup": "after the worktree and branch are gone",
+    "pre-branch-delete": "before the task branch is deleted",
+}
+
+
+TEMPLATE_HOOK_SAMPLE = """#!/usr/bin/env bash
+# {name}.sample - {when}.
+# Copy this file to hooks/{name}, make it executable, and commit it to enable.
+# Fired with TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME  BASE_BRANCH.
+# Exit 0 lets the event proceed; non-zero aborts it and the failure is logged.
+
+set -uo pipefail
+echo "{name} (sample): no-op"
+exit 0
 """
 
 
@@ -155,7 +180,16 @@ def run(start: Path, force: bool = False, version: str = "0",
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
     write(hooks / "session-idle", TEMPLATE_SESSION_IDLE, executable=True,
           protected=True)
+    for name, when in TASK_HOOKS.items():
+        write(hooks / f"{name}.sample", TEMPLATE_HOOK_SAMPLE.format(name=name,
+                                                                    when=when))
     write(orch / ".version", version + "\n")
+
+    notes.append(
+        "hooks/*.sample hold reference templates for the task-lifecycle events "
+        "(pre/post-task-create, pre/post-task-cleanup, pre-branch-delete). Copy one "
+        "to its real name to enable it; a project with no database needs none."
+    )
 
     notes.append(
         "the scaffolded session-idle hook exits non-zero on purpose: an unconfigured "

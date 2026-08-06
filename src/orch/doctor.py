@@ -115,6 +115,12 @@ def check_project(cwd: Path) -> list[Check]:
             Check(OK, "task hooks absent (fine)",
                   ", ".join(missing_task) + " - a project with no database needs none")
         )
+    samples = sorted(p.name for p in hooks_dir.glob("*.sample"))
+    if samples:
+        out.append(
+            Check(OK, "hook samples present (inert)",
+                  ", ".join(samples) + " - copy one to its real name to enable it")
+        )
     return out
 
 

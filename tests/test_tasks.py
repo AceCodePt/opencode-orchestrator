@@ -131,6 +131,36 @@ def test_template_carries_the_hitl_front_matter() -> None:
     print("ok: task.md carries the hitl flag in its front matter; auto opts in")
 
 
+def test_assist_prompt_names_the_spec_and_the_intent() -> None:
+    p = tasks.assist_prompt("tasks/fix-auth/task.md", "the auth flow is broken")
+    assert "tasks/fix-auth/task.md" in p
+    assert "the auth flow is broken" in p
+    assert "Verification" in p and "drafting" in p
+    print("ok: the assist prompt targets the spec and carries the intent")
+
+
+def test_parse_items_strips_markdown_and_headers() -> None:
+    text = "# Backlog\n\n- fix the login\n* add a health check\n\n1. bump the version\n\n"
+    assert tasks.parse_items(text) == ["fix the login", "add a health check",
+                                       "bump the version"]
+    print("ok: import parsing strips list markers and skips headers")
+
+
+def test_import_specs_creates_slugged_prefilled_tasks() -> None:
+    root, tmp = _repo()
+    r = tasks.import_specs(root, ["Fix the login flow", "Add a health check"],
+                           auto=True)
+    assert r.ok, r.notes
+    login = root / "tasks" / "fix-the-login-flow" / "task.md"
+    health = root / "tasks" / "add-a-health-check" / "task.md"
+    assert login.is_file() and health.is_file()
+    assert "Fix the login flow" in login.read_text(), "Context holds the source line"
+    assert "hitl: false" in login.read_text(), "--auto makes it scheduler-eligible"
+    assert any("COMMIT" in n for n in r.notes)
+    tmp.cleanup()
+    print("ok: import creates slugged specs with the source line in Context")
+
+
 def test_being_off_base_is_warned_about_but_not_overridden() -> None:
     main, feature, tmp = _project()
     r = tasks.add_many(feature, ["urgent-fix"])

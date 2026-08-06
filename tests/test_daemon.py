@@ -160,7 +160,7 @@ def test_a_non_orchestrated_attach_is_ignored_for_settling() -> None:
     acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
                                tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
-    print("ok: a human-attached client (no orch: title) does not block settling - "
+    print("ok: a human-attached client (in a terminal) does not block settling - "
           "the session state is the truth")
 
 
@@ -424,6 +424,118 @@ def test_scheduler_skips_hitl_tasks() -> None:
     acts = daemon.decide(_snap(tasks=[auto], mem=mem, policies={auto.project: pol}))
     assert _kinds(acts) == [daemon.DISPATCH], _kinds(acts)
     print("ok: the scheduler leaves hitl tasks for a human and picks the rest")
+
+
+def test_hitl_conflicted_task_is_reviewed_not_reverified() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=True, conflicted=True,
+              hitl=True)
+    snap = _snap(tasks=[t], mem=mem)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert "merge-conflict" in acts[0].reason, acts[0].reason
+    assert daemon.VERIFY not in _kinds(acts), \
+        "a conflicted task must not be re-gated or re-merged"
+    print("ok: a hitl conflicted task is routed to needs-review, never re-verified")
+
+
+def _conflicted_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
+    from orch import merge as merge_mod
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name) / "wt"
+    root.mkdir(parents=True)
+    for cmd in (["init", "-q", "-b", "main"],):
+        subprocess.run(["git", *cmd, str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+    (root / "seed").write_text("x")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "seed"], check=True)
+    orch = root / ".orchestration"
+    orch.mkdir(parents=True)
+    (orch / "config.json").write_text('{"baseBranch": "main"}\n')
+    d = root / "tasks" / "task-a"
+    d.mkdir(parents=True)
+    (d / "task.md").write_text("---\nhitl: false\n---\n\n# Task A\n\nDo it.\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "task.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "work"], check=True)
+    (root / "task.py").write_text("x = 2\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "conflict"], check=True)
+    r = merge_mod.merge_and_cleanup(root, "task-a", "task-a", wt, "main")
+    assert r.conflicted, "the merge must be left mid-merge"
+    return root, wt, tmp
+
+
+def test_auto_conflicted_task_dispatches_a_resolution_agent() -> None:
+    root, _wt, tmp = _conflicted_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    assert t.conflicted and not t.hitl, "the task must be auto and conflicted"
+    mem = daemon.LoopState()
+    snap = _snap(now=NOW, tasks=[t], mem=mem)
+    acts = daemon.decide(snap)
+    assert _kinds(acts) == [daemon.RESOLVE], _kinds(acts)
+    key = (str(t.project), t.name)
+    assert snap.mem.resolve_retries.get(key) == 1
+    assert acts[0].start == str(proj.base_worktree)
+    assert "merge-conflict" in acts[0].reason
+    # while the backoff for a fresh resolution is active, do not re-dispatch
+    acts2 = daemon.decide(_snap(now=NOW + 1, tasks=[t], mem=mem))
+    assert daemon.RESOLVE not in _kinds(acts2), _kinds(acts2)
+    tmp.cleanup()
+    print("ok: an auto conflicted task dispatches the AI to resolve, once")
+
+
+def test_auto_resolution_escalates_to_human_after_retries() -> None:
+    root, _wt, tmp = _conflicted_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    key = (str(t.project), t.name)
+    mem = daemon.LoopState()
+    mem.resolve_at[key] = NOW - daemon.DISPATCH_BACKOFF_S - 1
+    mem.resolve_retries[key] = t.retry_cap
+    acts = daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert "merge-conflict" in acts[0].reason
+    assert "auto-resolution failed" in acts[0].detail
+    tmp.cleanup()
+    print("ok: exhausted auto-resolution escalates to a human")
+
+
+def test_auto_resolved_conflict_archives_as_a_noop() -> None:
+    root, wt, tmp = _conflicted_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    # the AI resolves: fix the file and commit, completing the merge in base
+    (root / "task.py").write_text("x = 3\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "resolve"], check=True)
+    assert state._base_merging(root, "main") is None, "the merge must be complete"
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    assert not t.conflicted, "the scan must no longer report the conflict"
+    assert t.status == state.NOOP, t.status
+    mem = daemon.LoopState()
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert daemon.REMOVE in _kinds(acts), _kinds(acts)
+    assert daemon.RESOLVE not in _kinds(acts)
+    tmp.cleanup()
+    print("ok: a resolved conflict falls through to the no-op archive path")
 
 
 def main() -> int:

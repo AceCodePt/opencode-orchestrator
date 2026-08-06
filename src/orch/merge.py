@@ -18,6 +18,7 @@ class MergeResult:
     ok: bool = True
     steps: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    conflicted: bool = False
 
     def step(self, msg: str) -> None:
         self.steps.append(msg)
@@ -147,6 +148,11 @@ def merge_and_cleanup(
         return r
     r.step(f"base worktree: {base_wt} on {base}")
 
+    if state._base_merging(common, base):
+        r.fail("the base worktree is mid-merge (a conflict awaits resolution); "
+               "finish or abort that merge first")
+        return r
+
     if not wt.exists():
         r.fail(f"worktree {wt} no longer exists")
         return r
@@ -157,10 +163,20 @@ def merge_and_cleanup(
 
     code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", branch)
     if code != 0:
-        _git(base_wt, "merge", "--abort")
-        r.fail(f"merge failed: {out[-1500:]}")
-        r.fail(f"the branch {branch} was NOT merged and the worktree survives. "
-               f"Resolve the conflict, then `orch task merge {name}`.")
+        _rc, head = _git(base_wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        if _rc == 0 and head:
+            r.conflicted = True
+            r.fail(
+                "the merge into base conflicts. It is left in progress so the task "
+                "shows needs-review (merge-conflict); resolve it in the base "
+                "worktree (fix the files, git add, git commit). Once the merge "
+                "lands, the daemon archives the task."
+            )
+        else:
+            _git(base_wt, "merge", "--abort")
+            r.fail(f"merge failed: {out[-1500:]}")
+            r.fail(f"the branch {branch} was NOT merged and the worktree survives. "
+                   f"Resolve the conflict, then `orch task merge {name}`.")
         return r
     r.step(f"merged {branch} into {base}")
 
@@ -218,6 +234,11 @@ def remove_task(
         r.fail(f"no worktree on {base} found in {common}; cannot clean up without one")
         return r
     r.step(f"base worktree: {base_wt} on {base}")
+
+    if state._base_merging(common, base):
+        r.fail("the base worktree is mid-merge (a conflict awaits resolution); "
+               "finish or abort that merge first")
+        return r
 
     _remove_worktree_and_branch(common, base_wt, name, branch, wt, base, r,
                                 force_delete=True)

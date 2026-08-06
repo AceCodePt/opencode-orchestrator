@@ -110,8 +110,6 @@ def base_from_config(orch_dir: Path | None) -> str:
 class SchedulerPolicy:
     enabled: bool = False
     max_concurrent: int = 1
-    model: str | None = None
-    agent: str | None = None
     start: Path | None = None
 
 
@@ -124,8 +122,6 @@ def scheduler_from_config(orch_dir: Path | None) -> SchedulerPolicy:
     return SchedulerPolicy(
         enabled=bool(raw.get("enabled", False)),
         max_concurrent=max_conc if max_conc > 0 else 0,
-        model=raw.get("model") or None,
-        agent=raw.get("agent") or None,
     )
 
 
@@ -193,6 +189,18 @@ def _base_worktree(common: Path, base: str) -> Path | None:
     return None
 
 
+def _base_merging(common: Path, base: str) -> str | None:
+    """The sha being merged into base, if the base worktree is mid-merge (a
+    conflict was left for a human). None otherwise."""
+    bwt = _base_worktree(common, base)
+    if bwt is None:
+        return None
+    rc, out = _git(bwt, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+    if rc != 0 or not out:
+        return None
+    return out.strip()
+
+
 def _names_in(common: Path, base: str, rel: str) -> set[str]:
     rc, out = _git(common, "ls-tree", "-r", "--name-only", base, "--", rel)
     if rc != 0:
@@ -246,9 +254,6 @@ def _diff(common: Path, base: str, branch: str) -> bool:
     return rc == 0 and out.strip() not in ("", "0")
 
 
-DISPATCH_MARKER = "orch:"
-
-
 def _pids() -> list[int]:
     _rc, out = _cmd(["pgrep", "-x", "opencode"])
     return [int(x) for x in out.split() if x.isdigit()]
@@ -262,16 +267,52 @@ def _cmdline(pid: int) -> str:
         return ""
 
 
-def dispatch_pid(worktree: str, marker: str | None = None) -> int | None:
+def _detached(pid: int) -> bool:
+    """True if the process has no controlling terminal — how orch starts an
+    agent (start_new_session, stdin from /dev/null), and not how a human runs
+    one in a shell."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            raw = fh.read().decode("utf-8", "replace")
+        fields = raw.rsplit(")", 1)[1].split()
+        if len(fields) > 4 and fields[4].strip() == "0":
+            return True
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        if os.readlink(f"/proc/{pid}/fd/0") == "/dev/null":
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def dispatch_pid(worktree: str, orchestrated: bool = False) -> int | None:
     wt = os.path.realpath(worktree)
-    need = f"--title {marker}" if marker else None
     for pid in _pids():
         cmd = _cmdline(pid)
         if " run " not in cmd:
             continue
-        if need and need not in cmd:
+        if orchestrated and not _detached(pid):
             continue
         if wt in cmd:
+            return pid
+    return None
+
+
+def resolution_pid(base_worktree: str, task: str) -> int | None:
+    """The pid of the agent resolving <task>'s merge conflict in the base
+    worktree, if one is running. The base worktree is shared, so the match is
+    on the worktree path AND the task-specific title, not just the path."""
+    wt = os.path.realpath(base_worktree)
+    marker = f"{task}-merge-conflict"
+    for pid in _pids():
+        cmd = _cmdline(pid)
+        if " run " not in cmd:
+            continue
+        if not _detached(pid):
+            continue
+        if wt in cmd and marker in cmd:
             return pid
     return None
 
@@ -303,6 +344,7 @@ class TaskState:
     dispatch_alive: bool = False
     dispatch_orchestrated: bool = False
     hitl: bool = False
+    conflicted: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -318,6 +360,8 @@ class TaskState:
         if self.session in (SESSION_BUSY, SESSION_BLOCKED):
             return RUNNING
         if not self.worktree or not os.path.isdir(self.worktree):
+            return NEEDS_REVIEW
+        if self.conflicted:
             return NEEDS_REVIEW
         if self.dirty:
             return NEEDS_REVIEW
@@ -336,6 +380,7 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     cap = int(_read_config(proj.orch_dir).get("gate", {}).get("retryCap") or 3)
 
     names = sorted(set(declared) | set(branches) | set(archived))
+    merging = _base_merging(common, base)
     out: list[TaskState] = []
     for name in names:
         claimed = name in branches
@@ -348,6 +393,15 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
         )
         if name in declared:
             st.hitl = _hitl_from(_front_matter(common, base, name))
+        if merging and claimed and name in branches:
+            _rc, sha = _git(common, "rev-parse", name)
+            if _rc == 0 and sha and sha.strip() == merging:
+                st.conflicted = True
+                st.notes.append(
+                    "merge-conflict: the merge into base is in progress. Resolve "
+                    "it in the base worktree (fix the files, git add, git commit). "
+                    "Once merged, the daemon archives the task."
+                )
         if wt is not None and wt.is_dir():
             st.dirty = _dirty(wt)
             st.diff = _diff(common, base, name)
@@ -359,7 +413,7 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
                     st.blocked = tf.blocked
             st.dispatch_alive = dispatch_pid(str(wt)) is not None
             st.dispatch_orchestrated = dispatch_pid(str(wt),
-                                                     marker=DISPATCH_MARKER) is not None
+                                                     orchestrated=True) is not None
         elif claimed:
             st.notes.append("worktree missing")
         out.append(st)
