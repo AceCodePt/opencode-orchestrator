@@ -4,7 +4,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Harness** | opencode. Supplies the TUI, agents, sessions, HTTP API, event bus. |
+| **Harness** | opencode. Supplies agents, sessions, HTTP API, event bus. |
 | **Project** | A git repo (bare + worktrees, or plain). Owns its own code, checks, config. |
 | **Task** | A unit of work with a spec, dispatched into its own worktree with its own agent. |
 | **`orch`** | The global tool: one CLI and one daemon per machine. |
@@ -123,7 +123,7 @@ unambiguous: the gate never passed.
 | What work exists, and what does it mean? | **the base branch** — `tasks/*/task.md` as committed there |
 | What is claimed? | **git refs** — `refs/heads/<name>` |
 | Is the work committed and passing? | **the worktree** — clean + diff + the daemon's own gate run |
-| What is running right now? | **live** — `/proc`, `ss`, the shared server |
+| What is running right now? | **live** — `/proc`, the shared server |
 | How long since… (retries, settle) | **the daemon's memory** — restart-losing by design |
 
 ## Separation of concerns
@@ -131,7 +131,7 @@ unambiguous: the gate never passed.
 ```
                           ┌──────────────────────────────┐
     phone / tailnet ──────│  orchestrator daemon         │
-                          │  observe · decide · verify   │
+                          │  settle · decide · verify    │
                           │  retrigger · merge · archive │
                           └───────┬──────────────┬───────┘
                                   │ facts        │ actions
@@ -151,7 +151,7 @@ unambiguous: the gate never passed.
                           └──────────────────────┘
 
    git    ── intent and status: tasks/, archive/, branches, worktrees
-   /proc  ── runtime facts: pids, cwd, tmux, ss
+   /proc  ── runtime facts: pids, cmdlines
    memory ── the daemon's retries, settle timers, alert dedup (restart-losing)
 ```
 
@@ -188,7 +188,6 @@ string cannot do this job.
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
 | `orch task merge <name>` | re-run a merge after a conflict |
-| `orch observe` | live process/server state, read-only |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch gate-run` | run the committed gate here and say why |
 
@@ -241,6 +240,14 @@ from, is skipped. Failed dispatches back off (60s) and the daemon's journal reco
 — `dispatch_error` is in-memory only. The scheduler never dispatches ungated work —
 `--allow-ungated` is a human flag only.
 
+**You pick which tasks run; the machine does the work.** A task needs a human by
+default — `hitl: true` is the default in the front matter (the gray-matter block at
+the top of `tasks/<name>/task.md`) and the scheduler skips it until a human starts it
+(`orch task start`). To let the machine drain a task unattended, opt it in with
+`hitl: false` (`orch task add --auto`). The flag is read from the **committed** copy
+on base — never the working tree — so neither an agent nor an uncommitted edit can
+auto-grant a task.
+
 ## Flow B — the gate loop
 
 1. The task settles (session idle or gone; an orchestrated run process is held until
@@ -267,8 +274,7 @@ a verdict at all.
   gate is the daemon's own run, so a branch that merges after a crash is verified
   work, not an unexamined claim.
 - **Kill by pid, never by pattern.** The dispatch process is identified by its exact
-  cmdline (`opencode run … --dir <worktree>`) and killed by that pid. tmux sessions
-  end on their own when their process dies.
+  cmdline (`opencode run … --dir <worktree>`) and killed by that pid.
 
 ## Flow D — routing, and the human switch
 
@@ -277,13 +283,13 @@ on a permission or a question, the daemon raises `alert` (deduped by request id)
 logs it. `orch` knows nothing about phones, Termux, or notify add-ons — it only
 *exposes* that a human is needed, through signals any consumer can read:
 
-- `orch observe` exits non-zero and lists the blocked request when any agent needs a
-  human (`--json` for machines).
+- `orch task list` renders the scan — blocked sessions and every `needs-review`
+  task (`--json` for machines).
 - The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
 
 The phone add-on (`~/stuff/phone-approval` — `notify-phone` → Termux, plus the
 approve/deny loop) integrates **with** `orch` the other way around: it polls
-`orch observe` or tails the daemon journal, and only it knows about the phone.
+`orch task list` or tails the daemon journal, and only it knows about the phone.
 Whether a parent agent should be unblocked, or a `needs-review` task routed onwards,
 is a decision still to make — the machinery stores no verdicts, so routing will be
 built on the daemon's log + scan rather than on a verdict table.

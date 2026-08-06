@@ -5,7 +5,11 @@ from pathlib import Path
 
 from . import dispatch, gate
 
-TEMPLATE = """# Task: {title}
+TEMPLATE = """---
+hitl: {hitl}
+---
+
+# Task: {title}
 
 ## Metadata
 
@@ -55,8 +59,8 @@ def task_rel(name: str) -> str:
     return f"tasks/{name}/task.md"
 
 
-def template(title: str) -> str:
-    return TEMPLATE.format(title=title)
+def template(title: str, hitl: bool = True) -> str:
+    return TEMPLATE.format(title=title, hitl="true" if hitl else "false")
 
 
 def off_base_note(root: Path, base: str) -> str | None:
@@ -79,6 +83,7 @@ def add_many(
     start: Path,
     names: list[str],
     title: str | None = None,
+    auto: bool = False,
 ) -> AddResult:
     result = AddResult()
 
@@ -112,7 +117,7 @@ def add_many(
             result.skipped.append(f"{rel} (already exists)")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(template(shown))
+        path.write_text(template(shown, hitl=not auto))
         result.created.append(rel)
 
     if result.created:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import dispatch, tasks  # noqa: E402
+from orch import state, tasks  # noqa: E402
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -50,11 +50,11 @@ def test_title_is_derived_from_the_slug() -> None:
 
 def test_template_carries_every_required_section() -> None:
     body = tasks.template("Fix Auth")
-    assert body.startswith("# Task: Fix Auth\n")
+    assert body.startswith("---\nhitl: true\n---\n\n# Task: Fix Auth\n")
     for section in ("## Metadata", "## Context", "## Requirements",
                     "## Verification", "## Prohibited Patterns"):
         assert section in body, section
-    print("ok: the template carries every required section")
+    print("ok: the template carries the hitl front matter and every required section")
 
 
 def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
@@ -62,7 +62,7 @@ def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
     r = tasks.add_many(root, ["fix-auth"])
     assert r.ok, r.notes
     body = (root / "tasks" / "fix-auth" / "task.md").read_text()
-    assert body.startswith("# Task: Fix Auth")
+    assert body.startswith("---\nhitl: true\n---\n\n# Task: Fix Auth")
     assert not (root / "TASKS.md").exists(), \
         "no TASKS.md is written or generated any more"
     assert any("COMMIT" in n for n in r.notes), "must say the files need committing"
@@ -114,6 +114,23 @@ def test_the_current_worktree_is_the_default_target() -> None:
     print("ok: the current worktree is the default target")
 
 
+def test_template_carries_the_hitl_front_matter() -> None:
+    manual = tasks.template("Manual Pick")
+    assert manual.startswith("---\nhitl: true\n"), manual[:40]
+    auto = tasks.template("Auto Pick", hitl=False)
+    assert "hitl: false" in auto, auto[:60]
+    main, feature, tmp = _project()
+    r = tasks.add_many(feature, ["urgent-fix"], auto=True)
+    assert r.ok, r.notes
+    body = (feature / "tasks" / "urgent-fix" / "task.md").read_text()
+    assert "hitl: false" in body, body[:60]
+    r = tasks.add_many(feature, ["manual-fix"])
+    body = (feature / "tasks" / "manual-fix" / "task.md").read_text()
+    assert "hitl: true" in body, body[:60]
+    tmp.cleanup()
+    print("ok: task.md carries the hitl flag in its front matter; auto opts in")
+
+
 def test_being_off_base_is_warned_about_but_not_overridden() -> None:
     main, feature, tmp = _project()
     r = tasks.add_many(feature, ["urgent-fix"])
@@ -134,7 +151,10 @@ def test_declared_names_reads_the_base_branch_only() -> None:
     tasks.add_many(feature, ["only-here"])
     _git(feature, "add", "-A")
     _git(feature, "commit", "-q", "-m", "task")
-    assert dispatch.declared_names(feature, "main") == ["on-base"], \
+    proj = state.Project.from_dir(feature)
+    assert proj is not None
+    declared = [t.name for t in proj.scan() if t.declared]
+    assert declared == ["on-base"], \
         "the project's task set is what base declares, not what a branch holds"
     tmp.cleanup()
     print("ok: declared names come from the base branch only")
@@ -143,10 +163,12 @@ def test_declared_names_reads_the_base_branch_only() -> None:
 def test_uncommitted_specs_are_not_declared() -> None:
     main, _feature, tmp = _project()
     tasks.add_many(main, ["not-yet"])
-    assert dispatch.declared_names(main, "main") == []
+    proj = state.Project.from_dir(main)
+    assert proj is not None
+    assert [t.name for t in proj.scan() if t.declared] == []
     _git(main, "add", "-A")
     _git(main, "commit", "-q", "-m", "task")
-    assert dispatch.declared_names(main, "main") == ["not-yet"]
+    assert [t.name for t in proj.scan() if t.declared] == ["not-yet"]
     tmp.cleanup()
     print("ok: only committed specs count as declared")
 

@@ -40,16 +40,6 @@ def test_slug() -> None:
     print("ok: slug")
 
 
-def test_task_names_reads_git_not_tasks_md() -> None:
-    root, tmp = _repo()
-    _task_file(root, "b-task")
-    _task_file(root, "a-task")
-    (root / "tasks" / "no-file").mkdir(parents=True)
-    assert dispatch.task_names(root) == ["a-task", "b-task"]
-    tmp.cleanup()
-    print("ok: task names come from task.md directories")
-
-
 def test_outside_a_worktree_is_refused() -> None:
     tmp = tempfile.TemporaryDirectory()
     p, err = dispatch.plan(Path(tmp.name), "whatever")

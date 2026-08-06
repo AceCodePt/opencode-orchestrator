@@ -34,7 +34,7 @@ diffing branch is the sign of done, and only the daemon's own gate run can produ
 ## Usage
 
 Stdlib-only Python, no install step. Agents run **headless**: one shared
-`opencode serve` hosts every worktree, and the TUI is an optional viewer.
+`opencode serve` hosts every worktree.
 
 ```bash
 bin/orch init                    # scaffold .orchestration/ (config + gate template)
@@ -50,11 +50,6 @@ bin/orch task reset <name>       # delete branch+worktree -> back to todo (a hum
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
 
-bin/orch observe                 # live state, read-only, exits 1 if you are needed
-bin/orch observe -w --json
-bin/orch attach                  # open a TUI onto the shared server, close it freely
-bin/orch events -d 30 -v         # tail SSE, then print a histogram of event types
-
 bin/orch install                 # systemd user unit, enabled, with linger
 bin/orch uninstall                # remove config-level traces, keep projects alone
 bin/orch daemon status            # is anything actually supervising
@@ -69,8 +64,7 @@ everything else still looks healthy, which is why `doctor` fails when it is miss
 
 Requires opencode **1.18.11 or newer**.
 
-`observe` and `doctor` exit non-zero when something needs a human or when the
-machinery itself is wrong, so they compose in a shell.
+`doctor` exits non-zero when the machinery itself is wrong, so it composes in a shell.
 
 ## Two things worth knowing before dispatching
 
@@ -82,7 +76,7 @@ uncommitted gate counts as no gate. `orch task start` refuses both, and `orch ga
 explains which one is wrong.
 
 **The dispatch process exiting is not the task finishing.** Completion is derived from
-the worktree state by the daemon, after the session settles. Watch `orch observe`.
+the worktree state by the daemon, after the session settles. Watch `orch task list`.
 
 **The daemon can dispatch `todo` tasks itself (opt-in).** Add a `scheduler` block to
 `.orchestration/config.json` and the daemon fills free slots with the next unclaimed
@@ -93,12 +87,14 @@ declared task, in name order:
 ```
 
 Without it, dispatching stays a human act (`orch task start`). The scheduler never
-dispatches ungated work.
+dispatches ungated work, and it never dispatches a task you didn't opt in: a task
+needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
+— `orch task add --auto` — lets the machine pick it.
 
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
-`task add`/`start`/`list`/`reset`/`archive`/`merge`, `observe`, `attach`, `events`,
+`task add`/`start`/`list`/`reset`/`archive`/`merge`,
 and the daemon — including the full loop of settle → gate → commit-on-pass → merge →
 archive, the failure loop of gate-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
@@ -121,11 +117,11 @@ committed it.
 Not built yet: routing `needs-review` onwards or unblocking a parent agent, and a
 machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
 
-When an agent needs you, `orch` *exposes* it — `orch observe` exits non-zero and
-lists blocked requests (`--json` for machines), and the daemon journal logs every
-`alert:` and `needs-review`. Notify add-ons integrate **with** `orch`, not the other
-way around: the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux)
-polls `orch observe` or tails the journal, and only it knows about the phone.
+When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
+`needs-review` tasks from the scan, and the daemon journal logs every `alert:` and
+`needs-review`. Notify add-ons integrate **with** `orch`, not the other way around:
+the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux) polls
+`orch task list --json` or tails the journal, and only it knows about the phone.
 
 Tests: `for t in tests/test_*.py; do python3 "$t"; done`.
 

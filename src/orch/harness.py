@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 MIN_VERSION = (1, 18, 11)
 
@@ -92,10 +92,6 @@ def sessions(port: int, directory: str | None = None) -> list[dict]:
     return _as_list(get(port, path))
 
 
-def todos(port: int, session_id: str) -> list[dict]:
-    return _as_list(get(port, f"/session/{session_id}/todo"))
-
-
 def _as_list(value: Any) -> list[dict]:
     if value is None:
         return []
@@ -109,35 +105,6 @@ def _as_list(value: Any) -> list[dict]:
         return out
     return []
 
-
-def events(port: int, timeout: float | None = None) -> Iterator[dict]:
-    req = urllib.request.Request(_url(port, "/event"), method="GET",
-                                 headers={"Accept": "text/event-stream"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        while True:
-            raw = r.readline()
-            if not raw:
-                return
-            line = raw.decode("utf-8", "replace").strip()
-            if not line or not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if not payload:
-                continue
-            try:
-                yield json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-
-
-def reply_permission(port: int, request_id: str, reply: str) -> Any:
-    return post(port, f"/permission/{request_id}/reply", {"reply": reply})
-
-
-def reply_question(port: int, request_id: str, answers: Any) -> Any:
-    return post(port, f"/question/{request_id}/reply", {"answers": answers})
-
-
 def abort(port: int, session_id: str) -> Any:
     return post(port, f"/session/{session_id}/abort")
 
@@ -145,42 +112,6 @@ def abort(port: int, session_id: str) -> Any:
 def prompt_async(port: int, session_id: str, text: str) -> Any:
     return post(port, f"/session/{session_id}/prompt_async",
                 {"parts": [{"type": "text", "text": text}]})
-
-
-EV_SERVER_CONNECTED = "server.connected"
-EV_SERVER_HEARTBEAT = "server.heartbeat"
-HEARTBEAT_PERIOD_S = 10.0
-
-EV_IDLE = "session.idle"
-EV_STATUS = "session.status"
-EV_ERROR = "session.error"
-EV_DIFF = "session.diff"
-EV_COMPACTED = "session.compacted"
-
-EV_PERMISSION_ASKED = ("permission.asked", "permission.v2.asked")
-EV_PERMISSION_REPLIED = ("permission.replied", "permission.v2.replied")
-EV_QUESTION_ASKED = ("question.asked", "question.v2.asked")
-EV_QUESTION_REPLIED = ("question.replied", "question.v2.replied")
-EV_QUESTION_REJECTED = ("question.rejected", "question.v2.rejected")
-
-EV_TOOL_CALLED = "session.next.tool.called"
-EV_TOOL_SUCCESS = "session.next.tool.success"
-EV_TOOL_FAILED = "session.next.tool.failed"
-EV_TOOL_PROGRESS = "session.next.tool.progress"
-
-EV_SHELL_STARTED = "session.next.shell.started"
-EV_SHELL_ENDED = "session.next.shell.ended"
-
-EV_STEP_STARTED = "session.next.step.started"
-EV_STEP_ENDED = "session.next.step.ended"
-EV_STEP_FAILED = "session.next.step.failed"
-EV_RETRIED = "session.next.retried"
-EV_TODO_UPDATED = "todo.updated"
-
-BLOCKING_EVENTS = set(EV_PERMISSION_ASKED) | set(EV_QUESTION_ASKED)
-UNBLOCKING_EVENTS = (
-    set(EV_PERMISSION_REPLIED) | set(EV_QUESTION_REPLIED) | set(EV_QUESTION_REJECTED)
-)
 
 
 @dataclass

@@ -73,6 +73,26 @@ def test_scan_lists_declared_tasks_as_todo() -> None:
     print("ok: declared tasks scan as todo")
 
 
+def test_hitl_defaults_to_true_and_comes_from_the_committed_front_matter() -> None:
+    root, tmp = _repo()
+    (root / "tasks" / "manual").mkdir(parents=True)
+    (root / "tasks" / "manual" / "task.md").write_text("# Manual\n\nDo it.\n")
+    (root / "tasks" / "auto").mkdir(parents=True)
+    (root / "tasks" / "auto" / "task.md").write_text(
+        "---\nhitl: false\n---\n\n# Auto\n\nDo it.\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "tasks")
+    by = {t.name: t for t in _proj(root).scan()}
+    assert by["manual"].hitl, "no front matter means a human must pick it"
+    assert not by["auto"].hitl, "hitl: false opts the task into the scheduler"
+    (root / "tasks" / "auto" / "task.md").write_text("# Auto\n\nDo it.\n")
+    assert not {t.name: t for t in _proj(root).scan()}["auto"].hitl, \
+        "an uncommitted working-tree edit must not count - the committed copy rules"
+    tmp.cleanup()
+    print("ok: hitl defaults to true and is read from the committed task.md "
+          "front matter, never the working tree")
+
+
 def test_scan_sees_a_claim_and_worktree() -> None:
     root, tmp = _repo()
     _task(root, "a-task")

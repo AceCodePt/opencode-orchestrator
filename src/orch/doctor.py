@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import gate, harness, server
-from .discovery import discover
 
 OK = "ok"
 WARN = "warn"
@@ -249,63 +248,18 @@ def check_gates(cwd: Path) -> list[Check]:
     return out
 
 
-def check_launch() -> list[Check]:
-    out: list[Check] = []
-    tuis = discover()
-    if not tuis:
-        out.append(Check(OK, "no hand-started TUIs", ""))
-    for t in tuis:
-        if t.observable:
-            out.append(Check(OK, f"pid {t.pid} observable", f"port {t.port} {t.cwd}"))
-        else:
-            out.append(
-                Check(WARN, f"hand-started pid {t.pid} has no --port",
-                      f"{t.cwd} cannot be inspected. Not an orchestration problem "
-                      f"any more - dispatched agents are headless servers and always "
-                      f"listen - but you cannot see this one without relaunching it")
-            )
-
-    zshrc = Path.home() / ".zshrc"
-    try:
-        body = zshrc.read_text()
-        if "opencode()" in body and "--port 0" in body:
-            out.append(Check(OK, "shell wrapper injects --port 0", str(zshrc)))
-        else:
-            out.append(
-                Check(WARN, "no shell wrapper for opencode",
-                      "hand-opened TUIs will have no port. --help says "
-                      "'--port [default: 0]' but omitting it starts no server")
-            )
-    except OSError:
-        out.append(Check(WARN, "could not read ~/.zshrc", ""))
-    return out
-
-
 def check_harness() -> list[Check]:
     out: list[Check] = []
     exe = shutil.which("opencode")
     out.append(
         Check(OK if exe else FAIL, "opencode on PATH", exe or "not found")
     )
-    for t in discover():
-        if not t.observable or t.port is None:
-            continue
-        caps = harness.capabilities(t.port)
-        if caps.too_old:
-            out.append(Check(WARN, f"pid {t.pid} version", "; ".join(caps.notes)))
-        elif caps.version:
-            out.append(
-                Check(OK, f"pid {t.pid} version",
-                      ".".join(map(str, caps.version)))
-            )
     return out
 
 
 def check_tooling() -> list[Check]:
     out: list[Check] = []
     for tool, why in (("shellcheck", "session-idle degrades to syntax-only without it"),
-                      ("tmux", "optional now: dispatch is headless, tmux only hosts TUIs you open"),
-                      ("ss", "only needed to spot stray hand-started TUIs now"),
                       ("git", "required for everything")):
         found = shutil.which(tool)
         out.append(Check(OK if found else WARN, tool, found or why))
@@ -319,7 +273,6 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_server()
     checks += check_daemon()
     checks += check_gates(cwd)
-    checks += check_launch()
     checks += check_tooling()
     checks += check_project(cwd)
     worst = 0

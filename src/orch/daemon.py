@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 import time
@@ -216,7 +215,7 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
         for t in tasks:
             if in_flight >= pol.max_concurrent:
                 break
-            if t.claimed or not t.declared or t.archived:
+            if t.claimed or not t.declared or t.archived or t.hitl:
                 continue
             key = (project, t.name)
             if snap.now < mem.dispatch_backoff.get(key, 0):
@@ -467,19 +466,7 @@ def run(project: str | None = None, roots: list[str] | None = None,
         return 0
 
 
-def source_fingerprint() -> str:
-    h = hashlib.sha256()
-    for f in sorted(Path(__file__).resolve().parent.glob("*.py")):
-        h.update(f.name.encode())
-        try:
-            h.update(f.read_bytes())
-        except OSError:
-            h.update(b"<unreadable>")
-    return h.hexdigest()[:12]
-
-
 UNIT_NAME = "orch-daemon.service"
-
 UNIT = """\
 [Unit]
 Description=orch supervisor - settles tasks, runs gates, retriggers agents, merges and archives

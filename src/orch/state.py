@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import observe
-from .discovery import _cmdline, _pids
 
 SESSION_BUSY = "busy"
 SESSION_IDLE = "idle"
@@ -20,7 +19,6 @@ RUNNING = "running"
 NEEDS_REVIEW = "needs-review"
 MERGE_READY = "ready"
 NOOP = "noop"
-ORPHAN = "orphan"
 ARCHIVED = "archived"
 
 MAX_DEPTH = 6
@@ -207,6 +205,29 @@ def _names_in(common: Path, base: str, rel: str) -> set[str]:
     return names
 
 
+def _front_matter(common: Path, base: str, name: str) -> dict:
+    """The `--- … ---` block at the top of the committed tasks/<name>/task.md."""
+    rc, out = _git(common, "show", f"{base}:{TASKS_REL}/{name}/task.md")
+    if rc != 0 or not out.startswith("---"):
+        return {}
+    body: list[str] = []
+    for line in out.splitlines()[1:]:
+        if line.strip() == "---":
+            break
+        body.append(line)
+    meta: dict = {}
+    for line in body:
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        meta[key.strip().lower()] = value.strip().strip('"').strip("'")
+    return meta
+
+
+def _hitl_from(meta: dict) -> bool:
+    return not str(meta.get("hitl", "")).strip().lower() in ("false", "no", "0")
+
+
 def _branches(common: Path) -> set[str]:
     rc, out = _git(common, "for-each-ref", "--format=%(refname:short)",
                    "refs/heads")
@@ -226,6 +247,19 @@ def _diff(common: Path, base: str, branch: str) -> bool:
 
 
 DISPATCH_MARKER = "orch:"
+
+
+def _pids() -> list[int]:
+    _rc, out = _cmd(["pgrep", "-x", "opencode"])
+    return [int(x) for x in out.split() if x.isdigit()]
+
+
+def _cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
 
 
 def dispatch_pid(worktree: str, marker: str | None = None) -> int | None:
@@ -268,6 +302,7 @@ class TaskState:
     blocked: list[observe.Blocked] = field(default_factory=list)
     dispatch_alive: bool = False
     dispatch_orchestrated: bool = False
+    hitl: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -311,6 +346,8 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
             claimed=claimed, branch=name if claimed else None,
             worktree=str(wt) if wt else None,
         )
+        if name in declared:
+            st.hitl = _hitl_from(_front_matter(common, base, name))
         if wt is not None and wt.is_dir():
             st.dirty = _dirty(wt)
             st.diff = _diff(common, base, name)

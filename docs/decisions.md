@@ -88,12 +88,19 @@ in one source file has one place to check.
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
   surprising, and it never dispatches ungated work (that flag is human-only).
+- **A human picks each task; the machine does the work.** `hitl` is the default
+  state of a task's front matter, so the scheduler runs nothing a human did not
+  explicitly hand over (`hitl: false`, `orch task add --auto`). This inverts the
+  earlier default: rather than the machine draining everything that wasn't exempted,
+  you opt tasks *into* the machine one at a time. The flag is read from the committed
+  copy on base — the same authority rule as the gate — so neither an agent nor an
+  uncommitted edit can grant a task auto-dispatch.
 - **The phone notify is the consumer's job, not orch's.** The daemon's `alert`
-  action only logs that a human is needed (deduped by request id); `orch observe`
-  exits non-zero with the blocked request. orch has zero phone knowledge. The add-on
-  (`~/stuff/phone-approval`) integrates with orch by polling `orch observe` or
-  tailing the journal — the coupling points the right way, so adding a notifier
-  costs orch nothing.
+  action only logs that a human is needed (deduped by request id); `orch task list`
+  renders blocked sessions and `needs-review` from the scan. orch has zero phone
+  knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch by polling
+  `orch task list --json` or tailing the journal — the coupling points the right
+  way, so adding a notifier costs orch nothing.
 
 ## `dispatch.py`
 
@@ -155,7 +162,7 @@ in one source file has one place to check.
   removal acts (a no-op task produced nothing; a human decided to discard). Only
   `merge_and_cleanup` uses `-d`, preserving "a `-d` refusal means real unmerged work".
 - **Kill by recorded pid**: the dispatch process is found by exact cmdline and killed
-  by pid; tmux sessions end when their process dies.
+  by pid.
 
 ## `tasks.py`
 

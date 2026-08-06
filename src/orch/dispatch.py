@@ -148,27 +148,6 @@ def worktree_on_branch(start: Path, branch: str) -> Path | None:
     return None
 
 
-def declared_names(start: Path, base: str) -> list[str]:
-    code, out = _git(start, "ls-tree", "-r", "--name-only", base, "--", "tasks/")
-    if code != 0:
-        return []
-    names = set()
-    for line in out.splitlines():
-        parts = line.strip().split("/")
-        if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "task.md":
-            names.add(parts[1])
-    return sorted(names)
-
-
-def task_names(dispatcher: Path) -> list[str]:
-    root = dispatcher / "tasks"
-    if not root.is_dir():
-        return []
-    return sorted(
-        d.name for d in root.iterdir() if d.is_dir() and (d / "task.md").exists()
-    )
-
-
 def _prompt_from_task_file(
     dispatcher: Path, name: str, base: str
 ) -> tuple[str | None, str | None]:

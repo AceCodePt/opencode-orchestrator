@@ -411,6 +411,21 @@ def test_apply_dispatch_failure_sets_backoff() -> None:
     print("ok: a failed auto-dispatch backs off and records why")
 
 
+def test_scheduler_skips_hitl_tasks() -> None:
+    mem = daemon.LoopState()
+    hitl = _task(claimed=False, branch=None, worktree=None, hitl=True)
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    acts = daemon.decide(_snap(tasks=[hitl], mem=mem, policies={hitl.project: pol}))
+    assert daemon.DISPATCH not in _kinds(acts), \
+        "a task that needs a human is never auto-picked"
+    auto = _task(name="task-auto", claimed=False, branch=None, worktree=None,
+                 hitl=False)
+    acts = daemon.decide(_snap(tasks=[auto], mem=mem, policies={auto.project: pol}))
+    assert _kinds(acts) == [daemon.DISPATCH], _kinds(acts)
+    print("ok: the scheduler leaves hitl tasks for a human and picks the rest")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

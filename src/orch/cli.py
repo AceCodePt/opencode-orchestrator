@@ -2,113 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import signal
 import sys
-import time
 from pathlib import Path
 
 from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
-from . import gate as gate_mod
-from . import harness, init as init_mod, observe, server as server_mod, state
-from . import tasks as tasks_mod
-from .discovery import discover
 from . import doctor as doctor_mod
+from . import gate as gate_mod
+from . import init as init_mod
+from . import server as server_mod
+from . import state
+from . import tasks as tasks_mod
 
 __version__ = "0.1.0"
-
-
-def cmd_observe(args: argparse.Namespace) -> int:
-    if args.watch:
-        try:
-            while True:
-                facts = observe.look_all()
-                sys.stdout.write("\x1b[2J\x1b[H")
-                print(time.strftime("%H:%M:%S"))
-                print(observe.render(facts, verbose=args.verbose))
-                sys.stdout.flush()
-                time.sleep(args.interval)
-        except KeyboardInterrupt:
-            return 0
-    facts = observe.look_all()
-    if args.json:
-        print(json.dumps(
-            [
-                {
-                    "pid": f.tui.pid,
-                    "port": f.tui.port,
-                    "worktree": f.worktree,
-                    "state": f.state,
-                    "version": f.version,
-                    "tmux": f.tui.tmux,
-                    "busy_sessions": f.busy_sessions,
-                    "blocked": [vars(b) for b in f.blocked],
-                    "notes": f.notes,
-                }
-                for f in facts
-            ],
-            indent=2,
-        ))
-    else:
-        print(observe.render(facts, verbose=args.verbose))
-    return 1 if any(f.needs_human or f.is_alarm for f in facts) else 0
-
-
-def cmd_events(args: argparse.Namespace) -> int:
-    tuis = [t for t in discover() if t.observable]
-    if args.port:
-        tuis = [t for t in tuis if t.port == args.port]
-    if not tuis:
-        print("no observable TUI found (need one started with --port)", file=sys.stderr)
-        return 2
-    if len(tuis) > 1:
-        print(f"{len(tuis)} observable TUIs; pass --port to choose one:", file=sys.stderr)
-        for t in sorted(tuis, key=lambda t: t.port or 0):
-            where = f", cwd={t.cwd}" if t.cwd else ""
-            print(f"  --port {t.port}  (pid={t.pid}{where})", file=sys.stderr)
-        return 2
-    tui = tuis[0]
-    print(f"# tailing /event on port {tui.port} ({tui.cwd})", file=sys.stderr)
-    assert tui.port is not None
-    seen: dict[str, int] = {}
-    deadline = time.time() + args.duration if args.duration else None
-
-    def _dump(*_a) -> None:
-        if seen:
-            print("\n# event types observed:", file=sys.stderr)
-            for k, v in sorted(seen.items(), key=lambda kv: -kv[1]):
-                print(f"#   {v:5d}  {k}", file=sys.stderr)
-        sys.stderr.flush()
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, _dump)
-    signal.signal(signal.SIGINT, _dump)
-
-    try:
-        for ev in harness.events(tui.port):
-            if deadline and time.time() > deadline:
-                break
-            etype = str(ev.get("type", "?"))
-            seen[etype] = seen.get(etype, 0) + 1
-            if args.types_only:
-                continue
-            props = ev.get("properties", {})
-            if args.filter and args.filter not in etype:
-                continue
-            print(f"{time.strftime('%H:%M:%S')} {etype}")
-            if args.verbose and isinstance(props, dict):
-                for k, v in props.items():
-                    s = json.dumps(v) if not isinstance(v, str) else v
-                    print(f"    {k}={s[:160]}")
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:  # noqa: BLE001
-        print(f"# stream ended: {e}", file=sys.stderr)
-    if seen:
-        print("\n# event types observed:", file=sys.stderr)
-        for k, v in sorted(seen.items(), key=lambda kv: -kv[1]):
-            print(f"#   {v:5d}  {k}", file=sys.stderr)
-    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -168,22 +74,6 @@ def cmd_server(args: argparse.Namespace) -> int:
     return 1 if st.get("unresponsive") else 0
 
 
-def cmd_attach(args: argparse.Namespace) -> int:
-    info = server_mod.current()
-    if info is None:
-        print("no shared server running; `orch server start` first", file=sys.stderr)
-        return 2
-    cmd = ["opencode", "attach", info.url]
-    if args.directory:
-        cmd += ["--dir", args.directory]
-    if args.print_only:
-        print(" ".join(cmd))
-        return 0
-    import os as _os
-    _os.execvp(cmd[0], cmd)
-    return 0
-
-
 def cmd_task_help(args: argparse.Namespace) -> int:
     args._tparser.print_help()
     return 0
@@ -231,6 +121,8 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         state_info = ""
         if t.session != state.SESSION_NONE:
             state_info = f" session={t.session}"
+        if t.hitl:
+            state_info += " hitl"
         if t.dirty:
             state_info += " dirty"
         elif t.diff:
@@ -259,6 +151,7 @@ def _task_json(t: state.TaskState) -> dict:
         "session_ids": t.session_ids,
         "dispatch_alive": t.dispatch_alive,
         "dispatch_orchestrated": t.dispatch_orchestrated,
+        "hitl": t.hitl,
         "base": t.base,
     }
 
@@ -328,7 +221,7 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = tasks_mod.add_many(start, args.name, title=args.title)
+    r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto)
     print(tasks_mod.render(r))
     return 0 if r.ok else 2
 
@@ -440,11 +333,6 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
-    for t in discover():
-        if t.observable and t.port:
-            caps = harness.capabilities(t.port)
-            v = ".".join(map(str, caps.version)) if caps.version else "?"
-            print(f"  harness on port {t.port}: {v}")
     return 0
 
 
@@ -477,23 +365,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True,
                            metavar="<command>", title="commands")
 
-    o = sub.add_parser("observe", help="show the live state of every TUI (read-only)")
-    o.add_argument("-v", "--verbose", action="store_true")
-    o.add_argument("--json", action="store_true")
-    o.add_argument("-w", "--watch", action="store_true", help="redraw continuously")
-    o.add_argument("-n", "--interval", type=float, default=2.0)
-    o.set_defaults(func=cmd_observe)
-
-    e = sub.add_parser("events", help="tail the SSE event stream of one TUI")
-    e.add_argument("--port", type=int)
-    e.add_argument("-v", "--verbose", action="store_true")
-    e.add_argument("--filter", help="only print event types containing this string")
-    e.add_argument("--types-only", action="store_true",
-                   help="print nothing until exit, then a histogram of event types")
-    e.add_argument("-d", "--duration", type=float, default=0.0,
-                   help="stop after N seconds and print the histogram")
-    e.set_defaults(func=cmd_events)
-
     i = sub.add_parser("init", help="scaffold .orchestration/ with the gate template")
     i.add_argument("-C", "--directory")
     i.add_argument("--force", action="store_true",
@@ -517,12 +388,6 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_parser("stop", help="stop the shared server by recorded pid")
     sa.add_parser("restart", help="stop and start the shared server again")
     s.set_defaults(func=cmd_server, _sparser=s)
-
-    a = sub.add_parser("attach", help="open a TUI onto the shared server (ephemeral)")
-    a.add_argument("-C", "--directory", help="worktree to view")
-    a.add_argument("--print-only", action="store_true",
-                   help="print the command instead of running it")
-    a.set_defaults(func=cmd_attach)
 
     t = sub.add_parser("task", help="dispatch and inspect tasks")
     t.set_defaults(func=cmd_task_help, _tparser=t)
@@ -567,6 +432,9 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("-C", "--directory",
                     help="write into this worktree instead of the current one")
     ta.add_argument("--title", help="entry title (default: derived from the name)")
+    ta.add_argument("--auto", action="store_true",
+                    help="let the scheduler pick this task; by default a task "
+                         "needs a human to start it")
     ta.set_defaults(func=cmd_task_add)
 
     tm = tsub.add_parser("merge",
@@ -584,13 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--event", default="session-idle")
     gr.set_defaults(func=cmd_gate_run)
 
-    gs = sub.add_parser("gate-state", help="(removed)")
-    gs.set_defaults(func=lambda _a: 1)
-
-    gp = sub.add_parser("gate-report", help="(removed)")
-    gp.set_defaults(func=lambda _a: 1)
-
-    dm = sub.add_parser("daemon", help="supervise leases, verdicts and the server")
+    dm = sub.add_parser("daemon", help="supervise tasks, gates and the server")
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")
     dr = da.add_parser("run",
                        help="run the supervision loop (foreground; Ctrl-C stops)")
@@ -636,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "task history in ~/.local/state/orch")
     un.set_defaults(func=cmd_uninstall)
 
-    v = sub.add_parser("version", help="show orch and harness versions")
+    v = sub.add_parser("version", help="show the orch version")
     v.set_defaults(func=cmd_version)
     return p
 

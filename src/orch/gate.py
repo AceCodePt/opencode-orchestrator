@@ -219,17 +219,3 @@ def run(
 
 def blocking(findings: list[GateFinding]) -> list[GateFinding]:
     return [f for f in findings if not f.trustworthy]
-
-
-def uncommitted_paths(worktree: Path, base: str | None = None) -> list[str]:
-    base = base or base_branch(worktree)
-    code, out = _git(worktree, "status", "--porcelain", "--", ORCH_DIR)
-    if code != 0:
-        return []
-    paths = []
-    for line in out.splitlines():
-        if len(line) > 3:
-            p = line[3:].strip()
-            if "/.state/" not in p:
-                paths.append(p)
-    return paths
