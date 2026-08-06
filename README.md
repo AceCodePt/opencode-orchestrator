@@ -118,8 +118,14 @@ a clean, committed, diffing branch passed the daemon's own gate and was merged. 
 with a dirty tree at settle time is `needs-review`, because a passing gate would have
 committed it.
 
-Not built yet: outcome routing and the phone-facing server, and a machine-wide
-concurrency budget (per-project `scheduler.maxConcurrent` exists today).
+Not built yet: routing `needs-review` onwards or unblocking a parent agent, and a
+machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
+
+When an agent needs you, `orch` *exposes* it — `orch observe` exits non-zero and
+lists blocked requests (`--json` for machines), and the daemon journal logs every
+`alert:` and `needs-review`. Notify add-ons integrate **with** `orch`, not the other
+way around: the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux)
+polls `orch observe` or tails the journal, and only it knows about the phone.
 
 Tests: `for t in tests/test_*.py; do python3 "$t"; done`.
 

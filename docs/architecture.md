@@ -272,10 +272,21 @@ a verdict at all.
 
 ## Flow D — routing, and the human switch
 
-Not built. Outcomes are logged by the daemon (journald) and surfaced by `task list`
-as derived state; whether a human should be told, and whether a parent agent should
-be unblocked, is a decision still to make. The machinery no longer stores verdicts,
-so routing will be built on the daemon's log + scan rather than on a verdict table.
+The daemon's only human-facing route is the **alert**: when a task's agent is blocked
+on a permission or a question, the daemon raises `alert` (deduped by request id) and
+logs it. `orch` knows nothing about phones, Termux, or notify add-ons — it only
+*exposes* that a human is needed, through signals any consumer can read:
+
+- `orch observe` exits non-zero and lists the blocked request when any agent needs a
+  human (`--json` for machines).
+- The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
+
+The phone add-on (`~/stuff/phone-approval` — `notify-phone` → Termux, plus the
+approve/deny loop) integrates **with** `orch` the other way around: it polls
+`orch observe` or tails the daemon journal, and only it knows about the phone.
+Whether a parent agent should be unblocked, or a `needs-review` task routed onwards,
+is a decision still to make — the machinery stores no verdicts, so routing will be
+built on the daemon's log + scan rather than on a verdict table.
 
 ## Invariants
 
@@ -311,6 +322,8 @@ server's live version is checked by `doctor` against the floor; there is no vers
 history store any more.
 
 **Deferred, with nothing built on either:**
-- Outcome routing and the phone-facing server.
+- Routing `needs-review` onwards or unblocking a parent agent. (The "human needed"
+  signal exists — `orch observe` exit code/JSON and the daemon journal — and the
+  phone add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
 - Global concurrency limits across projects (per-project `scheduler.maxConcurrent`
   exists today; a machine-wide budget is a future daemon setting).

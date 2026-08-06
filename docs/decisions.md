@@ -88,6 +88,12 @@ in one source file has one place to check.
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
   surprising, and it never dispatches ungated work (that flag is human-only).
+- **The phone notify is the consumer's job, not orch's.** The daemon's `alert`
+  action only logs that a human is needed (deduped by request id); `orch observe`
+  exits non-zero with the blocked request. orch has zero phone knowledge. The add-on
+  (`~/stuff/phone-approval`) integrates with orch by polling `orch observe` or
+  tailing the journal — the coupling points the right way, so adding a notifier
+  costs orch nothing.
 
 ## `dispatch.py`
 
