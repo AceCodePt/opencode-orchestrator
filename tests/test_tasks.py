@@ -131,34 +131,68 @@ def test_template_carries_the_hitl_front_matter() -> None:
     print("ok: task.md carries the hitl flag in its front matter; auto opts in")
 
 
-def test_assist_prompt_names_the_spec_and_the_intent() -> None:
-    p = tasks.assist_prompt("tasks/fix-auth/task.md", "the auth flow is broken")
-    assert "tasks/fix-auth/task.md" in p
-    assert "the auth flow is broken" in p
-    assert "Verification" in p and "drafting" in p
-    print("ok: the assist prompt targets the spec and carries the intent")
+def test_draft_prompt_sets_hitl_and_embeds_the_text() -> None:
+    p = tasks.draft_prompt("build a parser {with braces}", auto=True)
+    assert "hitl: false" in p
+    assert "tasks/{slug}/task.md" in p
+    assert p.endswith("build a parser {with braces}"), "raw text is preserved"
+    p2 = tasks.draft_prompt("x", auto=False)
+    assert "hitl: true" in p2
+    print("ok: the draft prompt carries the hitl flag and the raw text verbatim")
 
 
-def test_parse_items_strips_markdown_and_headers() -> None:
-    text = "# Backlog\n\n- fix the login\n* add a health check\n\n1. bump the version\n\n"
-    assert tasks.parse_items(text) == ["fix the login", "add a health check",
-                                       "bump the version"]
-    print("ok: import parsing strips list markers and skips headers")
-
-
-def test_import_specs_creates_slugged_prefilled_tasks() -> None:
+def test_draft_specs_reports_the_files_the_agent_wrote() -> None:
     root, tmp = _repo()
-    r = tasks.import_specs(root, ["Fix the login flow", "Add a health check"],
-                           auto=True)
-    assert r.ok, r.notes
-    login = root / "tasks" / "fix-the-login-flow" / "task.md"
-    health = root / "tasks" / "add-a-health-check" / "task.md"
-    assert login.is_file() and health.is_file()
-    assert "Fix the login flow" in login.read_text(), "Context holds the source line"
-    assert "hitl: false" in login.read_text(), "--auto makes it scheduler-eligible"
-    assert any("COMMIT" in n for n in r.notes)
+    from orch import server
+    orig_start = server.start
+    orig_run = subprocess.run
+
+    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0):
+        if cmd and cmd[0] == "opencode":
+            spec = root / "tasks" / "parsing" / "task.md"
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text("---\nhitl: true\n---\n# Task: Parsing\n")
+            return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return orig_run(cmd, cwd=cwd, capture_output=capture_output,
+                        text=text, timeout=timeout)
+
+    server.start = lambda **k: type("S", (), {"url": "http://127.0.0.1:1"})()
+    subprocess.run = fake_run
+    try:
+        r = tasks.draft_specs(root, "parse html into a dom")
+        assert r.ok, r.notes
+        assert r.created == ["tasks/parsing/task.md"]
+        assert any("COMMIT" in n for n in r.notes), "must say the specs need committing"
+    finally:
+        server.start = orig_start
+        subprocess.run = orig_run
     tmp.cleanup()
-    print("ok: import creates slugged specs with the source line in Context")
+    print("ok: draft reports the spec files the agent wrote")
+
+
+def test_draft_fails_when_the_agent_writes_nothing() -> None:
+    root, tmp = _repo()
+    from orch import server
+    orig_start = server.start
+    orig_run = subprocess.run
+
+    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0):
+        if cmd and cmd[0] == "opencode":
+            return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return orig_run(cmd, cwd=cwd, capture_output=capture_output,
+                        text=text, timeout=timeout)
+
+    server.start = lambda **k: type("S", (), {"url": "http://127.0.0.1:1"})()
+    subprocess.run = fake_run
+    try:
+        r = tasks.draft_specs(root, "do nothing")
+        assert not r.ok
+        assert any("wrote nothing" in n for n in r.notes)
+    finally:
+        server.start = orig_start
+        subprocess.run = orig_run
+    tmp.cleanup()
+    print("ok: a draft that writes nothing is reported as a failure")
 
 
 def test_being_off_base_is_warned_about_but_not_overridden() -> None:

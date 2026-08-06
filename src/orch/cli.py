@@ -5,12 +5,14 @@ import json
 import sys
 from pathlib import Path
 
+from . import agent as agent_mod
 from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import doctor as doctor_mod
 from . import gate as gate_mod
 from . import harness
 from . import init as init_mod
+from . import project as project_mod
 from . import server as server_mod
 from . import state
 from . import tasks as tasks_mod
@@ -222,21 +224,8 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    if args.assist and len(args.name) != 1:
-        print("--assist drafts one spec, so it needs exactly one task name",
-              file=sys.stderr)
-        return 2
     r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto)
     print(tasks_mod.render(r))
-    if args.assist and r.created:
-        task_name = dispatch_mod.slug(args.name[0])
-        rel = tasks_mod.task_rel(task_name)
-        a = tasks_mod.assist_spec(start, task_name, args.assist)
-        print(f"  {rel}:")
-        for n in a.notes:
-            print(f"    {'! ' if not a.ok else '  '}{n}")
-        if not a.ok:
-            return 1
     return 0 if r.ok else 2
 
 
@@ -307,23 +296,26 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_task_import(args: argparse.Namespace) -> int:
+def cmd_task_draft(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    if args.file == "-":
-        text = sys.stdin.read()
-    else:
-        try:
-            text = Path(args.file).read_text()
-        except OSError as e:
-            print(f"could not read {args.file}: {e}", file=sys.stderr)
-            return 2
-    items = tasks_mod.parse_items(text)
-    if not items:
-        print("no task lines found", file=sys.stderr)
+    text = args.text
+    if args.file:
+        if args.file == "-":
+            text = sys.stdin.read()
+        else:
+            try:
+                text = Path(args.file).read_text()
+            except OSError as e:
+                print(f"could not read {args.file}: {e}", file=sys.stderr)
+                return 2
+    if not text or not text.strip():
+        print("no description given (pass text, or --file - for stdin)",
+              file=sys.stderr)
         return 2
-    r = tasks_mod.import_specs(start, items, auto=args.auto)
+    r = tasks_mod.draft_specs(start, text, auto=args.auto,
+                              timeout=args.timeout)
     print(tasks_mod.render(r))
-    return 0 if r.ok else 2
+    return 0 if r.ok else 1
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -408,6 +400,127 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         project = str(p)
     return daemon_mod.run(project, interval=args.interval,
                           once=args.once, dry_run=args.dry_run)
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj, err = agent_mod.project_of(start)
+    if err or proj is None or proj.base_worktree is None:
+        print(err or "no base worktree for the primary agent", file=sys.stderr)
+        return 2
+    base = proj.base_worktree
+    try:
+        info = server_mod.start()
+    except (RuntimeError, TimeoutError, OSError) as e:
+        print(f"could not start the shared server: {e}", file=sys.stderr)
+        return 1
+
+    if args.status:
+        st = agent_mod.status(info, base)
+        if st["session"] is None:
+            print("no primary agent yet - the first `orch ask` creates it")
+            return 0
+        print(f"session {st['session']}")
+        print(f"state   {st['state']}")
+        for d in st["blocked"]:
+            print(f"  blocked: {d}")
+        return 0
+
+    sid = agent_mod.find(info.port, base)
+    if args.compact:
+        if sid is None:
+            print("nothing to compact - the first `orch ask` creates the "
+                  "conversation", file=sys.stderr)
+            return 1
+        ok, cerr = agent_mod.compact(info, sid, timeout=args.timeout)
+        if not ok:
+            print(cerr, file=sys.stderr)
+            return 1
+        print("compacted (opencode compaction ran)")
+        if args.message is None:
+            return 0
+
+    if args.message is None:
+        return _ask_interactive(args, info, base, sid)
+
+    if sid is None:
+        sid, notes = agent_mod.create(info, base, args.message,
+                                      timeout=args.timeout)
+        for n in notes:
+            print(f"  ! {n}", file=sys.stderr)
+        if sid is None:
+            return 1
+        print(agent_mod.last_reply(info.port, sid) or "(no text reply)")
+        return 0
+
+    if args.async_:
+        err = agent_mod.fire(info, sid, args.message)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        print(f"sent to session {sid}")
+        return 0
+
+    reply, err = agent_mod.ask(info, sid, args.message, timeout=args.timeout)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    print(reply or "(no text reply)")
+    return 0
+
+
+def _ask_interactive(args: argparse.Namespace, info, base, sid) -> int:
+    print("talking to the project's primary agent; Ctrl-C or EOF to end")
+    while True:
+        try:
+            line = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line.strip():
+            continue
+        if sid is None:
+            sid, notes = agent_mod.create(info, base, line,
+                                          timeout=args.timeout)
+            for n in notes:
+                print(f"  ! {n}", file=sys.stderr)
+            if sid is None:
+                return 1
+            print(agent_mod.last_reply(info.port, sid) or "(no text reply)")
+            continue
+        reply, err = agent_mod.ask(info, sid, line, timeout=args.timeout)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        print(reply or "(no text reply)")
+
+
+def cmd_project_help(args: argparse.Namespace) -> int:
+    args._pparser.print_help()
+    return 0
+
+
+def cmd_project_create(args: argparse.Namespace) -> int:
+    r = project_mod.create(
+        args.name,
+        path=args.path,
+        gh=not args.no_gh,
+        public=args.public,
+        description=args.description,
+        version=__version__,
+    )
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    if not r.ok:
+        return 1
+    print("\nnext:")
+    print("  edit .orchestration/hooks/session-idle to this project's real checks, then commit")
+    print('  bin/orch task draft "<free text>"   # an agent turns an idea into tasks/ specs')
+    print("  bin/orch server start && bin/orch install && bin/orch doctor")
+    print("  bin/orch task list && bin/orch task start <name>")
+    return 0
 
 
 def cmd_version(_: argparse.Namespace) -> int:
@@ -514,9 +627,6 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--auto", action="store_true",
                     help="let the scheduler pick this task; by default a task "
                          "needs a human to start it")
-    ta.add_argument("--assist", metavar="DESCRIPTION",
-                    help="draft the spec with an opencode agent from this "
-                         "intent; you review and commit it")
     ta.set_defaults(func=cmd_task_add)
 
     tm = tsub.add_parser("merge",
@@ -536,14 +646,38 @@ def build_parser() -> argparse.ArgumentParser:
                      help="remember a permission decision, not just this once")
     ta2.set_defaults(func=cmd_task_answer)
 
-    ti = tsub.add_parser("import",
-                         help="create task specs from a list file (or - for stdin)")
-    ti.add_argument("file", help="path to a list file, or - to read stdin")
-    ti.add_argument("-C", "--directory",
+    td = tsub.add_parser(
+        "draft",
+        help="convert free text into one or more task specs with an agent",
+    )
+    td.add_argument("text", nargs="?",
+                    help="the description (omit to use --file)")
+    td.add_argument("--file",
+                    help="read the description from a file, or - for stdin")
+    td.add_argument("-C", "--directory",
                     help="write into this worktree instead of the current one")
-    ti.add_argument("--auto", action="store_true",
-                    help="mark every imported spec scheduler-eligible (hitl: false)")
-    ti.set_defaults(func=cmd_task_import)
+    td.add_argument("--auto", action="store_true",
+                    help="mark every drafted spec hitl: false (scheduler-eligible)")
+    td.add_argument("--timeout", type=float, default=600.0,
+                    help="max seconds for the drafting agent (default: %(default)s)")
+    td.set_defaults(func=cmd_task_draft)
+
+    pj = sub.add_parser("project", help="create and inspect projects")
+    pj.set_defaults(func=cmd_project_help, _pparser=pj)
+    pjsub = pj.add_subparsers(dest="project_cmd", metavar="<command>",
+                              title="project commands")
+    pc = pjsub.add_parser(
+        "create",
+        help="scaffold a new git project (gh repo + orch init by default)",
+    )
+    pc.add_argument("name")
+    pc.add_argument("--path", help="parent directory (default: current directory)")
+    pc.add_argument("--no-gh", action="store_true",
+                    help="skip creating the GitHub repo")
+    pc.add_argument("--public", action="store_true",
+                    help="make the GitHub repo public (default: private)")
+    pc.add_argument("--description", help="GitHub repo description")
+    pc.set_defaults(func=cmd_project_create)
 
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")
@@ -553,6 +687,24 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("-C", "--directory")
     gr.add_argument("--event", default="session-idle")
     gr.set_defaults(func=cmd_gate_run)
+
+    a = sub.add_parser(
+        "ask",
+        help="converse with the project's primary agent (created on first use)",
+    )
+    a.add_argument("message", nargs="?",
+                   help="message to send; omit for an interactive conversation")
+    a.add_argument("--async", dest="async_", action="store_true",
+                   help="fire-and-forget: send the message and return immediately")
+    a.add_argument("--compact", action="store_true",
+                   help="compact the conversation first (opencode's own compaction)")
+    a.add_argument("--status", action="store_true",
+                   help="show the primary agent's session state")
+    a.add_argument("-C", "--directory",
+                   help="the project to ask (default: the current worktree's project)")
+    a.add_argument("--timeout", type=float, default=agent_mod.DEFAULT_ASK_TIMEOUT,
+                   help="max seconds to wait for a reply (default: %(default)s)")
+    a.set_defaults(func=cmd_ask)
 
     dm = sub.add_parser("daemon", help="supervise tasks, gates and the server")
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")

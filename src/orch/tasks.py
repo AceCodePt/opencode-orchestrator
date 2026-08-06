@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,94 +58,6 @@ def title_from_name(name: str) -> str:
 
 def task_rel(name: str) -> str:
     return f"tasks/{name}/task.md"
-
-
-def spec(title: str, hitl: bool, context: str) -> str:
-    """A spec with the source line already in Context, so an imported task is
-    never empty — the rest of the sections await the human or --assist."""
-    return (
-        f"---\nhitl: {str(hitl).lower()}\n---\n\n"
-        f"# Task: {title}\n\n"
-        "## Metadata\n\n"
-        "- **Complexity:** <Low|Medium|High>\n"
-        "- **Priority:** <Low|Medium|High>\n"
-        "- **Status:** Ready for Handoff\n"
-        "- **Dependencies:** none\n\n"
-        "## Context\n\n"
-        f"{context}\n\n"
-        "## Requirements\n\n"
-        "- [ ] <requirement>\n\n"
-        "## Verification\n\n"
-        "_How to prove this is done: the behaviour to observe, and how it was "
-        "exercised. Code that exists is not a completed task._\n\n"
-        "## Prohibited Patterns\n\n"
-        "- <what not to do, and why it is tempting>\n"
-    )
-
-
-def parse_items(text: str) -> list[str]:
-    """One task per line: plain text, or markdown `- ` / `1. ` list items.
-    Blank lines and `#` headers are skipped."""
-    items: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = re.sub(r"^([-*+]|\d+[.)])\s+", "", line).strip()
-        if line:
-            items.append(line)
-    return items
-
-
-def _unique_slug(text: str, used: set[str], max_len: int = 60) -> str:
-    base = dispatch.slug(text) or "task"
-    name = base[:max_len].rstrip("-") or "task"
-    n = 1
-    while name in used:
-        suffix = f"-{n}"
-        name = (base[:max_len - len(suffix)].rstrip("-") + suffix) or name
-        n += 1
-    used.add(name)
-    return name
-
-
-def import_specs(start: Path, items: list[str], auto: bool = False) -> AddResult:
-    result = AddResult()
-    root, _, err = dispatch.project_of(start)
-    if err or root is None:
-        return result.fail(err or "not inside a git worktree")
-
-    base = gate.base_branch(root)
-    note = off_base_note(root, base)
-    if note:
-        result.notes.append(note)
-
-    used: set[str] = set()
-    for item in items:
-        name = _unique_slug(item, used)
-        path = root / "tasks" / name / "task.md"
-        rel = task_rel(name)
-        if path.exists():
-            result.skipped.append(f"{rel} (already exists)")
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(spec(title=item, hitl=not auto, context=item))
-        result.created.append(rel)
-
-    if result.created:
-        on = dispatch.current_branch(root)
-        result.notes.append(
-            f"COMMIT these in {root}"
-            f"{f' on {on}' if on else ''} before dispatching. A task worktree is "
-            f"created from {base}, so an uncommitted task file gives the agent no "
-            f"instructions at all."
-        )
-        result.notes.append(
-            "Each spec's Context holds the source line. Fill in Requirements and "
-            "Verification - or run `orch task add <name> --assist` to draft them - "
-            "then commit."
-        )
-    return result
 
 
 def template(title: str, hitl: bool = True) -> str:
@@ -226,6 +137,100 @@ def add_many(
     return result
 
 
+def draft_prompt(text: str, auto: bool) -> str:
+    hitl = "false" if auto else "true"
+    prompt = (
+        "You are converting free text into task specifications for an "
+        "orchestrator that dispatches one agent per task into its own git "
+        "worktree. Write each spec to tasks/{{slug}}/task.md (create files and "
+        "directories as needed). Every spec must follow exactly this template, "
+        "with hitl: {hitl} in the front matter:\n\n"
+        "---\nhitl: {hitl}\n---\n\n"
+        "# Task: <title>\n\n"
+        "## Metadata\n\n"
+        "- **Complexity:** <Low|Medium|High>\n"
+        "- **Priority:** <Low|Medium|High>\n"
+        "- **Status:** Ready for Handoff\n"
+        "- **Dependencies:** none\n\n"
+        "## Context\n\n"
+        "<why this exists, from the description>\n\n"
+        "## Requirements\n\n"
+        "- [ ] <concrete requirement from the description>\n\n"
+        "## Verification\n\n"
+        "<the observable behaviour proving it is done - make it runnable>\n\n"
+        "## Prohibited Patterns\n\n"
+        "- <what not to do, and why>\n\n"
+        "Decide whether the description is ONE task or several INDEPENDENT "
+        "tasks; prefer one unless the work clearly decomposes into independent "
+        "deliverables. Put the description's checkboxes into Requirements and "
+        "give each task a Verification the project's gate could run. Do not "
+        "create TASKS.md, do not touch any file outside tasks/, do not commit. "
+        "When done, report the list of files you created.\n\n"
+        "Description:\n"
+    ).format(hitl=hitl)
+    return prompt + text
+
+
+def _task_files(root: Path) -> set[str]:
+    base = root / "tasks"
+    if not base.is_dir():
+        return set()
+    return {f"tasks/{d.name}/task.md" for d in base.iterdir()
+            if (d / "task.md").is_file()}
+
+
+def draft_specs(start: Path, text: str, auto: bool = False,
+                timeout: float = 600.0) -> AddResult:
+    """Have a one-shot agent turn free text into one or more task specs. The
+    human reviews and commits the result; this never claims or dispatches."""
+    from . import server
+
+    result = AddResult()
+    root, _, err = dispatch.project_of(start)
+    if err or root is None:
+        return result.fail(err or "not inside a git worktree")
+
+    try:
+        srv = server.start()
+    except (RuntimeError, TimeoutError, OSError) as e:
+        return result.fail(f"could not start the shared server: {e}")
+
+    before = _task_files(root)
+    cmd = ["opencode", "run", "--attach", srv.url, "--dir", str(root),
+           "--format", "json", "--title", "spec-draft",
+           draft_prompt(text, auto)]
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return result.fail(f"could not run the drafting agent: {e}")
+    if p.returncode != 0:
+        return result.fail(f"drafting agent exited {p.returncode}: "
+                           f"{(p.stderr or p.stdout)[-500:]}")
+
+    created = sorted(_task_files(root) - before)
+    if not created:
+        result.notes.append(
+            "the agent ran but wrote nothing under tasks/ - check the "
+            "description and try again"
+        )
+        result.ok = False
+        return result
+
+    result.created = created
+    on = dispatch.current_branch(root)
+    result.notes.append(
+        f"COMMIT these in {root}"
+        f"{f' on {on}' if on else ''} before dispatching. A task worktree is "
+        f"created from base, so an uncommitted task file gives the agent no "
+        f"instructions at all."
+    )
+    result.notes.append(
+        "drafted by an opencode agent - review each spec, then commit"
+    )
+    return result
+
+
 def render(r: AddResult) -> str:
     lines: list[str] = []
     for c in r.created:
@@ -238,50 +243,3 @@ def render(r: AddResult) -> str:
         lines.append(f"\n  ! {n}")
     return "\n".join(lines)
 
-
-def assist_prompt(rel: str, description: str) -> str:
-    return (
-        "You are drafting a task specification, not doing the task. "
-        f"Rewrite the file {rel} (it already exists as a template) to fully "
-        "describe the task below. Keep its front matter and its exact sections "
-        "(## Metadata, ## Context, ## Requirements, ## Verification, "
-        "## Prohibited Patterns). Write concrete, verifiable content: "
-        "Requirements as checkboxes, and a Verification section that states the "
-        "observable behaviour proving it is done. Do not edit anything else.\n\n"
-        f"Task intent: {description}"
-    )
-
-
-@dataclass
-class AssistResult:
-    ok: bool
-    notes: list[str] = field(default_factory=list)
-
-
-def assist_spec(start: Path, name: str, description: str,
-                timeout: int = 600) -> AssistResult:
-    """Draft tasks/<name>/task.md with a one-shot opencode agent. The human
-    reviews and commits the result; this never claims or dispatches the task."""
-    from . import server
-
-    rel = task_rel(name)
-    if not (start / rel).exists():
-        return AssistResult(False, [f"{rel} does not exist; run `orch task add` "
-                                    "first"])
-    try:
-        srv = server.start()
-    except (RuntimeError, TimeoutError, OSError) as e:
-        return AssistResult(False, [f"could not start the shared server: {e}"])
-    cmd = ["opencode", "run", "--attach", srv.url, "--dir", str(start),
-           "--format", "json", "--title", f"spec:{name}",
-           assist_prompt(rel, description)]
-    try:
-        p = subprocess.run(cmd, cwd=str(start), capture_output=True, text=True,
-                           timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return AssistResult(False, [f"could not run the assistant: {e}"])
-    if p.returncode != 0:
-        return AssistResult(False, [f"assistant exited {p.returncode}: "
-                                    f"{(p.stderr or p.stdout)[-500:]}"])
-    return AssistResult(True, ["drafted by an opencode agent - review, then "
-                               "commit before dispatching"])

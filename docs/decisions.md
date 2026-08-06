@@ -189,11 +189,39 @@ in one source file has one place to check.
   feature branch is not dispatchable, and hiding that would be a silent surprise.
 - **Names go through `slug`** so the directory and the branch cannot disagree about
   what the task is called.
-- **`--assist` drafts, it never claims.** A one-shot opencode agent rewrites
-  `tasks/<name>/task.md` from a one-line intent, attached to the shared server, in
-  the worktree where the spec lives. It does not create a branch, run hooks, or
-  dispatch — the human reviews and commits, so assist lowers the cost of a good spec
-  without removing the human from the loop.
+- **`task draft` writes specs from free text, it never claims.** A one-shot opencode
+  agent (the same `opencode run --attach` pattern the primary agent uses) turns a
+  description into one or more `tasks/<name>/task.md` specs and reports what it
+  created (`tasks/` diff before/after — never a git-status guess). It prefers one
+  task unless the text clearly decomposes into independent work, never touches files
+  outside `tasks/`, and never claims or dispatches — the human reviews and commits,
+  so drafting lowers the cost of a good spec without removing the human from the
+  loop. The raw text is appended to the prompt after formatting, so the description's
+  own `{}` cannot break the template.
+
+## `agent.py`
+
+- **One primary agent per project, found live, never stored.** It is the session
+  titled `orch:agent` in the project's base worktree on the shared server; the first
+  `orch ask` creates it via the `opencode run --attach` pattern (the same one
+  `task draft` uses), later asks continue the same session through
+  `POST /session/{id}/message`. No registry, no file — the "repo is the state" rule
+  holds for a conversation too.
+- **The primary agent is outside the daemon's loop.** It works in the base worktree
+  (the human's checkout), its edits stay uncommitted for the human to review, and it
+  is never gated, merged, or torn down. Task worktrees branch from base HEAD, so its
+  uncommitted edits never leak into a task.
+- **`--compact` is opencode's own compaction, not a stand-in.**
+  `POST /session/{id}/summarize` enqueues a `compaction` step and runs the message
+  loop, hitting the same `SessionCompaction.process` path automatic context-overflow
+  uses; it is the only working route — the v2 `POST /api/session/{id}/compact` is a
+  stub that returns 503 on 1.18.x.
+- **First use is `opencode run`, not `POST /session`.** The shared server starts in a
+  neutral cwd, so a session created via `POST /session` would bind to the wrong
+  directory. The run binds the session to the base worktree and answers the first
+  message in one step.
+- **Reply rendering skips synthetic parts.** Only non-synthetic `text` parts are the
+  agent's actual answer; tool traces and "Called the Read tool" fillers are noise.
 
 ## `harness.py`
 

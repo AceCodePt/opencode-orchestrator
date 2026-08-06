@@ -38,13 +38,14 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 
 ```bash
 bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples)
+bin/orch project create <name>   # new project: git init + orch init + a private gh repo, pushed
 bin/orch gate                    # can this project's gate be trusted
+bin/orch gate-run                # run the committed gate here and report
 bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart
 bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md)
-bin/orch task add <name> --assist "<intent>"  # draft the spec with an opencode agent
-bin/orch task import list.txt    # bulk-create specs from a list (or `-` for stdin)
+bin/orch task draft "<text>"     # an agent converts free text into tasks/ specs (--file - for stdin)
 bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
@@ -53,10 +54,16 @@ bin/orch task reset <name>       # delete branch+worktree -> back to todo (a hum
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
 
+bin/orch ask "<message>"         # converse with the project's primary agent (created on first use)
+bin/orch ask --async "<message>" # fire-and-forget: send and return immediately
+bin/orch ask --compact [msg]     # run opencode's own compaction, then optionally ask
+bin/orch ask --status            # is the primary agent idle, busy, or blocked
+
 bin/orch install                 # systemd user unit, enabled, with linger
 bin/orch uninstall                # remove config-level traces, keep projects alone
 bin/orch daemon status            # is anything actually supervising
 bin/orch daemon run --once --dry-run # decide and print, change nothing
+bin/orch version                  # show the orch version
 ```
 
 `orch daemon` is one supervisor per machine covering every discovered project. It scans
@@ -68,6 +75,34 @@ everything else still looks healthy, which is why `doctor` fails when it is miss
 Requires opencode **1.18.11 or newer**.
 
 `doctor` exits non-zero when the machinery itself is wrong, so it composes in a shell.
+
+## The primary agent (`orch ask`)
+
+Separate from tasks, every project can have **one primary agent**: a persistent
+conversation attached to the project's base worktree on the shared server, found
+live by its `orch:agent` session title. `orch ask` creates it on first use and
+keeps talking to the same session, so it remembers the conversation. You can ask
+it questions, have it change files, fire a message and check later (`--async`),
+and compact the conversation when context grows — `--compact` runs **opencode's
+own compaction** (`POST /session/{id}/summarize`), not a stand-in.
+
+The primary agent works in the base worktree: its edits stay uncommitted for you
+to review and commit, and the daemon never gates, merges, or tears it down — it
+supervises only task worktrees. `--status` reports whether it is idle, busy, or
+blocked on a permission/question.
+
+## Creating a project from scratch
+
+`orch project create <name>` is the from-zero path: it `git init`s a repo on
+`main`, runs `orch init` inside it, commits the base, and (by default) creates a
+**private** GitHub repo and pushes — `gh` must be installed and authenticated or
+the command aborts (`--no-gh` creates locally only, `--public` flips visibility,
+`--path` chooses the parent). Then `orch task draft "<free text>"` has a one-shot
+agent convert an idea — or a whole pasted spec — into `tasks/<name>/task.md`
+specs for you to review and commit. Both commands leave the project on the
+base worktree with the fail-closed gate; edit `.orchestration/hooks/session-idle`
+to real checks before dispatching, and keep the project under `$HOME`/`/mnt`
+(`ORCH_ROOTS`) so the daemon supervises it.
 
 ## Two things worth knowing before dispatching
 
@@ -93,12 +128,13 @@ The model is opencode's choice, not orch's — the scheduler just spawns the age
 Without it, dispatching stays a human act (`orch task start`). The scheduler never
 dispatches ungated work, and it never dispatches a task you didn't opt in: a task
 needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
-— `orch task add --auto` — lets the machine pick it.
+— `orch task add --auto` or `orch task draft --auto` — lets the machine pick it.
 
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
-`task add`/`start`/`list`/`answer`/`reset`/`archive`/`merge`,
+`project create`, `ask`, and `task add`/`draft`/`start`/`list`/`answer`/`reset`/
+`archive`/`merge`,
 and the daemon — including the full loop of settle → gate → commit-on-pass → merge →
 archive, the failure loop of gate-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch

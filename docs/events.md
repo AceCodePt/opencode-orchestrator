@@ -26,12 +26,12 @@ Observed on the wire, absent from the schema list:
 
 `server.heartbeat` is the one to care about. It separates **"the stream is alive and
 the agent is quiet"** from **"the stream is dead"** — which is precisely the
-absence-detection problem the watchdog exists to solve. Without it, a dropped
+absence-detection problem the daemon has to solve. Without it, a dropped
 connection is indistinguishable from an idle agent. With it, missing heartbeats
 mean the transport failed, and quiet-with-heartbeats means the agent is genuinely
 doing nothing.
 
-## What the watchdog uses
+## What the daemon uses
 
 ### Liveness and state
 

@@ -183,14 +183,19 @@ string cannot do this job.
 | Command | Does |
 | --- | --- |
 | `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template) |
+| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips) |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated) |
+| `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit) |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project |
+| `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text) |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
 | `orch task merge <name>` | re-run a merge after a conflict |
+| `orch gate` | inspect whether the committed gates are trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch gate-run` | run the committed gate here and say why |
+| `orch ask "<message>"` | converse with the project's primary agent (create on first use; `--async`, `--compact`, `--status`) |
 
 The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
 when the branch already exists (the claim), and refuses an uncommitted spec or an
@@ -209,6 +214,20 @@ ungated project.
 Two dispatchers fire hooks from one directory under one env-var contract
 (`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the CLI fires
 task-lifecycle events, the daemon fires `session-idle`.
+
+### 5. The primary agent — the project's own conversation
+
+Distinct from task agents, a project can have **one persistent primary agent**
+(`orch ask`). It is a session on the shared server attached to the project's
+base worktree, found live by its `orch:agent` session title — no stored state,
+matching the "the repo is the state" rule. First use creates it with the
+`opencode run --attach` pattern (same one `task draft` uses); later asks continue the
+same session via `POST /session/{id}/message`. `--compact` calls
+`POST /session/{id}/summarize`, which enqueues a `compaction` step and runs
+opencode's own `SessionCompaction` loop (the same path automatic context
+overflow uses), never a stand-in. The primary agent edits the base worktree
+uncommitted and is **outside the daemon's loop**: it is never gated, merged, or
+torn down, and its work is never a task.
 
 ## Flow A — dispatch
 
@@ -229,10 +248,11 @@ task-lifecycle events, the daemon fires `session-idle`.
 The dispatch process exiting is not the task finishing. Completion is derived later
 from the worktree state, by the daemon.
 
-`orch task add <name> --assist "<intent>"` drafts the spec with a one-shot opencode
-agent (attached to the shared server, editing `tasks/<name>/task.md` in place). It
-never claims or dispatches the task — the human reviews and commits the draft. It is
-spec-writing help, not automation: model and wording stay opencode's and the human's.
+`orch task draft "<text>"` turns a free-text description into one or more
+`tasks/<name>/task.md` specs with a one-shot opencode agent (attached to the shared
+server, writing into the base worktree). It never claims or dispatches the task — the
+human reviews and commits the draft. It is spec-writing help, not automation: model
+and wording stay opencode's and the human's.
 
 ## Flow A′ — the scheduler
 

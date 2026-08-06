@@ -124,6 +124,29 @@ def prompt_async(port: int, session_id: str, text: str) -> Any:
                 {"parts": [{"type": "text", "text": text}]})
 
 
+def message(port: int, session_id: str, text: str,
+            timeout: float = DEFAULT_TIMEOUT) -> Any:
+    """POST /session/{id}/message - send and wait for the full reply."""
+    return post(port, f"/session/{session_id}/message",
+                {"parts": [{"type": "text", "text": text}]}, timeout=timeout)
+
+
+def messages(port: int, session_id: str) -> list[dict]:
+    return _as_list(get(port, f"/session/{session_id}/message"))
+
+
+def session_info(port: int, session_id: str) -> dict | None:
+    return get(port, f"/session/{session_id}")
+
+
+def summarize(port: int, session_id: str, provider_id: str, model_id: str,
+              timeout: float = DEFAULT_TIMEOUT) -> Any:
+    """POST /session/{id}/summarize - run opencode's real compaction."""
+    return post(port, f"/session/{session_id}/summarize",
+                {"providerID": provider_id, "modelID": model_id,
+                 "auto": False}, timeout=timeout)
+
+
 @dataclass
 class Capabilities:
 
