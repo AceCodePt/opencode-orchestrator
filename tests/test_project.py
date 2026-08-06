@@ -15,13 +15,51 @@ def _args(**kw) -> object:
     class A:
         pass
     a = A()
+    a.name = None
+    a.flag_name = None
     a.path = None
-    a.no_gh = False
-    a.public = False
+    a.no_gh = None
+    a.public = None
     a.description = None
+    a.allow_unsupervised = None
     for k, v in kw.items():
         setattr(a, k, v)
     return a
+
+
+class _FakeTTY:
+    def __init__(self, replies: list[str], tty: bool = True,
+                 raise_on_empty: bool = False):
+        self._replies = iter(replies)
+        self.tty = tty
+        self.raise_on_empty = raise_on_empty
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def readline(self) -> str:
+        try:
+            return next(self._replies) + "\n"
+        except StopIteration:
+            if self.raise_on_empty:
+                raise AssertionError("unexpected prompt: stdin was read")
+            return ""
+
+
+class _Result:
+    ok = True
+    steps = ["git init -b main /x/demo", "committed the base branch"]
+    problems = []
+
+
+def _capture_create(captured: dict):
+    def create(name, path=None, gh=True, public=False, description=None,
+               version="0", roots=None, allow_unsupervised=False):
+        captured.update(name=name, path=path, gh=gh, public=public,
+                        description=description,
+                        allow_unsupervised=allow_unsupervised)
+        return _Result()
+    return create
 
 
 def _fake_run(calls: list) -> None:
@@ -84,7 +122,7 @@ def test_create_no_gh_skips_gh_entirely() -> None:
     _fake_run(calls)
     _fake_init(calls)
     with tempfile.TemporaryDirectory() as tmp:
-        r = project.create("demo", path=tmp, gh=False)
+        r = project.create("demo", path=tmp, gh=False, roots=[tmp])
         assert r.ok, r.problems
         gh = [a for a, _c in calls if isinstance(a, list) and a[:2] == ["gh", "repo"]]
         assert gh == [], f"no-gh must not call gh: {gh}"
@@ -101,7 +139,8 @@ def test_create_gh_private_happy_path_order() -> None:
     _fake_run(calls)
     _fake_init(calls)
     with tempfile.TemporaryDirectory() as tmp:
-        r = project.create("demo", path=tmp, gh=True, description="a demo")
+        r = project.create("demo", path=tmp, gh=True, description="a demo",
+                           roots=[tmp])
         assert r.ok, r.problems
         kinds = [a[0] for a, _c in calls]
         assert any(a[:2] == ["git", "init"] for a, _ in calls)
@@ -125,7 +164,7 @@ def test_create_gh_public_flag() -> None:
     _fake_run(calls)
     _fake_init(calls)
     with tempfile.TemporaryDirectory() as tmp:
-        r = project.create("demo", path=tmp, gh=True, public=True)
+        r = project.create("demo", path=tmp, gh=True, public=True, roots=[tmp])
         assert r.ok, r.problems
         gh = next(a for a, _ in calls if a[:2] == ["gh", "repo"])
         assert "--public" in gh and "--private" not in gh
@@ -147,7 +186,7 @@ def test_create_fails_when_gh_push_fails() -> None:
     project._run = run
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            r = project.create("demo", path=tmp, gh=True)
+            r = project.create("demo", path=tmp, gh=True, roots=[tmp])
             assert not r.ok
             assert any("repository already exists" in p for p in r.problems)
     finally:
@@ -169,13 +208,46 @@ def test_create_refuses_bad_names_and_existing_targets() -> None:
     print("ok: create refuses names that would escape or collide")
 
 
+def test_create_refuses_outside_the_supervised_roots() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        r = project.create("demo", path=tmp, gh=False)
+        assert not r.ok, "creating in /tmp must be refused by default"
+        msg = r.problems[0]
+        assert "supervised root" in msg and "ORCH_ROOTS" in msg
+    print("ok: create refuses a parent outside every supervised root")
+
+
+def test_create_allow_unsupervised_bypasses_the_roots() -> None:
+    calls: list = []
+    _fake_run(calls)
+    _fake_init(calls)
+    with tempfile.TemporaryDirectory() as tmp:
+        r = project.create("demo", path=tmp, gh=False,
+                           allow_unsupervised=True)
+        assert r.ok, r.problems
+        assert any(a[0] == "git" for a, _c in calls), \
+            "git init must still run when unsupervised is allowed"
+    print("ok: --allow-unsupervised creates an unsupervised project anyway")
+
+
+def test_create_inside_a_root_succeeds() -> None:
+    calls: list = []
+    _fake_run(calls)
+    _fake_init(calls)
+    with tempfile.TemporaryDirectory() as root:
+        parent = Path(root) / "nested"
+        parent.mkdir()
+        r = project.create("demo", path=str(parent), gh=False,
+                           roots=[root])
+        assert r.ok, r.problems
+    print("ok: create inside a supervised root proceeds normally")
+
+
 def test_cmd_project_create_prints_next_steps() -> None:
-    class R:
-        ok = True
-        steps = ["git init -b main /x/demo", "committed the base branch"]
-        problems = []
     orig = cli.project_mod.create
-    cli.project_mod.create = lambda *a, **k: R()
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = lambda *a, **k: _Result()
+    cli.sys.stdin = _FakeTTY([], tty=False)
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -186,7 +258,164 @@ def test_cmd_project_create_prints_next_steps() -> None:
         assert "task draft" in out
     finally:
         cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
     print("ok: `project create` prints the project steps and next actions")
+
+
+def test_cmd_project_create_prompts_when_flags_missing() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY(["demo", "/tmp/here"])
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args())
+        assert rc == 0, rc
+        assert captured["name"] == "demo"
+        assert captured["path"] == "/tmp/here"
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: missing name and dir are asked for on a terminal")
+
+
+def test_cmd_project_create_dir_prompt_defaults_to_cwd() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY(["demo", ""])
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args())
+        assert rc == 0, rc
+        assert captured["name"] == "demo"
+        assert captured["path"] == str(Path.cwd())
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: an empty dir answer falls back to the current directory")
+
+
+def test_cmd_project_create_flags_skip_prompts() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY([], tty=True, raise_on_empty=True)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = cli.cmd_project_create(_args(
+                name="demo", path=tmp, no_gh=True, public=True,
+                description="skip", allow_unsupervised=True))
+        assert rc == 0, rc
+        assert captured["name"] == "demo"
+        assert captured["path"] == tmp
+        assert captured["gh"] is False and captured["public"] is True
+        assert captured["allow_unsupervised"] is True
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: explicit flags are used as-is with no prompting")
+
+
+def test_cmd_project_create_noninteractive_missing_name_errors() -> None:
+    called: list = []
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = lambda *a, **k: called.append(a)
+    cli.sys.stdin = _FakeTTY([], tty=False)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args())
+        assert rc == 1, rc
+        assert called == [], "create must not run without a name"
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: without a terminal and without --name, create refuses clearly")
+
+
+def test_cmd_project_create_gh_prompt_no_skips_github() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY(["demo", "/tmp/here", "n"])
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args())
+        assert rc == 0, rc
+        assert captured["gh"] is False, captured
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: answering n to the GitHub prompt creates locally only")
+
+
+def test_cmd_project_create_public_and_description_prompts() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY(["demo", "/tmp/here", "y", "y", "a demo repo"])
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args())
+        assert rc == 0, rc
+        assert captured["gh"] is True
+        assert captured["public"] is True
+        assert captured["description"] == "a demo repo"
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: gh=yes then asks about visibility and description")
+
+
+def test_cmd_project_create_unsupervised_prompts_for_override() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY(["y"])
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_project_create(_args(name="demo", path=tmp,
+                                                  no_gh=True))
+        assert rc == 0, rc
+        assert captured["allow_unsupervised"] is True
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: an unsupervised parent asks before creating it anyway")
+
+
+def test_cmd_project_create_supervised_dir_never_asks_override() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.create
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.create = _capture_create(captured)
+    cli.sys.stdin = _FakeTTY([], tty=True, raise_on_empty=True)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_create(_args(name="demo",
+                                              path=str(Path.home()),
+                                              no_gh=True))
+        assert rc == 0, rc
+        assert captured["allow_unsupervised"] is False
+    finally:
+        cli.project_mod.create = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: a supervised parent is created without any override prompt")
 
 
 def main() -> int:

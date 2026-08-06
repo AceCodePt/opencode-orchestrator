@@ -500,14 +500,79 @@ def cmd_project_help(args: argparse.Namespace) -> int:
     return 0
 
 
+def _interactive() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def _prompt(message: str) -> str | None:
+    try:
+        return input(message).strip()
+    except EOFError:
+        return None
+
+
+def _yesno(message: str, default: bool) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    answer = _prompt(f"{message} [{suffix}] ")
+    if answer is None or answer == "":
+        return default
+    return answer.lower() in ("y", "yes")
+
+
 def cmd_project_create(args: argparse.Namespace) -> int:
+    interactive = _interactive()
+
+    name = args.flag_name or args.name
+    if not name:
+        if not interactive:
+            print("  ! a name is required: pass `--name <name>` "
+                  "(stdin is not a terminal)", file=sys.stderr)
+            return 1
+        name = _prompt("project name: ")
+        if not name:
+            print("  ! no project name given", file=sys.stderr)
+            return 1
+
+    path = args.path
+    if path is None and interactive:
+        default = str(Path.cwd())
+        p = _prompt(f"parent directory [{default}]: ")
+        if p:
+            path = str(Path(p).expanduser())
+    if path is None:
+        path = str(Path.cwd())
+
+    gh = args.no_gh is not True
+    if args.no_gh is None and interactive:
+        gh = _yesno("create and push a GitHub repo", default=True)
+
+    public = bool(args.public)
+    if args.public is None and interactive and gh:
+        public = _yesno("make the GitHub repo public", default=False)
+
+    description = args.description
+    if args.description is None and interactive and gh:
+        d = _prompt("repo description (optional): ")
+        description = d or None
+
+    allow = bool(args.allow_unsupervised)
+    if args.allow_unsupervised is None and interactive:
+        parent = Path(path).expanduser()
+        if project_mod._unsupervised(parent, state.default_roots()):
+            allow = _yesno("the parent is outside the supervised roots; "
+                           "create it anyway", default=False)
+
     r = project_mod.create(
-        args.name,
-        path=args.path,
-        gh=not args.no_gh,
-        public=args.public,
-        description=args.description,
+        name,
+        path=path,
+        gh=gh,
+        public=public,
+        description=description,
         version=__version__,
+        allow_unsupervised=allow,
     )
     for s in r.steps:
         print(f"  {s}")
@@ -670,13 +735,24 @@ def build_parser() -> argparse.ArgumentParser:
         "create",
         help="scaffold a new git project (gh repo + orch init by default)",
     )
-    pc.add_argument("name")
-    pc.add_argument("--path", help="parent directory (default: current directory)")
-    pc.add_argument("--no-gh", action="store_true",
-                    help="skip creating the GitHub repo")
-    pc.add_argument("--public", action="store_true",
-                    help="make the GitHub repo public (default: private)")
-    pc.add_argument("--description", help="GitHub repo description")
+    pc.add_argument("name", nargs="?", default=None,
+                    help="project name (prompts for it if omitted)")
+    pc.add_argument("--name", dest="flag_name",
+                    help="project name (same as the positional)")
+    pc.add_argument("--dir", "--path", dest="path", default=None,
+                    help="parent directory (default: current directory; "
+                         "prompts for it if omitted)")
+    pc.add_argument("--no-gh", action="store_true", default=None,
+                    help="skip creating the GitHub repo (prompts if omitted)")
+    pc.add_argument("--public", action="store_true", default=None,
+                    help="make the GitHub repo public (default: private; "
+                         "prompts if omitted)")
+    pc.add_argument("--description", help="GitHub repo description "
+                                          "(prompts if omitted)")
+    pc.add_argument("--allow-unsupervised", action="store_true", default=None,
+                    help="create even outside the supervised roots (the daemon "
+                         "will not discover it; prompts if the parent is "
+                         "outside the roots)")
     pc.set_defaults(func=cmd_project_create)
 
     g = sub.add_parser("gate", help="can this project's gates be trusted")

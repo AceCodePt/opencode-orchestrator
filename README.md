@@ -38,7 +38,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 
 ```bash
 bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples)
-bin/orch project create <name>   # new project: git init + orch init + a private gh repo, pushed
+bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
 bin/orch gate                    # can this project's gate be trusted
 bin/orch gate-run                # run the committed gate here and report
 bin/orch doctor                  # verify the contracts that fail silently
@@ -93,12 +93,20 @@ blocked on a permission/question.
 
 ## Creating a project from scratch
 
-`orch project create <name>` is the from-zero path: it `git init`s a repo on
-`main`, runs `orch init` inside it, commits the base, and (by default) creates a
-**private** GitHub repo and pushes — `gh` must be installed and authenticated or
-the command aborts (`--no-gh` creates locally only, `--public` flips visibility,
-`--path` chooses the parent). Then `orch task draft "<free text>"` has a one-shot
-agent convert an idea — or a whole pasted spec — into `tasks/<name>/task.md`
+`orch project create <name>` (or `--name <name>`, or neither: it asks) is the
+from-zero path: it `git init`s a repo on `main`, runs `orch init` inside it,
+commits the base, and (by default) creates a **private** GitHub repo and pushes —
+`gh` must be installed and authenticated or the command aborts (`--no-gh` creates
+locally only, `--public` flips visibility, `--dir <parent>` chooses the parent,
+prompting for it too when omitted). On a terminal every omitted flag is asked:
+name, parent directory, whether to create a GitHub repo, visibility, description,
+and — if the parent is outside a supervised root — whether to create it anyway.
+The parent must otherwise be inside a supervised root
+(`$HOME`, `/mnt`, or `ORCH_ROOTS`) — a project the daemon cannot discover would
+never settle, so create refuses and says so; `--allow-unsupervised` creates one
+anyway, and `ORCH_ROOTS=/` supervises the whole filesystem. Then
+`orch task draft "<free text>"` has a
+one-shot agent convert an idea — or a whole pasted spec — into `tasks/<name>/task.md`
 specs for you to review and commit. Both commands leave the project on the
 base worktree with the fail-closed gate; edit `.orchestration/hooks/session-idle`
 to real checks before dispatching, and keep the project under `$HOME`/`/mnt`

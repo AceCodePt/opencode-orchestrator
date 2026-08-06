@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import init as init_mod
+from . import state
 
 DEFAULT_BASE = "main"
 
@@ -54,9 +55,25 @@ def gh_ready() -> tuple[bool, str | None]:
     return True, None
 
 
+def _unsupervised(parent: Path, roots: list[str]) -> str | None:
+    for r in roots:
+        root = Path(r).expanduser()
+        if parent == root or parent.is_relative_to(root):
+            return None
+    return ("the parent directory is outside every supervised root. "
+            "orch only supervises what the daemon discovers, so a project "
+            "created here would never be settled. Create inside one of: "
+            + ", ".join(repr(r) for r in roots)
+            + ". To supervise elsewhere, set ORCH_ROOTS (e.g. ORCH_ROOTS=/ "
+              "supervises the whole filesystem), or pass --allow-unsupervised "
+              "to create an unsupervised project anyway.")
+
+
 def create(name: str, path: str | None = None, gh: bool = True,
            public: bool = False, description: str | None = None,
-           base: str = DEFAULT_BASE, version: str = "0") -> CreateResult:
+           base: str = DEFAULT_BASE, version: str = "0",
+           roots: list[str] | None = None,
+           allow_unsupervised: bool = False) -> CreateResult:
     result = CreateResult(ok=True)
 
     name = name.strip()
@@ -72,6 +89,12 @@ def create(name: str, path: str | None = None, gh: bool = True,
         ok, err = gh_ready()
         if not ok:
             return result.fail(err or "gh is not available")
+
+    if not allow_unsupervised:
+        supervised = _unsupervised(parent, roots if roots is not None
+                                   else state.default_roots())
+        if supervised:
+            return result.fail(supervised)
 
     parent.mkdir(parents=True, exist_ok=True)
     rc, out = _run(["git", "init", "-b", base, name], cwd=parent)

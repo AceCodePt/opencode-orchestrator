@@ -183,7 +183,7 @@ string cannot do this job.
 | Command | Does |
 | --- | --- |
 | `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template) |
-| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips) |
+| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated) |
 | `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit) |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
