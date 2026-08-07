@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, envfilter, gate
+from . import dispatch, envfilter, gate, state
 
 TEMPLATE = """---
 hitl: {hitl}
@@ -89,9 +89,16 @@ def add_many(
 ) -> AddResult:
     result = AddResult()
 
-    root, _, err = dispatch.project_of(start)
+    root, common, err = dispatch.project_of(start)
     if err or root is None:
         return result.fail(err or "not inside a git worktree")
+
+    if common is not None:
+        state.trust_project(common)
+        result.notes.append(
+            "trusted this project for the daemon (auto from `task add`); "
+            "`orch project untrust` revokes that."
+        )
 
     if len(names) > 1 and title:
         return result.fail(
@@ -187,9 +194,16 @@ def draft_specs(start: Path, text: str, auto: bool = False,
     from . import server
 
     result = AddResult()
-    root, _, err = dispatch.project_of(start)
+    root, common, err = dispatch.project_of(start)
     if err or root is None:
         return result.fail(err or "not inside a git worktree")
+
+    if common is not None:
+        state.trust_project(common)
+        result.notes.append(
+            "trusted this project for the daemon (auto from `task draft`); "
+            "`orch project untrust` revokes that."
+        )
 
     try:
         srv = server.start()

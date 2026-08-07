@@ -182,13 +182,13 @@ string cannot do this job.
 
 | Command | Does |
 | --- | --- |
-| `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template) |
+| `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template). The project is trusted for the daemon as it scaffolds |
 | `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides. Created projects are trusted automatically |
 | `orch project trust [--dir]` | machine-level approval that lets the daemon gate, merge, dispatch and resolve in this project. The marker lives in `~/.local/state/orch/trusted.json`, keyed by the repo's git common dir — outside the repo, so a project cannot approve itself |
 | `orch project untrust [--dir]` | revoke that approval; running agents and worktrees are left alone, the daemon just stops settling them |
 | `orch project list` | every discovered project and its trust status (`--json`) |
-| `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated) |
-| `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit) |
+| `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
+| `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit). The project is trusted for the daemon |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project |
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted; `--preseed` additionally records the `allow` as an always-rule in `.orchestration/config.json` for review and commit |

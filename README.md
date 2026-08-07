@@ -37,7 +37,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples)
+bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples) and trust the project
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
 bin/orch project trust [--dir]    # let the daemon gate/merge/dispatch this project (created projects are trusted automatically)
 bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
@@ -47,8 +47,8 @@ bin/orch gate-run                # run the committed gate here and report
 bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart
-bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md)
-bin/orch task draft "<text>"     # an agent converts free text into tasks/ specs (--file - for stdin)
+bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md) and trust the project
+bin/orch task draft "<text>"     # an agent converts free text into tasks/ specs and trusts the project (--file - for stdin)
 bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
@@ -80,8 +80,10 @@ everything else still looks healthy, which is why `doctor` fails when it is miss
 gated: a project the machine owner has not approved (`orch project trust`) is never
 gated, merged, scheduled or resolved — it only raises an `alert` saying so. The marker
 lives in `~/.local/state/orch/trusted.json`, outside the repo, so a project cannot
-approve itself. A repo you merely clone can never auto-run its gate. `orch project
-create` trusts what it creates; `doctor` fails on an untrusted project.
+approve itself. A repo you merely clone can never auto-run its gate. `orch init`,
+`orch project create`, `orch task add`, and `orch task draft` all trust the project
+they scaffold work into (each is the owner acting); `doctor` fails on an untrusted
+project.
 
 Requires opencode **1.18.11 or newer**.
 

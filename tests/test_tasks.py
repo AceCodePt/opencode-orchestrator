@@ -70,6 +70,34 @@ def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
     print("ok: add creates the spec and writes no TASKS.md")
 
 
+def test_task_add_auto_trusts_the_project() -> None:
+    import os
+
+    saved = os.environ.get("XDG_STATE_HOME")
+    stmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_STATE_HOME"] = stmp.name
+    try:
+        root, tmp = _repo()
+        common = Path(subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, check=True).stdout.strip())
+        assert not state.is_trusted(common)
+        r = tasks.add_many(root, ["fix-auth"])
+        assert r.ok, r.notes
+        assert state.is_trusted(common), \
+            "a project the CLI initializes work in must be trusted"
+        assert any("trusted this project" in n for n in r.notes), r.notes
+        tmp.cleanup()
+    finally:
+        stmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved
+    print("ok: `task add` trusts the project it scaffolds work into")
+
+
 def test_add_is_idempotent() -> None:
     root, tmp = _repo()
     tasks.add_many(root, ["fix-auth"])
@@ -248,10 +276,22 @@ def test_outside_a_worktree_is_refused() -> None:
 
 
 def main() -> int:
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for t in tests:
-        t()
-    print(f"\n{len(tests)} task-add tests passed")
+    import os
+
+    saved = os.environ.get("XDG_STATE_HOME")
+    stmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_STATE_HOME"] = stmp.name
+    try:
+        tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+        for t in tests:
+            t()
+        print(f"\n{len(tests)} task-add tests passed")
+    finally:
+        stmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved
     return 0
 
 

@@ -211,6 +211,21 @@ def run(start: Path, force: bool = False, version: str = "0",
         "no gate at all. A dispatched agent was observed rewriting its own gate to "
         "make it pass, which is why the committed version is the only authority."
     )
+
+    from . import state
+    rc, common = _git(["rev-parse", "--path-format=absolute",
+                       "--git-common-dir"], target)
+    if rc == 0 and common:
+        state.trust_project(Path(common))
+        notes.append(
+            "trusted this project for the daemon - it will gate, merge and "
+            "dispatch here. `orch project untrust` revokes that."
+        )
+    else:
+        notes.append(
+            "could not resolve the git common dir, so this project was not "
+            "trusted; `orch project trust` opts it in."
+        )
     return InitResult(created, skipped, notes)
 
 
