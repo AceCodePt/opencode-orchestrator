@@ -144,7 +144,7 @@ def _find_orch_dirs(root: str, maxdepth: int = MAX_DEPTH) -> list[Path]:
         return []
     lines: list[str] = []
 
-    fd_cmd = ["fd", "-H", "-t", "d", "-d", str(maxdepth)]
+    fd_cmd = ["fd", "-H", "-t", "d", "-d", str(maxdepth), "-g"]
     for n in PRUNE:
         fd_cmd += ["-E", n]
     fd_cmd += [ORCH_DIR, root]

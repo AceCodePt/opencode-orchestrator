@@ -175,6 +175,45 @@ def test_discover_finds_orchestration_dirs() -> None:
     print("ok: discovery finds a project by its .orchestration dir")
 
 
+def test_discover_ignores_orchestration_like_folder_names() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        root = Path(tmp.name)
+        real = root / "real"
+        real.mkdir(parents=True)
+        _git(real, "init", "-q", "-b", "main")
+        _git(real, "config", "user.email", "t@t")
+        _git(real, "config", "user.name", "t")
+        (real / "seed").write_text("x")
+        _git(real, "add", "-A")
+        _git(real, "commit", "-q", "-m", "seed")
+        orch = real / ".orchestration"
+        orch.mkdir()
+        (orch / "config.json").write_text('{"baseBranch": "main"}\n')
+        _git(real, "add", "-A")
+        _git(real, "commit", "-q", "-m", "orch")
+
+        fake = root / "fake"
+        fake.mkdir(parents=True)
+        _git(fake, "init", "-q", "-b", "main")
+        _git(fake, "config", "user.email", "t@t")
+        _git(fake, "config", "user.name", "t")
+        (fake / "seed").write_text("x")
+        _git(fake, "add", "-A")
+        _git(fake, "commit", "-q", "-m", "seed")
+        task = fake / "tasks" / "property-enrichment-orchestration"
+        task.mkdir(parents=True)
+        (task / "task.md").write_text("# x\n")
+
+        found = state.discover_projects([str(root)])
+        assert len(found) == 1, \
+            f"a folder ending in '-orchestration' is not .orchestration: {found}"
+        assert str(real) in str(list(found.values())[0])
+    finally:
+        tmp.cleanup()
+    print("ok: discovery matches a literal .orchestration dir, not '-orchestration'")
+
+
 def test_fingerprint_tracks_worktree_content() -> None:
     root, tmp = _repo()
     _task(root, "a-task")
