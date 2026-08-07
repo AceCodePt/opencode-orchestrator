@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -56,6 +57,7 @@ class LoopState:
     wait_until: dict[tuple[str, str], int] = field(default_factory=dict)
     gating_until: dict[tuple[str, str], int] = field(default_factory=dict)
     alerted: set[str] = field(default_factory=set)
+    trusted_alerted: set[str] = field(default_factory=set)
     dispatch_backoff: dict[tuple[str, str], int] = field(default_factory=dict)
     dispatch_error: dict[tuple[str, str], str] = field(default_factory=dict)
     dispatch_seen: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -74,6 +76,7 @@ class Snapshot:
     tasks: list[state.TaskState]
     mem: LoopState
     policies: dict[str, state.SchedulerPolicy] = field(default_factory=dict)
+    trusted: set[str] = field(default_factory=set)
 
 
 def project_label(project: str) -> str:
@@ -104,8 +107,23 @@ def decide(snap: Snapshot) -> list[Action]:
         ))
         return actions
 
+    untrusted = sorted({t.project for t in snap.tasks
+                        if t.project not in snap.trusted})
+    for proj in untrusted:
+        if proj in mem.trusted_alerted:
+            continue
+        mem.trusted_alerted.add(proj)
+        actions.append(Action(
+            ALERT, None, "project-not-trusted",
+            f"supervised but not trusted; run `orch project trust` from any "
+            f"worktree of this project to let the daemon gate, merge and "
+            f"dispatch here", project=proj,
+        ))
+
     for t in snap.tasks:
         if not t.claimed:
+            continue
+        if t.project not in snap.trusted:
             continue
         key = (t.project, t.name)
 
@@ -259,6 +277,8 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
         by_project.setdefault(t.project, []).append(t)
 
     for project, tasks in by_project.items():
+        if project not in snap.trusted:
+            continue
         pol = snap.policies.get(project)
         if not pol or not pol.enabled or not pol.start:
             continue
@@ -332,6 +352,7 @@ class Supervisor:
             tasks=tasks,
             mem=self.mem,
             policies=policies,
+            trusted=state.trusted_projects(),
         )
 
     def _verify(self, a: Action) -> None:
@@ -581,12 +602,58 @@ def _run_config_cmd(cmd: list[str], out: list[str]) -> None:
         out.append(f"FAILED: {' '.join(cmd)}: {e}")
 
 
+OPENCODE_DENY_RULES = {
+    "**/.orchestration/**": "deny",
+    "$HOME/.config/opencode/opencode.json": "deny",
+}
+
+
+def opencode_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "opencode" / "opencode.json"
+
+
+def install_opencode_deny() -> tuple[bool, str]:
+    """Merge deny rules for `.orchestration/**` into the machine-level opencode
+    config, so no project agent can edit its own orchestration through the
+    edit/write/patch tools. Appended last: permission rules are evaluated in
+    order with the last matching rule winning."""
+    p = opencode_config_path()
+    cfg: dict = {}
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return False, f"could not read {p}; leaving it untouched"
+        if not isinstance(raw, dict):
+            return False, f"{p} is not a JSON object; leaving it untouched"
+        cfg = raw
+    perm = cfg.get("permission")
+    if not isinstance(perm, dict):
+        perm = {}
+    edit = perm.get("edit")
+    if not isinstance(edit, dict):
+        edit = {}
+    for key in OPENCODE_DENY_RULES:
+        edit.pop(key, None)
+    for key, val in OPENCODE_DENY_RULES.items():
+        edit[key] = val
+    perm["edit"] = edit
+    cfg["permission"] = perm
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    return True, f"deny rules for .orchestration/** written to {p}"
+
+
 def install(interval: float = 10.0, enable: bool = True) -> list[str]:
     out: list[str] = []
     path = unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(unit_text(interval))
     out.append(f"wrote {path}")
+
+    ok, msg = install_opencode_deny()
+    out.append(msg)
 
     if not enable:
         out.append("not enabled. To finish:")

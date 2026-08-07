@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +55,88 @@ def default_roots() -> list[str]:
     if env:
         return [r.strip() for r in env.split(",") if r.strip()]
     return [str(Path.home()), "/mnt"]
+
+
+# --- project trust ----------------------------------------------------------
+#
+# The daemon acts (gates, merges, dispatches, resolves, schedules) only on
+# projects the machine owner has approved. Approval is a machine-level fact in
+# ~/.local/state/orch/trusted.json, keyed by the repo's git common dir - never
+# part of any project, so a repo you merely clone cannot approve itself.
+
+def _trust_path() -> Path:
+    from . import server
+    return server.state_dir() / "trusted.json"
+
+
+def _read_trusted() -> dict:
+    try:
+        raw = json.loads(_trust_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_trusted(data: dict) -> None:
+    p = _trust_path()
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    tmp.replace(p)
+
+
+def trusted_projects() -> set[str]:
+    return {str(k) for k, v in (_read_trusted().get("projects") or {}).items() if v}
+
+
+def is_trusted(common: Path | str) -> bool:
+    return str(common) in trusted_projects()
+
+
+def trust_project(common: Path | str) -> bool:
+    data = _read_trusted()
+    projects = data.setdefault("projects", {})
+    projects[str(common)] = {"trustedAt": int(time.time())}
+    _write_trusted(data)
+    return True
+
+
+def untrust_project(common: Path | str) -> bool:
+    data = _read_trusted()
+    projects = data.get("projects") or {}
+    if str(common) not in projects:
+        return False
+    projects.pop(str(common), None)
+    _write_trusted(data)
+    return True
+
+
+def preseed_permission(common: Path, rule: dict) -> tuple[bool, str]:
+    """Record an always-allow rule for unattended agents at the orchestration
+    level: appended to the base worktree's .orchestration/config.json for a
+    human to review and commit. It is not applied until committed, and an agent
+    cannot edit it (the deny rule covers .orchestration/)."""
+    proj = Project.from_common(common)
+    if proj is None or proj.base_worktree is None:
+        return False, "no base worktree to preseed into"
+    cfg_path = proj.base_worktree / ORCH_DIR / "config.json"
+    if not cfg_path.exists():
+        return False, "no .orchestration/config.json on the base worktree"
+    cfg = _read_config(cfg_path.parent)
+    always = cfg.setdefault("permissions", {}).setdefault("always", [])
+    for r in always:
+        if (isinstance(r, dict) and r.get("tool") == rule.get("tool")
+                and r.get("pattern") == rule.get("pattern")):
+            return True, "already preseeded"
+    always.append(rule)
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    return True, (f"preseeded {rule.get('tool')} {rule.get('pattern')!r} into "
+                  f"{cfg_path}; review and commit it on {proj.base} for it to "
+                  f"apply to unattended agents")
 
 
 def _find_orch_dirs(root: str, maxdepth: int = MAX_DEPTH) -> list[Path]:
@@ -295,7 +378,9 @@ def dispatch_pid(worktree: str, orchestrated: bool = False) -> int | None:
             continue
         if orchestrated and not _detached(pid):
             continue
-        if wt in cmd:
+        # The cwd is set by the kernel and is the same worktree we spawned the
+        # agent in; a substring match on argv is spoofable and ambiguous.
+        if _cwd(pid) == wt:
             return pid
     return None
 
@@ -303,7 +388,7 @@ def dispatch_pid(worktree: str, orchestrated: bool = False) -> int | None:
 def resolution_pid(base_worktree: str, task: str) -> int | None:
     """The pid of the agent resolving <task>'s merge conflict in the base
     worktree, if one is running. The base worktree is shared, so the match is
-    on the worktree path AND the task-specific title, not just the path."""
+    on the kernel-set cwd AND the task-specific title, not just the path."""
     wt = os.path.realpath(base_worktree)
     marker = f"{task}-merge-conflict"
     for pid in _pids():
@@ -312,9 +397,16 @@ def resolution_pid(base_worktree: str, task: str) -> int | None:
             continue
         if not _detached(pid):
             continue
-        if wt in cmd and marker in cmd:
+        if _cwd(pid) == wt and marker in cmd:
             return pid
     return None
+
+
+def _cwd(pid: int) -> str | None:
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{pid}/cwd"))
+    except OSError:
+        return None
 
 
 def _session_of(tf: observe.TaskFact) -> str:
@@ -426,4 +518,15 @@ def fingerprint(worktree: Path | str) -> str:
     h.update(out.encode())
     rc, head = _git(worktree, "rev-parse", "HEAD")
     h.update(head.encode())
+    # Untracked files show up in `status` as just "?? name", so their content is
+    # invisible to the diff. A task worktree's deliverable is usually brand new,
+    # so an agent fixing it must register as a change or the retry loop mistakes
+    # the fix for a stall and never re-verifies.
+    rc, files = _git(worktree, "ls-files", "-o", "--exclude-standard")
+    for name in sorted(x for x in files.splitlines() if x.strip()):
+        try:
+            h.update(name.encode())
+            h.update(Path(worktree, name).read_bytes())
+        except OSError:
+            pass
     return h.hexdigest()

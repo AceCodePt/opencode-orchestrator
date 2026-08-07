@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate, state
+from . import dispatch, gate, server, state
 
 TASKS_REL = "tasks"
 ARCHIVE_REL = "archive"
@@ -53,6 +53,7 @@ def _kill_dispatch(worktree: Path) -> None:
     pid = state.dispatch_pid(str(worktree))
     if pid is None:
         return
+    ticks = server.proc_start_ticks(pid)
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
@@ -62,10 +63,13 @@ def _kill_dispatch(worktree: Path) -> None:
         if state.dispatch_pid(str(worktree)) is None:
             return
         time.sleep(0.2)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except OSError:
-        pass
+    # Only escalate if it really is still the same process; the pid may have
+    # been recycled in the meantime.
+    if ticks is None or server.pid_alive(pid, ticks):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:

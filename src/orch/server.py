@@ -21,7 +21,13 @@ STOP_GRACE_S = 5.0
 
 def state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "orch"
+    d = Path(base) / "orch"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    return d
 
 
 def _state_file() -> Path:
@@ -34,7 +40,7 @@ def _log_file() -> Path:
 
 def _neutral_cwd() -> Path:
     d = state_dir() / "server-cwd"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return d
 
 
@@ -102,9 +108,13 @@ def read_state() -> ServerInfo | None:
 
 def write_state(info: ServerInfo) -> None:
     p = _state_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(info), indent=2))
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
     tmp.replace(p)
 
 
@@ -162,8 +172,11 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
             stop()
 
     log = _log_file()
-    log.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(log, "wb", buffering=0)
+    log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle = os.fdopen(
+        os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+        "wb", buffering=0,
+    )
     try:
         proc = subprocess.Popen(
             [opencode, "serve", "--port", "0", "--print-logs", "--log-level", "INFO"],

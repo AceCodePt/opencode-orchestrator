@@ -110,9 +110,11 @@ def abort(port: int, session_id: str) -> Any:
 
 
 def reply_permission(port: int, session_id: str, permission_id: str,
-                     response: str, remember: bool = False) -> Any:
+                     response: str) -> Any:
+    """Approve once. Persistence is orchestration-level (orch preseed), never a
+    runtime `remember` on the server."""
     return post(port, f"/session/{session_id}/permissions/{permission_id}",
-                {"response": response, "remember": remember})
+                {"response": response})
 
 
 def reply_question(port: int, request_id: str, answers: Any) -> Any:

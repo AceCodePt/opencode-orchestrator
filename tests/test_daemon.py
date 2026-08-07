@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,7 @@ def _snap(**kw) -> daemon.Snapshot:
     base = dict(now=NOW, server_running=True, server_unresponsive=False,
                 port=4096, tasks=[_task()], mem=daemon.LoopState())
     base.update(kw)
+    base.setdefault("trusted", {t.project for t in base["tasks"]})  # type: ignore[index]
     return daemon.Snapshot(**base)  # type: ignore[arg-type]
 
 
@@ -204,6 +207,80 @@ def test_only_claimed_tasks_are_supervised() -> None:
     acts = daemon.decide(_snap(tasks=[_task(claimed=False)]))
     assert acts == []
     print("ok: todo and archived tasks are not supervised")
+
+
+def test_untrusted_projects_only_alert() -> None:
+    t = _task(session=state.SESSION_IDLE, dirty=True, diff=True)
+    acts = daemon.decide(_snap(tasks=[t], trusted=set()))
+    assert _kinds(acts) == [daemon.ALERT], _kinds(acts)
+    assert acts[0].reason == "project-not-trusted", acts[0].reason
+
+    mem = daemon.LoopState()
+    daemon.decide(_snap(tasks=[t], trusted={t.project}, mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], trusted={t.project}, mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    print("ok: an untrusted project only alerts; trusting it settles and verifies")
+
+
+def test_untrusted_projects_are_not_scheduled() -> None:
+    t = _task(claimed=False, declared=True, hitl=False)
+    snap = _snap(tasks=[t], trusted=set(),
+                 policies={t.project: state.SchedulerPolicy(
+                     enabled=True, max_concurrent=1, start=Path(WT))})
+    acts = daemon.decide(snap)
+    assert daemon.DISPATCH not in _kinds(acts), _kinds(acts)
+    print("ok: the scheduler never dispatches an untrusted project")
+
+
+def test_install_opencode_deny_merges_and_is_idempotent() -> None:
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    try:
+        p = daemon.opencode_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"permission": {"edit": {"*": "ask"}},
+                                 "other": True}))
+        ok, _ = daemon.install_opencode_deny()
+        assert ok
+        cfg = json.loads(p.read_text())
+        edit = cfg["permission"]["edit"]
+        assert edit["**/.orchestration/**"] == "deny"
+        assert edit["$HOME/.config/opencode/opencode.json"] == "deny"
+        assert edit["*"] == "ask", "existing rules must survive the merge"
+        assert cfg["other"] is True
+        daemon.install_opencode_deny()
+        cfg = json.loads(p.read_text())
+        assert cfg["permission"]["edit"]["**/.orchestration/**"] == "deny"
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved
+    print("ok: install merges the .orchestration deny into the global opencode "
+          "config, idempotently")
+
+
+def test_install_opencode_deny_refuses_unparseable_config() -> None:
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    try:
+        p = daemon.opencode_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("not json{")
+        ok, msg = daemon.install_opencode_deny()
+        assert not ok and "untouched" in msg
+        assert p.read_text() == "not json{"
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved
+    print("ok: an unparseable opencode config is never clobbered")
 
 
 def _gated_repo(gate_body: str) -> tuple[Path, tempfile.TemporaryDirectory]:

@@ -20,6 +20,16 @@ TEMPLATE_CONFIG = {
         "exclude": ["**/*.md", "docs/**", "tasks/**"],
         "retryCap": 3,
     },
+    "permissions": {
+        "$comment": (
+            "Declarative always-allow rules for unattended agents, e.g. "
+            "{\"tool\": \"bash\", \"pattern\": \"git status *\"}. `orch task "
+            "answer <name> allow --preseed` appends here. Only the committed "
+            "copy on the base branch applies, and an agent cannot edit "
+            ".orchestration/ (the global opencode config denies it)."
+        ),
+        "always": [],
+    },
 }
 
 TEMPLATE_SESSION_IDLE = """#!/usr/bin/env bash

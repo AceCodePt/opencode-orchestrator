@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import gate, harness, server
+from . import dispatch, gate, harness, server, state
 
 OK = "ok"
 WARN = "warn"
@@ -254,6 +254,55 @@ def check_gates(cwd: Path) -> list[Check]:
     return out
 
 
+def check_supervised_roots() -> list[Check]:
+    roots = state.default_roots()
+    if "/" in roots:
+        return [Check(
+            WARN, "ORCH_ROOTS includes /",
+            "discovery spans the whole filesystem. Authority is trust-gated, "
+            "but supervision should still be narrowed",
+        )]
+    return [Check(OK, "supervised roots", ", ".join(roots))]
+
+
+def check_opencode_deny() -> list[Check]:
+    from . import daemon as daemon_mod
+
+    p = daemon_mod.opencode_config_path()
+    if not p.exists():
+        return [Check(
+            FAIL, "no global opencode deny for .orchestration/",
+            "an agent could edit its own gate through the file tools. "
+            "`orch install` writes the deny rules",
+        )]
+    try:
+        cfg = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return [Check(FAIL, "global opencode config is unreadable", str(p))]
+    edit = ((cfg or {}).get("permission") or {}).get("edit") or {}
+    missing = [k for k in daemon_mod.OPENCODE_DENY_RULES
+               if edit.get(k) != "deny"]
+    if missing:
+        return [Check(
+            FAIL, "global opencode config does not deny .orchestration/**",
+            "missing deny for: " + ", ".join(missing) + ". `orch install`",
+        )]
+    return [Check(OK, "agents cannot edit .orchestration/", str(p))]
+
+
+def check_trust(cwd: Path) -> list[Check]:
+    _top, common, err = dispatch.project_of(cwd)
+    if err or common is None:
+        return []
+    if state.is_trusted(common):
+        return [Check(OK, "project is trusted by the daemon", str(common))]
+    return [Check(
+        FAIL, "project is not trusted",
+        "the daemon will not gate, merge or dispatch here. "
+        "`orch project trust` (from any worktree of this project)",
+    )]
+
+
 def check_harness() -> list[Check]:
     out: list[Check] = []
     exe = shutil.which("opencode")
@@ -278,9 +327,12 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_harness()
     checks += check_server()
     checks += check_daemon()
+    checks += check_opencode_deny()
+    checks += check_supervised_roots()
     checks += check_gates(cwd)
     checks += check_tooling()
     checks += check_project(cwd)
+    checks += check_trust(cwd)
     worst = 0
     for c in checks:
         if c.status == FAIL:

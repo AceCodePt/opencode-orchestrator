@@ -183,12 +183,15 @@ string cannot do this job.
 | Command | Does |
 | --- | --- |
 | `orch init` | scaffold `.orchestration/` (config + the `session-idle` gate template) |
-| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides |
+| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides. Created projects are trusted automatically |
+| `orch project trust [--dir]` | machine-level approval that lets the daemon gate, merge, dispatch and resolve in this project. The marker lives in `~/.local/state/orch/trusted.json`, keyed by the repo's git common dir — outside the repo, so a project cannot approve itself |
+| `orch project untrust [--dir]` | revoke that approval; running agents and worktrees are left alone, the daemon just stops settling them |
+| `orch project list` | every discovered project and its trust status (`--json`) |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated) |
 | `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit) |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project |
-| `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text) |
+| `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted; `--preseed` additionally records the `allow` as an always-rule in `.orchestration/config.json` for review and commit |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
 | `orch task merge <name>` | re-run a merge after a conflict |
@@ -359,7 +362,38 @@ built on the daemon's log + scan rather than on a verdict table.
 ## Settled: threat model, scope, and versions
 
 **The threat model is a lazy agent, not a hostile one.** An agent takes the shortest
-route to looking finished; it is not assumed to attack the machine.
+route to looking finished; it is not assumed to attack the machine. The blast radius is
+still bounded:
+
+- **Authority is trust-gated.** The daemon settles, gates, merges, dispatches and
+  resolves only in projects the machine owner approved (`orch project trust`);
+  untrusted projects raise a single deduped `alert` and nothing else. Discovery stays
+  wide so everything is visible, but a repo you merely clone can never auto-run its
+  gate or dispatch an agent. `doctor` fails on an untrusted project and warns when
+  `ORCH_ROOTS` includes `/`.
+- **The gate is the committed base copy** (the daemon runs it from `git show base:…`),
+  and `orch install` writes machine-level opencode permission rules denying
+  `edit`/`write` on `.orchestration/**` and on the config itself, so the lazy agent
+  cannot silently rewrite its own gate through its file tools. Working-tree edits still
+  surface as `diverged`.
+- **Agents and gates run with a filtered environment.** `SSH_AUTH_SOCK`, cloud
+  credentials, `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`, `DATABASE_URL`, `KUBECONFIG` and
+  friends are dropped before `opencode run` or a gate runs; provider keys survive.
+  Machine relaxation lives in `~/.config/orch/env.json` (`drop`/`keep`); a project can
+  only restrict further (`agentEnv.drop`) and a gate can opt into the full env
+  (`gate.env: full`). Env filtering is defence in depth, not containment: a hostile
+  agent with `bash` can still read `~/.ssh` from disk, which is why the threat model
+  stays lazy-agent.
+- **Permissions are one-time or orchestration-level.** `task answer` never persists to
+  opencode's runtime config; `--preseed` writes an always-rule into
+  `.orchestration/config.json` for the human to review and commit.
+- **Loopback control plane, private state.** The shared server binds `127.0.0.1`;
+  `~/.local/state/orch` is created `0700` with `0600` files, so other users can read
+  neither the port nor the session logs.
+
+Same-user compromise is explicitly out of scope: anything running as the same user can
+read the 0600 files and drive the agents. OS-level containment (sandboxing agents or
+gates) is deliberately not provided.
 
 **The scope is infrastructure, not agent workflow.** What an agent may do, which
 model it uses, what its prompt says — all out of scope. A project supplies its own

@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import dispatch
 from . import init as init_mod
 from . import state
 
@@ -69,6 +70,40 @@ def _unsupervised(parent: Path, roots: list[str]) -> str | None:
               "to create an unsupervised project anyway.")
 
 
+def trust(start: Path) -> tuple[bool, str]:
+    """Mark the current project's repo as trusted by the machine owner, so the
+    daemon will gate, merge and dispatch here. The marker lives outside the
+    repo - a project cannot trust itself."""
+    _top, common, err = dispatch.project_of(start)
+    if err or common is None:
+        return False, err or "not inside a git worktree"
+    if state.is_trusted(common):
+        return True, f"already trusted: {common}"
+    state.trust_project(common)
+    return True, f"trusted {common} - the daemon will gate, merge and dispatch here"
+
+
+def untrust(start: Path) -> tuple[bool, str]:
+    """Revoke the daemon's permission to act on this project. It does not kill
+    a running agent or touch any worktree - it just stops settling them."""
+    _top, common, err = dispatch.project_of(start)
+    if err or common is None:
+        return False, err or "not inside a git worktree"
+    if not state.is_trusted(common):
+        return True, f"not trusted: {common}"
+    state.untrust_project(common)
+    return True, f"untrusted {common} - the daemon will stop acting on it"
+
+
+def list_projects() -> list[dict]:
+    trusted = state.trusted_projects()
+    return [
+        {"common": str(common), "trusted": str(common) in trusted,
+         "orchDir": str(orch)}
+        for common, orch in sorted(state.discover_projects().items())
+    ]
+
+
 def create(name: str, path: str | None = None, gh: bool = True,
            public: bool = False, description: str | None = None,
            base: str = DEFAULT_BASE, version: str = "0",
@@ -118,6 +153,12 @@ def create(name: str, path: str | None = None, gh: bool = True,
     if rc != 0:
         return result.fail(out or "initial commit failed")
     result.step("committed the base branch")
+
+    rc, common = _run(["git", "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"], cwd=target)
+    if rc == 0 and common:
+        state.trust_project(Path(common))
+        result.step("trusted this project - the daemon will supervise it")
 
     if gh:
         vis = "public" if public else "private"

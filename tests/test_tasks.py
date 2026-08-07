@@ -147,14 +147,15 @@ def test_draft_specs_reports_the_files_the_agent_wrote() -> None:
     orig_start = server.start
     orig_run = subprocess.run
 
-    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0):
+    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0,
+                 **kwargs):
         if cmd and cmd[0] == "opencode":
             spec = root / "tasks" / "parsing" / "task.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
             spec.write_text("---\nhitl: true\n---\n# Task: Parsing\n")
             return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return orig_run(cmd, cwd=cwd, capture_output=capture_output,
-                        text=text, timeout=timeout)
+                        text=text, timeout=timeout, **kwargs)
 
     server.start = lambda **k: type("S", (), {"url": "http://127.0.0.1:1"})()
     subprocess.run = fake_run
@@ -176,11 +177,12 @@ def test_draft_fails_when_the_agent_writes_nothing() -> None:
     orig_start = server.start
     orig_run = subprocess.run
 
-    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0):
+    def fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=600.0,
+                 **kwargs):
         if cmd and cmd[0] == "opencode":
             return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return orig_run(cmd, cwd=cwd, capture_output=capture_output,
-                        text=text, timeout=timeout)
+                        text=text, timeout=timeout, **kwargs)
 
     server.start = lambda **k: type("S", (), {"url": "http://127.0.0.1:1"})()
     subprocess.run = fake_run

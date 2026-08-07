@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gate, server
+from . import envfilter, gate, server, state
 
 HOOK_PRE = "pre-task-create"
 HOOK_POST = "post-task-create"
@@ -232,7 +232,11 @@ def dispatch_command(p: Plan, url: str, json_stream: bool = True) -> list[str]:
 
 def log_path(p: Plan) -> Path:
     d = server.state_dir() / "tasks"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
     return d / f"{p.task}.jsonl"
 
 
@@ -254,8 +258,18 @@ def resolve_command(base_wt: Path, task: str, url: str) -> list[str]:
 
 def resolve_log_path(task: str) -> Path:
     d = server.state_dir() / "tasks"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
     return d / f"{slug(task)}.merge.jsonl"
+
+
+def _open_private(path: Path):
+    """Open a log for the agent's stdout with owner-only permissions."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, "wb", buffering=0)
 
 
 def start_resolve(base_wt: Path, task: str) -> Result:
@@ -271,12 +285,14 @@ def start_resolve(base_wt: Path, task: str) -> Result:
 
     cmd = resolve_command(base_wt, task, srv.url)
     out = resolve_log_path(task)
-    handle = open(out, "wb", buffering=0)
+    handle = _open_private(out)
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(base_wt), stdout=handle,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=envfilter.filtered_env(os.environ,
+                                       repo_drop=envfilter.repo_drops(base_wt)),
         )
     except OSError as e:
         handle.close()
@@ -310,6 +326,11 @@ def start(
 
     result.worktree = p.worktree
     result.step(f"task {p.task} -> {p.worktree} (branch {p.branch}, base {p.base})")
+
+    if not state.is_trusted(Path(p.project)):
+        result.step("note: this project is not trusted by the daemon, so it "
+                    "will not settle, gate or merge this task. "
+                    "`orch project trust` fixes that.")
 
     if branch_exists(Path(p.project), p.branch):
         return result.fail(
@@ -375,12 +396,14 @@ def start(
 
     cmd = dispatch_command(p, srv.url)
     out = log_path(p)
-    handle = open(out, "wb", buffering=0)
+    handle = _open_private(out)
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(p.worktree), stdout=handle,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=envfilter.filtered_env(os.environ,
+                                       repo_drop=envfilter.repo_drops(p.dispatcher)),
         )
     except OSError as e:
         handle.close()

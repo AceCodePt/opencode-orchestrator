@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate
+from . import dispatch, envfilter, gate
 
 TEMPLATE = """---
 hitl: {hitl}
@@ -201,7 +202,9 @@ def draft_specs(start: Path, text: str, auto: bool = False,
            draft_prompt(text, auto)]
     try:
         p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout,
+                           env=envfilter.filtered_env(
+                               os.environ, repo_drop=envfilter.repo_drops(root)))
     except (OSError, subprocess.TimeoutExpired) as e:
         return result.fail(f"could not run the drafting agent: {e}")
     if p.returncode != 0:

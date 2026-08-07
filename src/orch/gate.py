@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import envfilter
+
 ORCH_DIR = ".orchestration"
 HOOKS_REL = f"{ORCH_DIR}/hooks"
 CONFIG_REL = f"{ORCH_DIR}/config.json"
@@ -181,8 +183,13 @@ def run(
         exe.write_text(committed)
         exe.chmod(0o755)
 
+        if envfilter.gate_env_full(worktree):
+            base_env = dict(os.environ)
+        else:
+            base_env = envfilter.filtered_env(
+                os.environ, repo_drop=envfilter.repo_drops(worktree))
         env = {
-            **os.environ,
+            **base_env,
             "WORKTREE_PATH": str(worktree),
             "WORKTREE_NAME": worktree.name,
             "ORCH_EVENT": event,

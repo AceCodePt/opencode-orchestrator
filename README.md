@@ -39,6 +39,9 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 ```bash
 bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples)
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
+bin/orch project trust [--dir]    # let the daemon gate/merge/dispatch this project (created projects are trusted automatically)
+bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
+bin/orch project list             # every discovered project and its trust status
 bin/orch gate                    # can this project's gate be trusted
 bin/orch gate-run                # run the committed gate here and report
 bin/orch doctor                  # verify the contracts that fail silently
@@ -50,6 +53,7 @@ bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
 bin/orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
+bin/orch task answer <name> allow --preseed  # also record it as an always-rule in .orchestration/config.json
 bin/orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
@@ -71,6 +75,13 @@ bin/orch version                  # show the orch version
 gates, retriggers failing agents, merges verified branches, and archives done work.
 Without it, nothing is ever settled or verified, so nothing reaches done — and
 everything else still looks healthy, which is why `doctor` fails when it is missing.
+
+**The daemon only *acts* on trusted projects.** Discovery is wide, but authority is
+gated: a project the machine owner has not approved (`orch project trust`) is never
+gated, merged, scheduled or resolved — it only raises an `alert` saying so. The marker
+lives in `~/.local/state/orch/trusted.json`, outside the repo, so a project cannot
+approve itself. A repo you merely clone can never auto-run its gate. `orch project
+create` trusts what it creates; `doctor` fails on an untrusted project.
 
 Requires opencode **1.18.11 or newer**.
 
@@ -137,18 +148,61 @@ Without it, dispatching stays a human act (`orch task start`). The scheduler nev
 dispatches ungated work, and it never dispatches a task you didn't opt in: a task
 needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
 — `orch task add --auto` or `orch task draft --auto` — lets the machine pick it.
+The scheduler also never dispatches in an untrusted project.
+
+## Security model
+
+This tool's job is to run LLM agents that execute code on your machine, unattended, so
+the honest question is what the *controls* are — the threat model is still a lazy agent,
+not a hostile one, but the blast radius is bounded:
+
+- **Authority is trust-gated.** The daemon only gates/merges/dispatches/resolves in
+  projects you approved (`orch project trust`); anything else only alerts. Discovery
+  (`$HOME`, `/mnt`, `ORCH_ROOTS`) stays wide so you can see everything, but nothing
+  auto-runs on a repo you merely cloned. `doctor` flags an untrusted project and warns
+  when `ORCH_ROOTS` includes `/`.
+- **The gate is the committed base copy, and agents cannot edit it.** The daemon runs
+  only the `session-idle` hook committed on the base branch; a working-tree edit shows
+  up as `diverged`. `orch install` additionally writes machine-level opencode permission
+  rules (`~/.config/opencode/opencode.json`) denying `edit`/`write` on
+  `.orchestration/**` and on that config itself, so an agent cannot silently rewrite its
+  own gate through its file tools.
+- **Agents and gates get a filtered environment.** Secrets that no agent or gate needs
+  (`SSH_AUTH_SOCK`, cloud credentials, `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`,
+  `DATABASE_URL`, `KUBECONFIG`, …) are dropped before `opencode run` or a gate runs.
+  Provider keys (`*_API_KEY`, `*_AUTH_TOKEN`) survive — opencode needs them. The machine
+  owner relaxes via `~/.config/orch/env.json` (`drop`/`keep`); a project can only
+  *restrict* further (`"agentEnv": {"drop": [...]}`) and a gate can opt into the full
+  env with `"gate": {"env": "full"}`.
+- **Permissions are one-time, or orchestration-level.** `orch task answer` approves a
+  blocked permission once — nothing is persisted to opencode's runtime config. To make a
+  rule stick, `--preseed` records it in `.orchestration/config.json`
+  (`permissions.always`) for you to review and commit; only the committed copy applies.
+- **The control plane is loopback-only and the logs are private.** The shared server
+  binds `127.0.0.1`; state and session logs live in `~/.local/state/orch` created
+  `0700` with `0600` files, so other users cannot read conversations or the server port.
+
+Same-user compromise is out of scope: anything that already runs as you can read your
+files and drive the agents. If you need containment against hostile agents, run them in
+an OS-level sandbox — orch does not provide one.
 
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `gate`, `doctor`, `server`,
-`project create`, `ask`, and `task add`/`draft`/`start`/`list`/`answer`/`reset`/
-`archive`/`merge`,
+`project create`/`trust`/`untrust`/`list`, `ask`, and `task add`/`draft`/`start`/`list`/
+`answer`/`reset`/`archive`/`merge`,
 and the daemon — including the full loop of settle → gate → commit-on-pass → merge →
 archive, the failure loop of gate-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
-of `todo` tasks, opt-in per project). A slow agent that spends minutes inside a tool is
+of `todo` tasks, opt-in per project and trust-gated). A slow agent that spends minutes
+inside a tool is
 held, not torn down: the daemon treats a live detached `opencode run` process in the
 worktree as the agent working and only settles once it exits.
+
+The security controls are covered by unit tests: the **trust gate** (untrusted projects
+only alert), the **env filter** (agents and gates run without the owner's secrets), the
+**`.orchestration` deny** installed by `orch install`, and the **permission preseed**
+(`task answer --preseed`).
 
 `orch daemon` supervises: it settles tasks, runs the committed gate itself, retriggers
 failing agents up to `retryCap`, merges verified work, archives done work, restarts a

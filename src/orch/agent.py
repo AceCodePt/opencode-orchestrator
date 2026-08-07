@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
-from . import harness, observe, server, state
+from . import envfilter, harness, observe, server, state
 
 AGENT_TITLE = "orch:agent"
 
@@ -47,7 +48,9 @@ def create(info: server.ServerInfo, base: Path, text: str,
            "--format", "json", "--title", AGENT_TITLE, text]
     try:
         p = subprocess.run(cmd, cwd=str(base), capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout,
+                           env=envfilter.filtered_env(
+                               os.environ, repo_drop=envfilter.repo_drops(base)))
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, [f"could not start the primary agent: {e}"]
     if p.returncode != 0:

@@ -36,6 +36,8 @@ def _args(**kw) -> object:
     for k, v in kw.items():
         setattr(a, k, v)
     a.directory = None
+    if not hasattr(a, "preseed"):
+        a.preseed = False
     return a
 
 
@@ -52,11 +54,11 @@ def test_answer_allow_replies_to_a_permission() -> None:
     cli.harness.reply_permission = lambda *a, **k: replies.append((a, k))
     try:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="allow",
-                                       request=None, remember=False))
+                                       request=None))
         assert rc == 0, rc
         (port, sid, pid, reply), kw = replies[0]
         assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "allow")
-        assert kw == {"remember": False}
+        assert kw == {}, "an answer is one-time; persistence is orchestration-level"
     finally:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
@@ -74,7 +76,7 @@ def test_answer_rejects_non_allow_deny_for_a_permission() -> None:
                                      "port": 4096}
     try:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="maybe",
-                                       request=None, remember=False))
+                                       request=None))
         assert rc == 2, rc
     finally:
         cli.state.Project.from_dir = orig_from
@@ -95,7 +97,7 @@ def test_answer_question_routes_to_reply_question() -> None:
     cli.harness.reply_question = lambda *a, **k: sent.append((a, k))
     try:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="go ahead",
-                                       request=None, remember=False))
+                                       request=None))
         assert rc == 0, rc
         (port, rid, answers), kw = sent[0]
         assert port == 4096 and rid == "per_1"
@@ -117,7 +119,7 @@ def test_answer_unblocked_task_is_refused() -> None:
                                      "port": 4096}
     try:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="allow",
-                                       request=None, remember=False))
+                                       request=None))
         assert rc == 1, rc
     finally:
         cli.state.Project.from_dir = orig_from

@@ -284,9 +284,17 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
             if reply not in ("allow", "deny"):
                 print("a permission takes `allow` or `deny`", file=sys.stderr)
                 return 2
-            harness.reply_permission(port, b.session_id, b.request_id, reply,
-                                     remember=args.remember)
+            harness.reply_permission(port, b.session_id, b.request_id, reply)
             print(f"{reply}ed permission {b.request_id} for {args.name}")
+            if args.preseed:
+                if reply != "allow":
+                    print("--preseed only makes sense with allow", file=sys.stderr)
+                    return 2
+                ok, msg = state.preseed_permission(
+                    proj.common, {"tool": b.kind, "pattern": b.detail})
+                print(f"  {msg}")
+                if not ok:
+                    return 1
     except Exception as e:  # noqa: BLE001
         print(f"could not answer {b.request_id}: {e}", file=sys.stderr)
         return 1
@@ -588,6 +596,38 @@ def cmd_project_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_trust(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    ok, msg = project_mod.trust(start)
+    print(msg)
+    return 0 if ok else 1
+
+
+def cmd_project_untrust(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    ok, msg = project_mod.untrust(start)
+    print(msg)
+    return 0 if ok else 1
+
+
+def cmd_project_list(args: argparse.Namespace) -> int:
+    projects = project_mod.list_projects()
+    if args.json:
+        print(json.dumps(projects, indent=2))
+        return 0
+    if not projects:
+        print("no supervised projects discovered under "
+              + ", ".join(state.default_roots()))
+        return 0
+    for p in projects:
+        mark = "trusted" if p["trusted"] else "untrusted"
+        print(f"  {mark:9} {p['common']}")
+    print("\nroots: " + ", ".join(state.default_roots()))
+    print("trusted projects are settled by the daemon; untrusted ones only "
+          "alert until `orch project trust` runs")
+    return 0
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     return 0
@@ -707,8 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="allow|deny for a permission; the answer text for a question")
     ta2.add_argument("-C", "--directory")
     ta2.add_argument("--request", help="answer a specific pending request id")
-    ta2.add_argument("--remember", action="store_true",
-                     help="remember a permission decision, not just this once")
+    ta2.add_argument("--preseed", action="store_true",
+                     help="also record this `allow` as an always-rule in "
+                          ".orchestration/config.json (review and commit it)")
     ta2.set_defaults(func=cmd_task_answer)
 
     td = tsub.add_parser(
@@ -754,6 +795,27 @@ def build_parser() -> argparse.ArgumentParser:
                          "will not discover it; prompts if the parent is "
                          "outside the roots)")
     pc.set_defaults(func=cmd_project_create)
+
+    pt = pjsub.add_parser(
+        "trust",
+        help="let the daemon gate, merge and dispatch this project",
+    )
+    pt.add_argument("-C", "--directory")
+    pt.set_defaults(func=cmd_project_trust)
+
+    pu = pjsub.add_parser(
+        "untrust",
+        help="stop the daemon from acting on this project (does not touch worktrees)",
+    )
+    pu.add_argument("-C", "--directory")
+    pu.set_defaults(func=cmd_project_untrust)
+
+    pl = pjsub.add_parser(
+        "list",
+        help="every discovered project and its trust status",
+    )
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_project_list)
 
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")

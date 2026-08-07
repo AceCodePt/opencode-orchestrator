@@ -82,6 +82,33 @@ def test_state_round_trip_and_stale_clear() -> None:
     print("ok: state round-trips and stale records are cleared")
 
 
+def test_state_files_are_owner_only() -> None:
+    import stat
+
+    tmp = _isolate()
+    try:
+        info = server.ServerInfo(pid=os.getpid(), port=4096,
+                                 url="http://127.0.0.1:4096",
+                                 started_at=int(time.time()),
+                                 start_ticks=server.proc_start_ticks(os.getpid()))
+        server.write_state(info)
+        assert stat.S_IMODE(server._state_file().stat().st_mode) == 0o600, \
+            "server.json holds the port; other users must not read it"
+        assert not server._state_file().with_suffix(".tmp").exists(), \
+            "the atomic write must not leave its temp file"
+    finally:
+        tmp.cleanup()
+    print("ok: state files are created owner-only")
+
+    tmp2 = _isolate()
+    try:
+        assert stat.S_IMODE(server.state_dir().stat().st_mode) == 0o700, \
+            "the state dir must not be traversable by other users"
+    finally:
+        tmp2.cleanup()
+    print("ok: the state directory is created 0700")
+
+
 def test_status_distinguishes_gone_from_unresponsive() -> None:
     tmp = _isolate()
     try:

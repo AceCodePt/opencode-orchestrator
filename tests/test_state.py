@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pty
 import subprocess
@@ -186,6 +187,73 @@ def test_fingerprint_tracks_worktree_content() -> None:
     assert state.fingerprint(wt) == fp2
     tmp.cleanup()
     print("ok: the fingerprint reflects the worktree state")
+
+
+def test_fingerprint_tracks_untracked_file_content() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    wt = _claim(root, "a-task")
+    (wt / "out.txt").write_text("forty two")
+    fp1 = state.fingerprint(wt)
+    (wt / "out.txt").write_text("42")
+    fp2 = state.fingerprint(wt)
+    assert fp1 != fp2, \
+        "an agent fixing an untracked deliverable must register as a change, " \
+        "or the retry loop mistakes the fix for a stall"
+    assert state.fingerprint(wt) == fp2, "the fingerprint must be deterministic"
+    tmp.cleanup()
+    print("ok: editing an untracked file's content changes the fingerprint")
+
+
+def test_trust_round_trip_keyed_by_the_repo() -> None:
+    saved = os.environ.get("XDG_STATE_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_STATE_HOME"] = tmp.name
+    try:
+        root, repo_tmp = _repo()
+        common = Path(_git(root, "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"))
+        assert not state.is_trusted(common)
+        state.trust_project(common)
+        assert state.is_trusted(common)
+        assert str(common) in state.trusted_projects()
+        state.untrust_project(common)
+        assert not state.is_trusted(common)
+        repo_tmp.cleanup()
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved
+    print("ok: trust is a machine-level marker keyed by the repo's git dir")
+
+
+def test_preseed_permission_appends_idempotently() -> None:
+    saved = os.environ.get("XDG_STATE_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_STATE_HOME"] = tmp.name
+    try:
+        root, repo_tmp = _repo()
+        common = Path(_git(root, "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"))
+        rule = {"tool": "bash", "pattern": "git status *"}
+        ok, msg = state.preseed_permission(common, rule)
+        assert ok, msg
+        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+        assert cfg["permissions"]["always"] == [rule]
+        ok, msg = state.preseed_permission(common, rule)
+        assert ok and "already" in msg
+        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+        assert cfg["permissions"]["always"] == [rule], "no duplicates"
+        repo_tmp.cleanup()
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved
+    print("ok: preseed appends a rule to the base worktree's config, idempotently")
 
 
 def test_base_branch_comes_from_config() -> None:
