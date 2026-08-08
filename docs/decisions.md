@@ -234,7 +234,7 @@ in one source file has one place to check.
 - **`GET /session` is global, not per-server** — the `?directory=` filter is the only
   usable join from a task to its state.
 - **`server.heartbeat` separates "stream alive, agent quiet" from "stream dead"** —
-  the absence problem the watchdog has to solve.
+  the absence problem the daemon has to solve.
 
 ## `server.py`
 

@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Outcome Routing With a Per-Event Human-in-the-Loop Toggle
 
 ## Metadata

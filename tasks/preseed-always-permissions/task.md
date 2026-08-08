@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall
 
 ## Metadata

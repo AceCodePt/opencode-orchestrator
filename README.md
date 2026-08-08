@@ -52,6 +52,7 @@ bin/orch task draft "<text>"     # an agent converts free text into tasks/ specs
 bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
+bin/orch task list --global      # every project: what is waiting on you (blocked, stuck, unmerged)
 bin/orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
 bin/orch task answer <name> allow --preseed  # also record it as an always-rule in .orchestration/config.json
 bin/orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
@@ -227,7 +228,10 @@ Not built yet: routing `needs-review` onwards or unblocking a parent agent, and 
 machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
 
 When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
-`needs-review` tasks from the scan, `orch task answer` lets you reply to a blocked
+`needs-review` tasks from the scan, `orch task list --global` gathers that from
+every supervised project into one waiting-on-you report (blocked, merge conflicts,
+missing/dirty worktrees, projects with no committed gate, and unmerged work),
+`orch task answer` lets you reply to a blocked
 permission or question directly, and the daemon journal logs every `alert:` and
 `needs-review`. Notify add-ons integrate **with** `orch`, not the other way around:
 the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux) polls

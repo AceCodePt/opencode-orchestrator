@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import sys
@@ -11,17 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import cli, project  # noqa: E402
 
 
-def _args(**kw) -> object:
-    class A:
-        pass
-    a = A()
-    a.name = None
-    a.flag_name = None
-    a.path = None
-    a.no_gh = None
-    a.public = None
-    a.description = None
-    a.allow_unsupervised = None
+def _args(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(name=None, flag_name=None, path=None, no_gh=None,
+                           public=None, description=None,
+                           allow_unsupervised=None)
     for k, v in kw.items():
         setattr(a, k, v)
     return a

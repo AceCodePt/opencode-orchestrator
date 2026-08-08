@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import sys
@@ -7,12 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import agent, cli  # noqa: E402
+from orch import agent, cli, server, state  # noqa: E402
 
 
-class _Info:
-    port = 4096
-    url = "http://127.0.0.1:4096"
+_INFO = server.ServerInfo(pid=999, port=4096,
+                          url="http://127.0.0.1:4096", started_at=0)
 
 
 class _FakeProject:
@@ -20,22 +20,16 @@ class _FakeProject:
     common = Path("/tmp/lab/lab.git")
 
 
-def _args(**kw) -> object:
-    class A:
-        pass
-    a = A()
-    a.directory = None
-    a.timeout = 60.0
-    a.status = False
-    a.compact = False
-    a.async_ = False
+def _args(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(directory=None, timeout=60.0, status=False,
+                           compact=False, async_=False)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
 
 
 def _text_part(text: str, synthetic: bool = False) -> dict:
-    p = {"type": "text", "text": text}
+    p: dict[str, object] = {"type": "text", "text": text}
     if synthetic:
         p["synthetic"] = True
     return p
@@ -44,7 +38,12 @@ def _text_part(text: str, synthetic: bool = False) -> dict:
 def test_project_of_requires_a_base_worktree() -> None:
     calls = []
     orig = agent.state.Project.from_dir
-    agent.state.Project.from_dir = lambda _s: calls.append(1) or None
+
+    def _none(start: Path) -> state.Project | None:
+        calls.append(1)
+        return None
+
+    agent.state.Project.from_dir = _none
     try:
         _, err = agent.project_of(Path.cwd())
         assert err and "worktree" in err, err
@@ -62,7 +61,7 @@ def test_find_picks_the_newest_marked_session() -> None:
         {"id": "other", "title": "not ours", "time": {"updated": 9}},
     ]
     try:
-        assert agent.find(_Info.port, _FakeProject.base_worktree) == "new"
+        assert agent.find(_INFO.port, _FakeProject.base_worktree) == "new"
     finally:
         agent.harness.sessions = orig
     print("ok: find selects the newest session titled orch:agent")
@@ -72,7 +71,7 @@ def test_find_returns_none_when_no_marked_session() -> None:
     orig = agent.harness.sessions
     agent.harness.sessions = lambda _p, **kw: [{"id": "x", "title": "other"}]
     try:
-        assert agent.find(_Info.port, _FakeProject.base_worktree) is None
+        assert agent.find(_INFO.port, _FakeProject.base_worktree) is None
     finally:
         agent.harness.sessions = orig
     print("ok: find returns None when the agent was never created")
@@ -86,7 +85,7 @@ def test_create_runs_opencode_run_then_finds_the_session() -> None:
         ran.append((cmd, kw)) or type("P", (), {"returncode": 0})())
     agent.find = lambda _p, _b: "ses_new"
     try:
-        sid, notes = agent.create(_Info(), _FakeProject.base_worktree,
+        sid, notes = agent.create(_INFO, _FakeProject.base_worktree,
                                   "hello agent")
         assert sid == "ses_new"
         assert notes == []
@@ -108,7 +107,7 @@ def test_create_fails_when_run_errors() -> None:
     agent.subprocess.run = lambda cmd, **kw: type("P", (), {
         "returncode": 1, "stdout": "", "stderr": "boom"})()
     try:
-        sid, notes = agent.create(_Info(), _FakeProject.base_worktree, "x")
+        sid, notes = agent.create(_INFO, _FakeProject.base_worktree, "x")
         assert sid is None and notes and "boom" in notes[0]
     finally:
         agent.subprocess.run = orig_run
@@ -133,10 +132,10 @@ def test_ask_posts_a_message_and_returns_the_rendered_reply() -> None:
     agent.harness.message = lambda p, sid, text, timeout=None: (
         sent.append((p, sid, text)) or {"parts": [_text_part("reply text")]})
     try:
-        reply, err = agent.ask(_Info(), "ses_1", "why?")
+        reply, err = agent.ask(_INFO, "ses_1", "why?")
         assert err is None
         assert reply == "reply text"
-        assert sent == [(_Info.port, "ses_1", "why?")]
+        assert sent == [(_INFO.port, "ses_1", "why?")]
     finally:
         agent.harness.message = orig
     print("ok: ask sends the message and renders the assistant reply")
@@ -147,7 +146,7 @@ def test_ask_surfaces_harness_failures() -> None:
     agent.harness.message = lambda *a, **k: (_ for _ in ()).throw(
         agent.harness.HarnessError("POST failed"))
     try:
-        reply, err = agent.ask(_Info(), "ses_1", "x")
+        reply, err = agent.ask(_INFO, "ses_1", "x")
         assert reply == "" and err and "POST failed" in err
     finally:
         agent.harness.message = orig
@@ -159,8 +158,8 @@ def test_fire_uses_prompt_async() -> None:
     orig = agent.harness.prompt_async
     agent.harness.prompt_async = lambda p, sid, text: sent.append((p, sid, text))
     try:
-        assert agent.fire(_Info(), "ses_1", "go do it") is None
-        assert sent == [(_Info.port, "ses_1", "go do it")]
+        assert agent.fire(_INFO, "ses_1", "go do it") is None
+        assert sent == [(_INFO.port, "ses_1", "go do it")]
     finally:
         agent.harness.prompt_async = orig
     print("ok: fire sends asynchronously through prompt_async")
@@ -174,10 +173,10 @@ def test_compact_calls_opencode_summarize_with_the_session_model() -> None:
         "model": {"providerID": "anthropic", "id": "claude-x"}}
     agent.harness.summarize = lambda *a, **k: got.append((a, k)) or True
     try:
-        ok, err = agent.compact(_Info(), "ses_1", timeout=123.0)
+        ok, err = agent.compact(_INFO, "ses_1", timeout=123.0)
         assert ok and err is None
         (port, sid, pid, mid), kw = got[0]
-        assert (port, sid, pid, mid) == (_Info.port, "ses_1", "anthropic",
+        assert (port, sid, pid, mid) == (_INFO.port, "ses_1", "anthropic",
                                          "claude-x")
         assert kw == {"timeout": 123.0}
     finally:
@@ -190,7 +189,7 @@ def test_compact_requires_a_model() -> None:
     orig_info = agent.harness.session_info
     agent.harness.session_info = lambda _p, _s: {"model": None}
     try:
-        ok, err = agent.compact(_Info(), "ses_1")
+        ok, err = agent.compact(_INFO, "ses_1")
         assert not ok and err and "no model" in err
     finally:
         agent.harness.session_info = orig_info
@@ -208,7 +207,7 @@ def test_status_reports_busy() -> None:
     agent.harness.permissions = lambda _p: []
     agent.harness.questions = lambda _p: []
     try:
-        st = agent.status(_Info(), _FakeProject.base_worktree)
+        st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st == {"session": "ses_1", "state": "busy", "blocked": []}
     finally:
         agent.harness.sessions = orig_sessions
@@ -231,7 +230,7 @@ def test_status_reports_blocked_and_none_when_absent() -> None:
         "patterns": ["/etc/*"]}]
     agent.harness.questions = lambda _p: []
     try:
-        st = agent.status(_Info(), _FakeProject.base_worktree)
+        st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st["state"] == "blocked" and st["blocked"] == ["/etc/*"]
     finally:
         agent.harness.sessions = orig_sessions
@@ -242,7 +241,7 @@ def test_status_reports_blocked_and_none_when_absent() -> None:
 
     agent.harness.sessions = lambda _p, **kw: []
     try:
-        st = agent.status(_Info(), _FakeProject.base_worktree)
+        st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st == {"session": None, "state": "none", "blocked": []}
     finally:
         agent.harness.sessions = orig_sessions
@@ -253,7 +252,7 @@ def _patch_cli(**fns) -> list:
     saved = [(cli.agent_mod, "project_of", cli.agent_mod.project_of),
              (cli.server_mod, "start", cli.server_mod.start)]
     cli.agent_mod.project_of = lambda _s: (_FakeProject(), None)
-    cli.server_mod.start = lambda **k: _Info()
+    cli.server_mod.start = lambda **k: _INFO
     for attr, val in fns.items():
         saved.append((cli.agent_mod, attr, getattr(cli.agent_mod, attr)))
         setattr(cli.agent_mod, attr, val)

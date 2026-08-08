@@ -190,7 +190,7 @@ string cannot do this job.
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
 | `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit). The project is trusted for the daemon |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
-| `orch task list` | render the scan for this project |
+| `orch task list` | render the scan for this project; `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take |
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted; `--preseed` additionally records the `allow` as an always-rule in `.orchestration/config.json` for review and commit |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |

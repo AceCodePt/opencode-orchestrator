@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Migrate `rdk-template` to `.orchestration/` and Delete the Untracked Originals
 
 ## Metadata

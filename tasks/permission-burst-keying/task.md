@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Key Approval Notifications on Request ID and Survive Bursts
 
 ## Metadata

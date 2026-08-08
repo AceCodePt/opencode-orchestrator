@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Phone-Facing Server — Read Status and Answer Approvals Over the Tailnet
 
 ## Metadata

@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Detect an Agent That Has Looped Itself
 
 ## Metadata

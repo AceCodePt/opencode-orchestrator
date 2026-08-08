@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -104,6 +105,8 @@ def cmd_task_start(args: argparse.Namespace) -> int:
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
+    if args.global_:
+        return _task_list_global(args)
     start = Path(args.directory) if args.directory else Path.cwd()
     proj = state.Project.from_dir(start)
     if proj is None:
@@ -136,6 +139,129 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         for b in t.blocked:
             print(f"    ↳ {b.kind}: {b.detail}  [{b.request_id}]")
     return 0
+
+
+def _roots_from(args: argparse.Namespace) -> list[str] | None:
+    if not args.roots:
+        return None
+    return [r.strip() for r in args.roots.split(",") if r.strip()]
+
+
+def _q(path: str | Path) -> str:
+    return shlex.quote(str(path))
+
+
+def _has_committed_gate(base_wt: Path | None, base: str) -> bool:
+    if base_wt is None:
+        return False
+    rel = f"{gate_mod.HOOKS_REL}/session-idle"
+    return gate_mod.show(base_wt, base, rel) is not None
+
+
+def _classify_wait(t: state.TaskState, base_wt: Path | None,
+                   no_gate: bool) -> tuple[str | None, str | None, str]:
+    if t.session == state.SESSION_BLOCKED:
+        b = t.blocked[0] if t.blocked else None
+        if b is not None and b.kind == "question":
+            action = f"orch task answer -C {_q(base_wt or t.project)} {t.name} <your reply>"
+        else:
+            action = f"orch task answer -C {_q(base_wt or t.project)} {t.name} allow|deny"
+        detail = f"blocked on {b.kind}: {b.detail}" if b else "blocked"
+        return "needs-you", action, detail
+    if t.session == state.SESSION_BUSY:
+        return None, None, ""
+    if base_wt is None:
+        return "needs-you", f"orch doctor -C {_q(t.project)}", "no base worktree"
+    if not t.worktree or not Path(t.worktree).is_dir():
+        return "needs-you", f"orch task reset -C {_q(base_wt)} {t.name}", "worktree missing"
+    if t.conflicted:
+        return "needs-you", f"resolve the merge conflict in {_q(base_wt)}", \
+            "merge conflict in progress"
+    if t.dirty:
+        return "needs-you", f"review the uncommitted changes in {_q(t.worktree)}", \
+            "worktree is dirty"
+    if no_gate:
+        rel = str(base_wt / gate_mod.HOOKS_REL / "session-idle")
+        return "needs-you", f"edit and commit {_q(rel)}", \
+            "no committed gate - nothing will ever verify this work"
+    if t.diff:
+        return "looks-done", None, "unmerged (awaiting verify/merge)"
+    return None, None, ""
+
+
+def _task_list_global(args: argparse.Namespace) -> int:
+    roots = _roots_from(args)
+    st = server_mod.status()
+    running = bool(st.get("running")) and not bool(st.get("unresponsive"))
+    port = st.get("port") if running else None
+    info = server_mod.current()
+    du = daemon_mod.unit_status()
+    daemon_active = bool(du.get("installed") and du.get("ActiveState") == "active")
+
+    projects = state.discover_projects(roots)
+    if not projects:
+        print("no supervised projects discovered under "
+              + ", ".join(state.default_roots()), file=sys.stderr)
+        return 2
+
+    items: list[dict] = []
+    for common, orch in sorted(projects.items()):
+        proj = state.Project(Path(common), orch, state.base_from_config(orch))
+        base_wt = proj.base_worktree
+        tasks = proj.scan(port)
+        agent = "none"
+        if info is not None and base_wt is not None:
+            agent = (agent_mod.status(info, base_wt) or {}).get("state") or "none"
+        no_gate = not _has_committed_gate(base_wt, proj.base)
+        for t in tasks:
+            if t.archived or not t.claimed:
+                continue
+            sec, action, detail = _classify_wait(t, base_wt, no_gate)
+            if sec is None:
+                continue
+            if sec == "looks-done" and not daemon_active:
+                detail = "unmerged and nothing is settling it (daemon down)"
+            items.append({
+                "project": daemon_mod.project_label(str(common)),
+                "project_dir": str(base_wt) if base_wt else common,
+                "task": t.name,
+                "section": sec,
+                "detail": detail,
+                "action": action,
+                "agent": agent,
+            })
+
+    if args.json:
+        print(json.dumps({"server": "up" if running else "down",
+                          "daemon": "active" if daemon_active else "down",
+                          "items": items}, indent=2))
+        return 0
+
+    print(f"server   {'up' if running else 'down'}")
+    if daemon_active:
+        print("daemon   active")
+    else:
+        print("daemon   down - nothing is settling, verifying, or merging")
+    if not running:
+        print("note     server is down: blocked status is unknown; `orch server start`")
+    if not items:
+        print("\nnothing waiting - no blocked, stuck, or unmerged work")
+        return 0
+
+    last = None
+    for it in items:
+        if it["project"] != last:
+            suffix = f"   primary-agent: {it['agent']}" if it["agent"] != "none" else ""
+            print(f"\n{it['project']}{suffix}")
+            last = it["project"]
+        print(f"  {it['section'].upper():12} {it['task']}")
+        print(f"      {it['detail']}")
+        if it["action"]:
+            print(f"      -> {it['action']}")
+
+    needs_you = any(i["section"] == "needs-you" for i in items)
+    stalled = not daemon_active and any(i["section"] == "looks-done" for i in items)
+    return 1 if (needs_you or stalled) else 0
 
 
 def _task_json(t: state.TaskState) -> dict:
@@ -708,6 +834,10 @@ def build_parser() -> argparse.ArgumentParser:
     tl = tsub.add_parser("list", help="tasks recorded for this project")
     tl.add_argument("-C", "--directory")
     tl.add_argument("--json", action="store_true")
+    tl.add_argument("--global", dest="global_", action="store_true",
+                    help="scan every supervised project and show what is waiting "
+                         "on you (blocked, stuck, and unmerged work)")
+    tl.add_argument("--roots", help="comma-separated roots to scan (--global only)")
     tl.set_defaults(func=cmd_task_list)
 
     tr = tsub.add_parser("reset", help="return a claimed task to todo (delete branch + worktree)")

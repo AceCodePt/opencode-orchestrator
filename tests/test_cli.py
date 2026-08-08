@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -8,12 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import cli, observe, state  # noqa: E402
 
 
-class _FakeProject:
+class _FakeProject(state.Project):
     def __init__(self, tasks: list[state.TaskState]):
         self._tasks = tasks
 
     @classmethod
-    def from_dir(cls, _start: Path) -> "_FakeProject | None":
+    def from_dir(cls, start: Path) -> "_FakeProject | None":
         return cls._instance
 
     _instance: "_FakeProject | None" = None
@@ -29,15 +34,10 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
                            blocked=[b])
 
 
-def _args(**kw) -> object:
-    class A:
-        pass
-    a = A()
+def _args(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(directory=None, preseed=False)
     for k, v in kw.items():
         setattr(a, k, v)
-    a.directory = None
-    if not hasattr(a, "preseed"):
-        a.preseed = False
     return a
 
 
@@ -125,6 +125,252 @@ def test_answer_unblocked_task_is_refused() -> None:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
     print("ok: answering a task that is not blocked is refused")
+
+
+class _GProject:
+    _base_wt: Path | None = None
+    _tasks: list = []
+
+    def __init__(self, common: Path, orch: Path, base: str) -> None:
+        self.common = common
+        self.base = base
+
+    @property
+    def base_worktree(self) -> Path | None:
+        return _GProject._base_wt
+
+    def scan(self, port: int | None = None) -> list[state.TaskState]:
+        return _GProject._tasks
+
+
+def _gargs(**kw) -> argparse.Namespace:
+    a = _args()
+    a.global_ = True
+    a.json = False
+    a.roots = None
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def _global_setup(*, server_up: bool = True, daemon_active: bool = True,
+                  gate: str | None = "#!/bin/sh\nexit 0",
+                  agent: str = "idle", base_wt: Path | None = None) -> list:
+    saved: list = []
+
+    def _set(attr: str, value) -> None:
+        obj, name = attr.rsplit(".", 1)
+        target = getattr(cli, obj)
+        saved.append((obj, name, getattr(target, name)))
+        setattr(target, name, value)
+
+    _set("state.Project", _GProject)
+    _set("state.base_from_config", lambda _orch: "main")
+    _set("state.discover_projects",
+         lambda _roots: {"/tmp/lab/lab.git": Path("/tmp/lab/.orchestration")})
+    _set("server_mod.status", lambda: {
+        "running": server_up, "unresponsive": False,
+        "port": 4096 if server_up else None})
+    _set("server_mod.current", lambda: object() if server_up else None)
+    _set("daemon_mod.unit_status", lambda: {
+        "installed": daemon_active,
+        "ActiveState": "active" if daemon_active else "inactive"})
+    _set("agent_mod.status", lambda _i, _b: {"state": agent})
+    _set("gate_mod.show", lambda _wt, _base, _rel: gate)
+    _set("daemon_mod.project_label", lambda common: Path(common).parent.name)
+    _GProject._base_wt = base_wt
+    _GProject._tasks = []
+    return saved
+
+
+def _global_teardown(saved: list) -> None:
+    for obj, name, val in saved:
+        setattr(getattr(cli, obj), name, val)
+
+
+def _claimed(name: str = "task-a", *, worktree: str | None = None,
+             session: str = state.SESSION_IDLE, dirty: bool = False,
+             diff: bool = True, conflicted: bool = False,
+             blocked: list | None = None) -> state.TaskState:
+    return state.TaskState(
+        project="/tmp/lab/lab.git", name=name, base="main", claimed=True,
+        branch=name, worktree=worktree, session=session, dirty=dirty,
+        diff=diff, conflicted=conflicted, blocked=blocked or [])
+
+
+def test_task_list_global_reports_blocked_and_exits_1() -> None:
+    t = _blocked()
+    t.session = state.SESSION_BLOCKED
+    t.claimed = True
+    t.branch = "task-a"
+    saved = _global_setup()
+    _GProject._tasks = [t]
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_gargs())
+        out = buf.getvalue()
+        assert rc == 1, rc
+        assert "NEEDS-YOU" in out
+        assert "task-a" in out
+        assert "task answer -C" in out
+        assert "lab" in out
+    finally:
+        _global_teardown(saved)
+    print("ok: --global lists a blocked permission as needs-you with the answer action")
+
+
+def test_task_list_global_question_suggests_a_reply() -> None:
+    t = _blocked(kind="question")
+    t.session = state.SESSION_BLOCKED
+    t.claimed = True
+    t.branch = "task-a"
+    saved = _global_setup()
+    _GProject._tasks = [t]
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_task_list(_gargs())
+        assert "<your reply>" in buf.getvalue()
+    finally:
+        _global_teardown(saved)
+    print("ok: a blocked question suggests `answer <name> <your reply>`")
+
+
+def test_task_list_global_conflict_and_missing_worktree() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        missing = _claimed("gone", worktree="/nonexistent/deep")
+        conflicted = _claimed("conf", worktree=wt, conflicted=True)
+        saved = _global_setup(base_wt=Path(wt))
+        _GProject._tasks = [missing, conflicted]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs())
+            out = buf.getvalue()
+            assert rc == 1, rc
+            assert "task reset -C" in out
+            assert "resolve the merge conflict" in out
+        finally:
+            _global_teardown(saved)
+    print("ok: missing worktrees and merge conflicts are needs-you")
+
+
+def test_task_list_global_no_committed_gate_is_needs_you() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = _claimed("task-a", worktree=wt)
+        saved = _global_setup(gate=None, base_wt=Path(wt))
+        _GProject._tasks = [t]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs())
+            out = buf.getvalue()
+            assert rc == 1, rc
+            assert "no committed gate" in out
+        finally:
+            _global_teardown(saved)
+    print("ok: a project with no committed gate is needs-you")
+
+
+def test_task_list_global_looks_done_is_reported() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = _claimed("task-a", worktree=wt)
+        saved = _global_setup(base_wt=Path(wt))
+        _GProject._tasks = [t]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs())
+            out = buf.getvalue()
+            assert rc == 0, rc
+            assert "LOOKS-DONE" in out
+            assert "task-a" in out
+        finally:
+            _global_teardown(saved)
+    print("ok: a clean unmerged task is always reported as looks-done")
+
+
+def test_task_list_global_daemon_down_stalls_looks_done() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = _claimed("task-a", worktree=wt)
+        saved = _global_setup(daemon_active=False, base_wt=Path(wt))
+        _GProject._tasks = [t]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs())
+            out = buf.getvalue()
+            assert rc == 1, rc
+            assert "daemon down" in out
+        finally:
+            _global_teardown(saved)
+    print("ok: with the daemon down, unmerged work is stalled (exit 1)")
+
+
+def test_task_list_global_busy_tasks_are_not_listed() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = _claimed("task-a", worktree=wt, session=state.SESSION_BUSY)
+        saved = _global_setup(base_wt=Path(wt))
+        _GProject._tasks = [t]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs())
+            assert rc == 0, rc
+            assert "task-a" not in buf.getvalue()
+        finally:
+            _global_teardown(saved)
+    print("ok: busy sessions are the automation working, not waiting")
+
+
+def test_task_list_global_json_shape() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = _claimed("task-a", worktree=wt)
+        saved = _global_setup(base_wt=Path(wt))
+        _GProject._tasks = [t]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_task_list(_gargs(json=True))
+            assert rc == 0, rc
+            data = json.loads(buf.getvalue())
+            assert data["server"] == "up" and data["daemon"] == "active"
+            assert len(data["items"]) == 1
+            it = data["items"][0]
+            assert it["section"] == "looks-done" and it["task"] == "task-a"
+            assert it["project"] == "lab"
+        finally:
+            _global_teardown(saved)
+    print("ok: --json emits a machine-readable waiting report")
+
+
+def test_task_list_global_no_projects_is_an_error() -> None:
+    saved = _global_setup()
+    cli.state.discover_projects = lambda _roots: {}
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_gargs())
+        assert rc == 2, rc
+    finally:
+        _global_teardown(saved)
+    print("ok: --global with nothing discovered exits 2")
+
+
+def test_task_list_global_no_waiting_exits_0() -> None:
+    saved = _global_setup()
+    _GProject._tasks = [state.TaskState(
+        project="/tmp/lab/lab.git", name="todo-a", base="main")]
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_gargs())
+        assert rc == 0, rc
+        assert "nothing waiting" in buf.getvalue()
+    finally:
+        _global_teardown(saved)
+    print("ok: nothing waiting prints clean and exits 0")
 
 
 def main() -> int:

@@ -1,3 +1,7 @@
+---
+hitl: true
+---
+
 # Task: Measure Concurrent Check Runs and Decide the Semaphore Limit
 
 ## Metadata
