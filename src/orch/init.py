@@ -30,6 +30,14 @@ TEMPLATE_CONFIG = {
         ),
         "always": [],
     },
+    "scheduler": {
+        "$comment": (
+            "Let the daemon auto-dispatch todo tasks itself (hitl: false only). "
+            "maxConcurrent caps how many task agents run in this project at "
+            "once. Edit with `orch project scheduler <n>`; only the committed "
+            "copy on the base branch applies."
+        ),
+    },
 }
 
 TEMPLATE_SESSION_IDLE = """#!/usr/bin/env bash
@@ -89,6 +97,14 @@ it, put the project's real checks in `hooks/session-idle` above the commit block
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
+
+`config.json` holds project policy: `baseBranch`, the `gate` block
+(`include`/`exclude`/`retryCap`), `permissions.always`, and — if you want the daemon
+to dispatch `todo` tasks itself — a `scheduler` block (`enabled` + `maxConcurrent`,
+the per-project cap). Like the gate, the **committed copy on the base branch** is the
+authority: `orch project scheduler <n>` writes the working-tree copy for you to
+review and commit. A machine-wide cap across all projects lives outside the repo in
+`~/.config/orch/daemon.json` (`orch daemon budget`).
 
 Reference samples for the task-lifecycle hooks live in `hooks/*.sample` — inert until
 you copy one to its real name, make it executable, and commit it.

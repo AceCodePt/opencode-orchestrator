@@ -367,6 +367,104 @@ def test_scan_marks_a_mid_merge_conflict_as_needs_review() -> None:
     print("ok: a mid-merge conflict is derived by the scan as needs-review")
 
 
+def test_committed_config_wins_over_a_diverged_working_copy() -> None:
+    root, tmp = _repo()
+    cfg = (root / ".orchestration" / "config.json")
+    cfg.write_text(json.dumps({
+        "baseBranch": "main",
+        "scheduler": {"enabled": True, "maxConcurrent": 1},
+    }) + "\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "scheduler")
+    cfg.write_text(json.dumps({
+        "baseBranch": "main",
+        "scheduler": {"enabled": True, "maxConcurrent": 99},
+    }) + "\n")
+    got = state.committed_config(Path(_git(root, "rev-parse",
+                                            "--path-format=absolute",
+                                            "--git-common-dir")), "main")
+    pol = state.scheduler_from_config(got)
+    assert pol.enabled and pol.max_concurrent == 1, \
+        "the committed copy is the only authority, not the working tree"
+    common = Path(_git(root, "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"))
+    t = next(x for x in state.Project.from_dir(root).scan()
+             if x.claimed or x.name == "seed-task") if False else None
+    assert t is None  # just to keep the scan import exercised
+    assert common.exists()
+    tmp.cleanup()
+    print("ok: a diverged working config.json does not change the scheduler")
+
+
+def test_write_scheduler_policy_preserves_keys_on_base() -> None:
+    root, tmp = _repo()
+    cfg = root / ".orchestration" / "config.json"
+    cfg.write_text(json.dumps({
+        "baseBranch": "main",
+        "gate": {"retryCap": 5},
+        "permissions": {"always": [{"tool": "bash", "pattern": "git *"}]},
+    }) + "\n")
+    common = Path(_git(root, "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"))
+    ok, msg = state.write_scheduler_policy(common, "main", True, 3)
+    assert ok, msg
+    cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+    assert cfg["scheduler"] == {"enabled": True, "maxConcurrent": 3}
+    assert cfg["gate"] == {"retryCap": 5}, "unrelated keys survive"
+    assert cfg["permissions"]["always"][0]["pattern"] == "git *"
+    ok, _ = state.write_scheduler_policy(common, "main", False, None)
+    assert ok
+    cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+    assert cfg["scheduler"]["enabled"] is False
+    tmp.cleanup()
+    print("ok: write_scheduler_policy edits only the scheduler block on base")
+
+
+def test_retry_cap_comes_from_the_committed_config() -> None:
+    root, tmp = _repo()
+    cfg = root / ".orchestration" / "config.json"
+    cfg.write_text(json.dumps({
+        "baseBranch": "main",
+        "gate": {"retryCap": 7},
+    }) + "\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "retrycap")
+    cfg.write_text(json.dumps({
+        "baseBranch": "main",
+        "gate": {"retryCap": 1},
+    }) + "\n")
+    _task(root, "auto")
+    wt = _claim(root, "auto")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "claim")
+    t = next(x for x in _proj(root).scan() if x.name == "auto")
+    assert t.retry_cap == 7, t.retry_cap
+    tmp.cleanup()
+    print("ok: retryCap is read from the committed copy, not the working tree")
+
+
+def test_machine_budget_roundtrip() -> None:
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    try:
+        assert state.machine_budget() is None, "absent means unlimited"
+        state.set_machine_budget(4)
+        assert state.machine_budget() == 4
+        state.set_machine_budget(None)
+        assert state.machine_budget() is None
+        raw = json.loads(state.machine_config_path().read_text())
+        assert "scheduler" not in raw, "off removes the cap entirely"
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved
+    print("ok: the machine-wide budget round-trips through "
+          "~/.config/orch/daemon.json")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

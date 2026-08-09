@@ -77,6 +77,7 @@ class Snapshot:
     mem: LoopState
     policies: dict[str, state.SchedulerPolicy] = field(default_factory=dict)
     trusted: set[str] = field(default_factory=set)
+    global_max: int | None = None
 
 
 def project_label(project: str) -> str:
@@ -276,6 +277,9 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
     for t in snap.tasks:
         by_project.setdefault(t.project, []).append(t)
 
+    global_in_flight = sum(
+        1 for t in snap.tasks if t.claimed and not t.archived
+    )
     for project, tasks in by_project.items():
         if project not in snap.trusted:
             continue
@@ -288,6 +292,9 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
         for t in tasks:
             if in_flight >= pol.max_concurrent:
                 break
+            if snap.global_max is not None and \
+                    global_in_flight >= snap.global_max:
+                return
             if t.claimed or not t.declared or t.archived or t.hitl:
                 continue
             key = (project, t.name)
@@ -300,6 +307,7 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
                 start=str(pol.start),
             ))
             in_flight += 1
+            global_in_flight += 1
 
 
 class Supervisor:
@@ -339,7 +347,8 @@ class Supervisor:
             proj = state.Project(Path(common), orch,
                                  state.base_from_config(orch))
             tasks.extend(proj.scan(port))
-            pol = state.scheduler_from_config(orch)
+            pol = state.scheduler_from_config(
+                state.committed_config(common, proj.base))
             if pol.enabled:
                 pol.start = proj.base_worktree
             policies[str(common)] = pol
@@ -353,6 +362,7 @@ class Supervisor:
             mem=self.mem,
             policies=policies,
             trusted=state.trusted_projects(),
+            global_max=state.machine_budget(),
         )
 
     def _verify(self, a: Action) -> None:

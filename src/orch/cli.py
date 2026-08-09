@@ -524,6 +524,33 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print("linger  yes - survives logout and reboot")
         return 0 if info.get("ActiveState") == "active" else 1
 
+    if args.action == "budget":
+        if args.max is None:
+            b = state.machine_budget()
+            if b is None:
+                print("machine budget: unlimited - only per-project "
+                      "scheduler.maxConcurrent caps auto-dispatch")
+            else:
+                print(f"machine budget: {b} concurrent task agents "
+                      "machine-wide")
+            return 0
+        if args.max == "off":
+            state.set_machine_budget(None)
+            print("machine budget: unlimited")
+            return 0
+        try:
+            n = int(args.max)
+            if n < 0:
+                raise ValueError
+        except ValueError:
+            print(f"{args.max!r} is not a non-negative maxConcurrent; pass a "
+                  "number, `off`, or nothing to show it", file=sys.stderr)
+            return 2
+        state.set_machine_budget(n)
+        print(f"machine budget: {n} concurrent task agents machine-wide "
+              "(`orch daemon budget` to re-check)")
+        return 0
+
     project: str | None = None
     if args.directory or args.project_only:
         start = Path(args.directory) if args.directory else Path.cwd()
@@ -754,6 +781,40 @@ def cmd_project_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_scheduler(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
+        return 2
+
+    if args.max is None:
+        pol = state.scheduler_from_config(
+            state.committed_config(proj.common, proj.base))
+        if not pol.enabled:
+            print("scheduler: off (only `orch task start` dispatches)")
+            return 0
+        print(f"scheduler: on, maxConcurrent={pol.max_concurrent}")
+        return 0
+
+    if args.max == "off":
+        ok, msg = state.write_scheduler_policy(
+            proj.common, proj.base, enabled=False, max_concurrent=None)
+    else:
+        try:
+            n = int(args.max)
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            print(f"{args.max!r} is not a positive maxConcurrent; pass a number "
+                  "or `off`", file=sys.stderr)
+            return 2
+        ok, msg = state.write_scheduler_policy(
+            proj.common, proj.base, enabled=True, max_concurrent=n)
+    print(msg)
+    return 0 if ok else 1
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     return 0
@@ -947,6 +1008,17 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_project_list)
 
+    ps = pjsub.add_parser(
+        "scheduler",
+        help="show or set this project's auto-dispatch concurrency "
+             "(scheduler.maxConcurrent)",
+    )
+    ps.add_argument("max", nargs="?", default=None,
+                    help="maxConcurrent for the scheduler, or `off`; omit to show "
+                         "the committed policy")
+    ps.add_argument("-C", "--directory")
+    ps.set_defaults(func=cmd_project_scheduler)
+
     g = sub.add_parser("gate", help="can this project's gates be trusted")
     g.add_argument("-C", "--directory")
     g.set_defaults(func=cmd_gate)
@@ -1001,6 +1073,14 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
     ds.add_argument("--json", action="store_true")
+    db = da.add_parser(
+        "budget",
+        help="show or set the machine-wide scheduler budget in "
+             "~/.config/orch/daemon.json",
+    )
+    db.add_argument("max", nargs="?", default=None,
+                    help="max concurrent task agents machine-wide, `off` to make "
+                         "it unlimited, or omit to show the current budget")
     dm.set_defaults(func=cmd_daemon, _dparser=dm)
 
     inst = sub.add_parser(

@@ -89,7 +89,15 @@ in one source file has one place to check.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
-  surprising, and it never dispatches ungated work (that flag is human-only).
+  surprising, and it never dispatches ungated work (that flag is human-only). The
+  policy is read from the **committed copy on the base branch** — the same authority
+  rule as the gate — so an uncommitted edit (`orch project scheduler <n>` writes the
+  working-tree copy for review) never takes effect silently, and the policy is never
+  whatever `.orchestration` directory discovery happened to find first. Beyond the
+  per-project cap, a **machine-wide budget** (`orch daemon budget`, stored in
+  `~/.config/orch/daemon.json`) caps the scheduler's total in-flight task agents
+  across all projects; like the per-project cap it bounds auto-dispatch only, never
+  a human's `orch task start`.
 - **A human picks each task; the machine does the work.** `hitl` is the default
   state of a task's front matter, so the scheduler runs nothing a human did not
   explicitly hand over (`hitl: false`, `orch task add --auto`). This inverts the

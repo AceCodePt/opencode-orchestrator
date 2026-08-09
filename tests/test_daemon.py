@@ -503,6 +503,53 @@ def test_scheduler_skips_hitl_tasks() -> None:
     print("ok: the scheduler leaves hitl tasks for a human and picks the rest")
 
 
+def test_global_budget_caps_dispatches_across_projects() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,
+                                start=Path("/tmp/lab"))
+    p1_todo = _task(project="/tmp/lab/p1.git", name="p1-a", claimed=False,
+                    branch=None, worktree=None, hitl=False)
+    p2_todo = _task(project="/tmp/lab/p2.git", name="p2-a", claimed=False,
+                    branch=None, worktree=None, hitl=False)
+    p2_todo2 = _task(project="/tmp/lab/p2.git", name="p2-b", claimed=False,
+                     branch=None, worktree=None, hitl=False)
+    snap = _snap(tasks=[p1_todo, p2_todo, p2_todo2], mem=mem,
+                 policies={p1_todo.project: pol, p2_todo.project: pol},
+                 global_max=2)
+    dispatched = [a.task for a in daemon.decide(snap)
+                  if a.kind == daemon.DISPATCH]
+    assert len(dispatched) == 2, dispatched
+    print("ok: a machine-wide budget caps auto-dispatch across projects")
+
+
+def test_global_budget_counts_claimed_tasks() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,
+                                start=Path("/tmp/lab"))
+    claimed = _task(project="/tmp/lab/p1.git", name="running", claimed=True,
+                    branch="running", worktree=WT, session=state.SESSION_NONE)
+    todo = _task(project="/tmp/lab/p2.git", name="p2-a", claimed=False,
+                 branch=None, worktree=None, hitl=False)
+    snap = _snap(tasks=[claimed, todo], mem=mem,
+                 policies={claimed.project: pol, todo.project: pol},
+                 global_max=1)
+    acts = daemon.decide(snap)
+    assert daemon.DISPATCH not in _kinds(acts), \
+        "the in-flight claimed task already uses the whole budget"
+    print("ok: the global budget is counted from claimed (in-flight) tasks")
+
+
+def test_global_budget_zero_disables_the_scheduler() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,
+                                start=Path("/tmp/lab"))
+    todo = _task(claimed=False, branch=None, worktree=None, hitl=False)
+    snap = _snap(tasks=[todo], mem=mem, policies={todo.project: pol},
+                 global_max=0)
+    assert daemon.DISPATCH not in _kinds(daemon.decide(snap))
+    print("ok: a machine-wide budget of 0 means nothing is auto-dispatched")
+
+
 def test_hitl_conflicted_task_is_reviewed_not_reverified() -> None:
     mem = daemon.LoopState()
     t = _task(session=state.SESSION_IDLE, dirty=False, diff=True, conflicted=True,

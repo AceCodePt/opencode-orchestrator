@@ -184,6 +184,27 @@ def _read_config(orch_dir: Path | None) -> dict:
         return {}
 
 
+def committed_config(common: Path | str, base: str) -> dict:
+    """The project's .orchestration/config.json as committed on the base
+    branch - the only copy that is authoritative (the gate says so: an
+    uncommitted or diverged config.json is flagged, and the committed values
+    are the ones in force). Falls back to the base worktree's working copy and
+    then the discovered dir, in that order, for the case where the file was
+    never committed at all."""
+    rc, out = _git(common, "show", f"{base}:{ORCH_DIR}/config.json")
+    if rc == 0 and out:
+        try:
+            cfg = json.loads(out)
+            if isinstance(cfg, dict):
+                return cfg
+        except ValueError:
+            pass
+    wt = _base_worktree(Path(common), base)
+    if wt is not None and (wt / ORCH_DIR / "config.json").exists():
+        return _read_config(wt / ORCH_DIR)
+    return {}
+
+
 def base_from_config(orch_dir: Path | None) -> str:
     b = _read_config(orch_dir).get("baseBranch")
     return str(b) if b else "main"
@@ -196,8 +217,8 @@ class SchedulerPolicy:
     start: Path | None = None
 
 
-def scheduler_from_config(orch_dir: Path | None) -> SchedulerPolicy:
-    raw = _read_config(orch_dir).get("scheduler") or {}
+def scheduler_from_config(cfg: dict) -> SchedulerPolicy:
+    raw = (cfg or {}).get("scheduler") or {}
     try:
         max_conc = int(raw.get("maxConcurrent", 1))
     except (TypeError, ValueError):
@@ -206,6 +227,88 @@ def scheduler_from_config(orch_dir: Path | None) -> SchedulerPolicy:
         enabled=bool(raw.get("enabled", False)),
         max_concurrent=max_conc if max_conc > 0 else 0,
     )
+
+
+def write_scheduler_policy(
+    common: Path | str,
+    base: str,
+    enabled: bool,
+    max_concurrent: int | None,
+) -> tuple[bool, str]:
+    """Edit the scheduler block in the base worktree's .orchestration/config.json
+    (working copy, for a human to review and commit). Returns (ok, message)."""
+    wt = _base_worktree(Path(common), base)
+    if wt is None:
+        return False, f"no worktree on {base}; cannot edit the project config"
+    cfg_path = wt / ORCH_DIR / "config.json"
+    if not cfg_path.exists():
+        return False, f"no {cfg_path} to edit"
+    cfg = _read_config(cfg_path.parent)
+    sched = cfg.setdefault("scheduler", {})
+    if not isinstance(sched, dict):
+        sched = cfg["scheduler"] = {}
+    if enabled:
+        sched["enabled"] = True
+        if max_concurrent is not None:
+            sched["maxConcurrent"] = int(max_concurrent)
+    else:
+        sched["enabled"] = False
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    return True, (
+        f"wrote scheduler {json.dumps(sched)} to {cfg_path}; review and commit "
+        f"it on {base} - only the committed copy applies"
+    )
+
+
+def machine_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "orch" / "daemon.json"
+
+
+def machine_budget() -> int | None:
+    """The machine-wide cap on concurrently scheduled task agents, from
+    ~/.config/orch/daemon.json {"scheduler": {"maxConcurrent": N}}. None means
+    no machine-wide budget - only per-project scheduler.maxConcurrent applies."""
+    try:
+        raw = json.loads(machine_config_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = (raw.get("scheduler") or {}).get("maxConcurrent")
+    if value is None:
+        return None
+    try:
+        max_conc = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max_conc if max_conc > 0 else 0
+
+
+def set_machine_budget(max_concurrent: int | None) -> dict:
+    """Write the machine-wide budget. None removes the cap (unlimited)."""
+    p = machine_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cfg: dict = {}
+    try:
+        raw = json.loads(p.read_text())
+        if isinstance(raw, dict):
+            cfg = raw
+    except (OSError, ValueError):
+        cfg = {}
+    if max_concurrent is None:
+        sched = cfg.get("scheduler")
+        if isinstance(sched, dict):
+            sched.pop("maxConcurrent", None)
+            if not sched:
+                cfg.pop("scheduler", None)
+    else:
+        sched = cfg.setdefault("scheduler", {})
+        if not isinstance(sched, dict):
+            sched = cfg["scheduler"] = {}
+        sched["maxConcurrent"] = max_concurrent
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    return cfg
 
 
 @dataclass
@@ -469,7 +572,7 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     archived = _names_in(common, base, ARCHIVE_REL)
     branches = {b for b in _branches(common) if b != base}
     wt_by_branch = {b: p for p, b in _worktrees(common)}
-    cap = int(_read_config(proj.orch_dir).get("gate", {}).get("retryCap") or 3)
+    cap = int(committed_config(common, base).get("gate", {}).get("retryCap") or 3)
 
     names = sorted(set(declared) | set(branches) | set(archived))
     merging = _base_merging(common, base)

@@ -4,6 +4,8 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -151,6 +153,85 @@ def _gargs(**kw) -> argparse.Namespace:
     for k, v in kw.items():
         setattr(a, k, v)
     return a
+
+
+def _git(cwd: Path, *args: str) -> str:
+    p = __import__("subprocess").run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0, f"git {args}: {p.stderr}"
+    return p.stdout.strip()
+
+
+def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name) / "wt"
+    root.mkdir(parents=True)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "seed").write_text("x")
+    orch = root / ".orchestration"
+    orch.mkdir(parents=True)
+    (orch / "config.json").write_text(
+        '{"baseBranch": "main", "permissions": {"always": []}}\n')
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+    return root, tmp
+
+
+def test_project_scheduler_sets_the_cap_preserving_keys() -> None:
+    root, tmp = _repo()
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_scheduler(_args(directory=str(root), max="2"))
+        assert rc == 0, rc
+        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+        assert cfg["scheduler"] == {"enabled": True, "maxConcurrent": 2}
+        assert cfg["permissions"] == {"always": []}, "other keys survive"
+        assert "review and commit" in buf.getvalue()
+        cli.cmd_project_scheduler(_args(directory=str(root), max="off"))
+        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
+        assert cfg["scheduler"]["enabled"] is False
+    finally:
+        tmp.cleanup()
+    print("ok: `project scheduler <n>` writes the cap into the base config")
+
+
+def test_project_scheduler_rejects_non_numbers() -> None:
+    root, tmp = _repo()
+    try:
+        rc = cli.cmd_project_scheduler(_args(directory=str(root), max="lots"))
+        assert rc == 2, rc
+    finally:
+        tmp.cleanup()
+    print("ok: `project scheduler` validates its argument")
+
+
+def test_daemon_budget_writes_the_machine_config() -> None:
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_daemon(_args(action="budget", max="3"))
+        assert rc == 0, rc
+        assert state.machine_budget() == 3
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_daemon(_args(action="budget", max=None))
+        assert rc == 0, rc
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_daemon(_args(action="budget", max="off"))
+        assert state.machine_budget() is None
+    finally:
+        tmp.cleanup()
+        if saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved
+    print("ok: `daemon budget` reads and writes the machine-wide cap")
 
 
 def _global_setup(*, server_up: bool = True, daemon_active: bool = True,

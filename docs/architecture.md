@@ -187,6 +187,8 @@ string cannot do this job.
 | `orch project trust [--dir]` | machine-level approval that lets the daemon gate, merge, dispatch and resolve in this project. The marker lives in `~/.local/state/orch/trusted.json`, keyed by the repo's git common dir — outside the repo, so a project cannot approve itself |
 | `orch project untrust [--dir]` | revoke that approval; running agents and worktrees are left alone, the daemon just stops settling them |
 | `orch project list` | every discovered project and its trust status (`--json`) |
+| `orch project scheduler [<n>\|off]` | show or set the project's auto-dispatch cap (`scheduler.maxConcurrent`). Writes into the base worktree's `.orchestration/config.json` for review and commit; the committed copy is the only one in force |
+| `orch daemon budget [<n>\|off]` | show or set the machine-wide auto-dispatch cap in `~/.config/orch/daemon.json`; `0` disables scheduling machine-wide, `off`/absent means per-project caps only |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
 | `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit). The project is trusted for the daemon |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
@@ -212,7 +214,11 @@ ungated project.
   `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
   `hooks/*.sample` references for all five — inert until copied to the real name,
   made executable, and committed.
-- `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`, `scheduler`.
+- `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`, `scheduler`
+  (`enabled`/`maxConcurrent`). Like the gate, the **committed copy on the base branch**
+  is the authority for these values (`orch project scheduler` writes the working-tree
+  copy for a human to commit). A machine-wide cap lives outside the repo in
+  `~/.config/orch/daemon.json` (`orch daemon budget`).
 
 Two dispatchers fire hooks from one directory under one env-var contract
 (`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the CLI fires
@@ -259,7 +265,10 @@ and wording stay opencode's and the human's.
 
 ## Flow A′ — the scheduler
 
-The daemon can dispatch `todo` tasks itself. A project opts in via `.orchestration/config.json`:
+The daemon can dispatch `todo` tasks itself. A project opts in via
+`.orchestration/config.json` — read, like the gate, from the **committed copy on the
+base branch** (`orch project scheduler <n>` writes the working-tree copy for you to
+review and commit; only the committed values apply):
 
 ```json
 "scheduler": { "enabled": true, "maxConcurrent": 1 }
@@ -271,6 +280,14 @@ whose `task.md` is uncommitted on base, or a project with no base worktree to di
 from, is skipped. Failed dispatches back off (60s) and the daemon's journal records why
 — `dispatch_error` is in-memory only. The scheduler never dispatches ungated work —
 `--allow-ungated` is a human flag only.
+
+On top of the per-project cap, a **machine-wide budget** (`orch daemon budget <n>`,
+stored in `~/.config/orch/daemon.json`) caps the total in-flight task agents the
+scheduler may hold across *every* project at once: each cycle the scheduler counts
+claimed tasks project-wide and stops emitting dispatches once the running total
+reaches the budget (`0` disables scheduling machine-wide; `off`/absent means
+per-project caps only). The budget bounds auto-dispatch only — a human
+`orch task start` is not refused.
 
 **You pick which tasks run; the machine does the work.** A task needs a human by
 default — `hitl: true` is the default in the front matter (the gray-matter block at
@@ -407,5 +424,6 @@ history store any more.
 - Routing `needs-review` onwards or unblocking a parent agent. (The "human needed"
   signal exists — `orch task list --json` and the daemon journal — and the phone
   add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
-- Global concurrency limits across projects (per-project `scheduler.maxConcurrent`
-  exists today; a machine-wide budget is a future daemon setting).
+- A budget that also bounds the primary agents or a human's manual `orch task start`.
+  The scheduler's auto-dispatch is capped per project (`scheduler.maxConcurrent`) and
+  machine-wide (`orch daemon budget`); a per-model cap is not there.
