@@ -86,6 +86,30 @@ def test_answer_rejects_non_allow_deny_for_a_permission() -> None:
     print("ok: a permission only accepts allow or deny")
 
 
+def test_answer_preseed_deny_is_rejected_without_replying() -> None:
+    t = _blocked()
+    _FakeProject._instance = _FakeProject([t])
+    sent: list[tuple] = []
+    orig_status = cli.server_mod.status
+    orig_from = cli.state.Project.from_dir
+    orig_reply = cli.harness.reply_permission
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    cli.harness.reply_permission = lambda *a, **k: sent.append((a, k))
+    try:
+        rc = cli.cmd_task_answer(_args(name="task-a", reply="deny",
+                                       request=None, preseed=True))
+        assert rc == 2, rc
+        assert sent == [], \
+            "--preseed + deny must be rejected before the deny is sent"
+    finally:
+        cli.state.Project.from_dir = orig_from
+        cli.server_mod.status = orig_status
+        cli.harness.reply_permission = orig_reply
+    print("ok: `answer deny --preseed` is rejected without sending the reply")
+
+
 def test_answer_question_routes_to_reply_question() -> None:
     t = _blocked(kind="question")
     _FakeProject._instance = _FakeProject([t])

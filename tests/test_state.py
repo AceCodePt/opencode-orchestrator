@@ -43,7 +43,7 @@ def _task(root: Path, name: str) -> None:
     d = root / "tasks" / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "task.md").write_text(f"# {name}\n\nDo it.\n")
-    _git(root, "add", "-A")
+    _git(root, "add", str(d))
     _git(root, "commit", "-q", "-m", f"task {name}")
 
 
@@ -388,9 +388,6 @@ def test_committed_config_wins_over_a_diverged_working_copy() -> None:
         "the committed copy is the only authority, not the working tree"
     common = Path(_git(root, "rev-parse", "--path-format=absolute",
                        "--git-common-dir"))
-    t = next(x for x in state.Project.from_dir(root).scan()
-             if x.claimed or x.name == "seed-task") if False else None
-    assert t is None  # just to keep the scan import exercised
     assert common.exists()
     tmp.cleanup()
     print("ok: a diverged working config.json does not change the scheduler")
@@ -435,6 +432,7 @@ def test_retry_cap_comes_from_the_committed_config() -> None:
     }) + "\n")
     _task(root, "auto")
     wt = _claim(root, "auto")
+    (wt / "work.txt").write_text("done")
     _git(wt, "add", "-A")
     _git(wt, "commit", "-q", "-m", "claim")
     t = next(x for x in _proj(root).scan() if x.name == "auto")

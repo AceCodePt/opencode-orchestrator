@@ -410,12 +410,12 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
             if reply not in ("allow", "deny"):
                 print("a permission takes `allow` or `deny`", file=sys.stderr)
                 return 2
+            if args.preseed and reply != "allow":
+                print("--preseed only makes sense with allow", file=sys.stderr)
+                return 2
             harness.reply_permission(port, b.session_id, b.request_id, reply)
             print(f"{reply}ed permission {b.request_id} for {args.name}")
             if args.preseed:
-                if reply != "allow":
-                    print("--preseed only makes sense with allow", file=sys.stderr)
-                    return 2
                 ok, msg = state.preseed_permission(
                     proj.common, {"tool": b.kind, "pattern": b.detail})
                 print(f"  {msg}")
