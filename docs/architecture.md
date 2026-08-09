@@ -12,8 +12,8 @@
 
 **The repo is the state.** Task management — which tasks exist, their status, their
 ordering — is derived from the project's own git repository, never stored anywhere
-else. Runtime facts — what is running right now — are read live from `/proc`, `ss`,
-and the shared server. There is no database, no cache, no registry, no generated
+else. Runtime facts — what is running right now — are read live from `/proc` and
+the shared server. There is no database, no cache, no registry, no generated
 backlog file. Nothing can drift because there is nothing to drift from.
 
 | Concept | Derived from |
@@ -31,18 +31,20 @@ backlog file. Nothing can drift because there is nothing to drift from.
 ## The task lifecycle
 
 ```
-todo  ->  running  ->  merged  ->  archived
+todo  ->  running  ->  ready  ->  merged  ->  archived
             |  \->  needs-review
 ```
 
 - **todo** — `tasks/<name>/task.md` on base, no branch.
 - **running** — a branch named `<name>` exists (a live session or dispatch).
 - **needs-review** — claimed, but the loop cannot settle it green: uncommitted work,
-  a failing gate with no session left to retrigger, retries exhausted, or a missing
-  worktree. Derived from the worktree, never stored.
-- **merged** — a clean, committed, diffing branch passed the daemon's gate and was
-  folded into base. The branch and worktree are removed and the spec is **archived**
-  (`archive/<name>/task.md`) so the active backlog stays light.
+  a failing gate with no session left to retrigger, retries exhausted, a merge left
+  in progress, or a missing worktree. Derived from the worktree, never stored.
+- **ready** — a clean, committed, diffing branch whose session settled: the gate
+  passed and committed it, and the daemon merges it on its next pass.
+- **merged** — the ready branch was folded into base. The branch and worktree are
+  removed and the spec is **archived** (`archive/<name>/task.md`) so the active
+  backlog stays light.
 - **archived** — the spec has left `tasks/`; git history and the merge commit are the
   record of what was done.
 
@@ -136,11 +138,11 @@ unambiguous: the gate never passed.
                           │  retrigger · merge · archive │
                           └───────┬──────────────┬───────┘
                                   │ facts        │ actions
-                          ┌───────▼──────┐       │  inject failure / approve / abort
-                          │   scan       │       │  merge / remove / kill pid
+                          ┌───────▼──────┐       │  inject failure / merge / remove / kill pid
+                          │   scan       │       │  approve stays the human's `orch task answer`
                           │  git + /proc │       │
                           └───────┬──────┘       │
-                                  │ HTTP + SSE   │
+                                  │ HTTP         │
    ┌────────────────────────────▼──────────────▼────────────────────┐
    │  ONE `opencode serve` per machine (headless, always a port)    │
    │  sessions per worktree; agents run with `opencode run --attach`│
@@ -221,8 +223,27 @@ ungated project.
   `~/.config/orch/daemon.json` (`orch daemon budget`).
 
 Two dispatchers fire hooks from one directory under one env-var contract
-(`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`): the CLI fires
-task-lifecycle events, the daemon fires `session-idle`.
+(`TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`, `BASE_BRANCH`): the
+CLI fires task-lifecycle events, the daemon fires `session-idle`.
+
+### 4b. Global hooks — machine-level notifications
+
+Mirror of the project-hook contract at the machine level: `~/.config/orch/hooks/`
+(created `0700`, owned by the machine owner, outside every repo, so no project
+agent can edit them). `orch init` writes an inert `.example` template for each
+documented event; an executable file at the exact event name opts in. The daemon
+and the CLI both fire them — `alert` (blocked permission/question, untrusted
+project), `needs-review`, `merged`, `removed`, `dispatched`, `dispatch-failed`,
+`resolve-failed`, `restart-server`, `reset`, `archived`.
+
+They are **advisory and asynchronous**: spawned detached with `start_new_session`,
+the daemon never waits on one, and a non-zero exit (or a missing hook) only lands
+in `~/.local/state/orch/hooks/<event>.log`. Fail-open by construction: a broken
+notify script can never stall a pass. Env: the full environment plus `ORCH_EVENT`,
+`ORCH_ACTION`, `PROJECT_NAME`, `PROJECT_DIR`, task-scoped vars, and
+`ORCH_REASON`/`ORCH_DETAIL` (plus `ORCH_REQUEST_ID`/`ORCH_SESSION_ID`/`ORCH_KIND`
+for blocked alerts). Existing dedup carries over — alerts fire once per request id,
+`needs-review` once per backoff window.
 
 ### 5. The primary agent — the project's own conversation
 
@@ -340,14 +361,17 @@ a verdict at all.
 
 The daemon's only human-facing route is the **alert**: when a task's agent is blocked
 on a permission or a question, the daemon raises `alert` (deduped by request id) and
-logs it. `orch` knows nothing about phones, Termux, or notify add-ons — it only
-*exposes* that a human is needed, through signals any consumer can read:
+fires the machine-level `alert` global hook (see 4b). `orch` knows nothing about
+phones, Termux, or notify add-ons — it only *exposes* that a human is needed, through
+signals any consumer can read:
 
 - `orch task list` renders the scan — blocked sessions and every `needs-review`
   task (`--json` for machines).
 - `orch task answer <name> allow|deny` replies to the blocked permission (or the
   answer text, for a question) over the shared server, unblocking the agent directly.
 - The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
+- A global `alert` hook (or `needs-review`, `merged`, …) does the delivery — push to
+  a phone, an HTTP endpoint, anything the machine owner's script can do.
 
 The phone add-on (`~/stuff/phone-approval` — `notify-phone` → Termux, plus the
 approve/deny loop) integrates **with** `orch` the other way around: it polls

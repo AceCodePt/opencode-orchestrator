@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate, merge, observe, server, state
+from . import dispatch, gate, hooks, merge, observe, server, state
 from .harness import prompt_async
 
 SETTLE_BUDGET_S = 30
@@ -83,6 +83,39 @@ class Snapshot:
 def project_label(project: str) -> str:
     p = Path(project)
     return p.parent.name if p.name == ".git" else p.name
+
+
+def _hook_env(a: Action, extra: dict[str, str] | None = None) -> dict[str, str]:
+    env: dict[str, str] = {"ORCH_ACTION": a.kind}
+    if a.project:
+        env["PROJECT_DIR"] = a.project
+        env["PROJECT_NAME"] = project_label(a.project)
+    if a.task:
+        env["TASK_NAME"] = a.task
+    if a.branch:
+        env["BRANCH_NAME"] = a.branch
+    if a.worktree:
+        env["WORKTREE_PATH"] = a.worktree
+        env["WORKTREE_NAME"] = Path(a.worktree).name
+    if a.base:
+        env["BASE_BRANCH"] = a.base
+    if a.reason:
+        env["ORCH_REASON"] = a.reason
+    if a.detail:
+        env["ORCH_DETAIL"] = a.detail
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _hook_cwd(a: Action) -> Path | None:
+    if a.worktree and os.path.isdir(a.worktree):
+        return Path(a.worktree)
+    if a.project and a.base:
+        bwt = state._base_worktree(Path(a.project), a.base)
+        if bwt is not None:
+            return bwt
+    return None
 
 
 def _reset_loop(mem: LoopState, key: tuple[str, str],
@@ -379,6 +412,7 @@ class Supervisor:
         if v.outcome == gate.NO_GATE:
             log.append(f"{a.task} -> needs-review (no committed gate, so nothing "
                        f"verified this work)")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
             _reset_loop(self.mem, key, keep=("wait_until",))
             self._verify_log = log
@@ -392,6 +426,7 @@ class Supervisor:
             if state._dirty(wt):
                 log.append("gate passed but the worktree is still dirty; "
                            "reviewing rather than merging")
+                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
                 self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
                 self._verify_log = log
                 return
@@ -405,6 +440,8 @@ class Supervisor:
                     log.append(f"! {p}")
                 if not r.ok:
                     self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+                else:
+                    log.extend(self._fire_hook("removed", _hook_env(a), _hook_cwd(a)))
             else:
                 r = merge.merge_and_cleanup(Path(a.project or ""), a.task or "",
                                             a.branch or "", wt, a.base or "main")
@@ -414,6 +451,8 @@ class Supervisor:
                     log.append(f"! {p}")
                 if not r.ok:
                     self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+                else:
+                    log.extend(self._fire_hook("merged", _hook_env(a), _hook_cwd(a)))
             self._verify_log = log
             return
 
@@ -427,6 +466,7 @@ class Supervisor:
         if retries >= cap:
             log.append(f"{a.task} -> needs-review (retries-exhausted "
                        f"{retries}/{cap})")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
             self.mem.fingerprint.pop(key, None)
             self._verify_log = log
@@ -435,6 +475,7 @@ class Supervisor:
         if not a.session_ids:
             log.append(f"{a.task} -> needs-review (gate failed, no session left "
                        f"to retrigger)")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
             self._verify_log = log
             return
@@ -445,6 +486,7 @@ class Supervisor:
         )
         if not a.port:
             log.append(f"{a.task} -> needs-review (no server to inject into)")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
             self._verify_log = log
             return
@@ -470,12 +512,15 @@ class Supervisor:
         if r.ok:
             self.mem.dispatch_backoff.pop(key, None)
             self.mem.dispatch_error.pop(key, None)
+            log.extend(self._fire_hook("dispatched", _hook_env(a), _hook_cwd(a)))
         else:
             for p in r.problems:
                 log.append(f"! {p}")
             self.mem.dispatch_backoff[key] = int(time.time()) + DISPATCH_BACKOFF_S
             self.mem.dispatch_error[key] = (r.problems[-1] if r.problems
                                             else "dispatch failed")
+            log.extend(self._fire_hook("dispatch-failed", _hook_env(a),
+                                       _hook_cwd(a)))
         return log
 
     def _resolve(self, a: Action) -> list[str]:
@@ -491,7 +536,24 @@ class Supervisor:
             for p in r.problems:
                 log.append(f"! {p}")
             self.mem.resolve_at[key] = int(time.time())
+            log.extend(self._fire_hook("resolve-failed", _hook_env(a),
+                                       _hook_cwd(a)))
         return log
+
+    def _fire_hook(self, event: str, env: dict[str, str],
+                   cwd: Path | None = None) -> list[str]:
+        env = {**env, "ORCH_EVENT": event}
+        try:
+            pid = hooks.run(event, env, cwd)
+        except OSError as e:
+            return [f"global hook {event} could not spawn: {e}"]
+        if pid is not None:
+            return [f"fired global hook {event} pid={pid}"]
+        return []
+
+    def _hook_log(self, event: str, env: dict[str, str],
+                  cwd: Path | None = None) -> list[str]:
+        return [f"  -> {l}" for l in self._fire_hook(event, env, cwd)]
 
     def apply(self, actions: list[Action]) -> list[str]:
         log: list[str] = []
@@ -505,17 +567,27 @@ class Supervisor:
                 try:
                     info = server.restart()
                     log.append(f"  -> restarted shared server pid={info.pid} {info.url}")
+                    log.extend(self._hook_log("restart-server", _hook_env(a)))
                 except (RuntimeError, TimeoutError, OSError) as e:
                     log.append(f"  -> could not restart the shared server: {e}")
             elif a.kind == ALERT:
+                if not a.blocked:
+                    log.append(f"  -> alert: {a.reason} ({a.detail})")
+                    log.extend(self._hook_log("alert", _hook_env(a), _hook_cwd(a)))
                 for b in a.blocked:
                     if b.request_id in self.mem.alerted:
                         continue
                     self.mem.alerted.add(b.request_id)
-                    log.append(f"  -> alert {b.request_id}: {b.kind} {b.detail} "
-                               f"(would notify)")
+                    log.append(f"  -> alert {b.request_id}: {b.kind} {b.detail}")
+                    env = _hook_env(a, {
+                        "ORCH_REQUEST_ID": b.request_id,
+                        "ORCH_SESSION_ID": b.session_id,
+                        "ORCH_KIND": b.kind,
+                    })
+                    log.extend(self._hook_log("alert", env, _hook_cwd(a)))
             elif a.kind == NEEDS_REVIEW:
                 log.append(f"  -> {a.task} needs-review ({a.reason})")
+                log.extend(self._hook_log("needs-review", _hook_env(a), _hook_cwd(a)))
             elif a.kind == DISPATCH and a.project:
                 log.extend(f"  -> {l}" for l in self._dispatch(a))
             elif a.kind == RESOLVE and a.project:
@@ -531,7 +603,9 @@ class Supervisor:
                     log.append(f"  -> {s}")
                 for p in r.problems:
                     log.append(f"  -> ! {p}")
-                if not r.ok:
+                if r.ok:
+                    log.extend(self._hook_log("merged", _hook_env(a), _hook_cwd(a)))
+                else:
                     self.mem.wait_until[(a.project, a.task or "")] = \
                         int(time.time()) + MERGE_BACKOFF_S
             elif a.kind == REMOVE and a.project:
@@ -542,6 +616,8 @@ class Supervisor:
                     log.append(f"  -> {s}")
                 for p in r.problems:
                     log.append(f"  -> ! {p}")
+                if r.ok:
+                    log.extend(self._hook_log("removed", _hook_env(a), _hook_cwd(a)))
         return log
 
     def step(self) -> list[str]:

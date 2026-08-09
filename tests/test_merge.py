@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -218,6 +220,45 @@ def test_scan_after_merge_sees_nothing_claimed() -> None:
     assert tasks["task-a"].status == state.ARCHIVED
     tmp.cleanup()
     print("ok: after merge the task reads as archived")
+
+
+def test_cli_merge_fires_the_merged_global_hook() -> None:
+    import argparse
+    from orch import cli
+
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        marker = Path(tmp.name) / "marker"
+        hooks_dir = Path(tmp.name) / "orch" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "merged").write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"$ORCH_EVENT:$ORCH_ACTION:$PROJECT_NAME:$TASK_NAME\" > {marker}\n")
+        (hooks_dir / "merged").chmod(0o755)
+
+        bare = _bare_repo(tmp)
+        _claim_task(bare, "task-a")
+        main_wt = bare.parent / "main"
+
+        rc = cli.cmd_task_merge(argparse.Namespace(directory=str(main_wt),
+                                                   name="task-a"))
+        assert rc == 0, rc
+        deadline = time.time() + 5
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "the CLI merge must fire the merged global hook"
+        assert marker.read_text().strip() == "merged:cli:lab.git:task-a"
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: `orch task merge` fires the merged global hook with the env contract")
 
 
 def main() -> int:

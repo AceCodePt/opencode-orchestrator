@@ -12,6 +12,7 @@ from . import dispatch as dispatch_mod
 from . import doctor as doctor_mod
 from . import gate as gate_mod
 from . import harness
+from . import hooks as hooks_mod
 from . import init as init_mod
 from . import project as project_mod
 from . import server as server_mod
@@ -35,6 +36,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return worst
 
 
+def _fire_global(event: str, env: dict[str, str] | None = None,
+                 cwd: Path | None = None) -> None:
+    try:
+        pid = hooks_mod.run(event, {**(env or {}), "ORCH_EVENT": event}, cwd)
+    except OSError as e:
+        print(f"  ! global hook {event} could not spawn: {e}", file=sys.stderr)
+        return
+    if pid is not None:
+        print(f"  fired global hook {event} pid={pid}")
+
+
+def _fire_task_global(event: str, proj: state.Project, task: str,
+                      branch: str | None = None, worktree: Path | None = None,
+                      extra: dict[str, str] | None = None) -> None:
+    env: dict[str, str] = {
+        "ORCH_ACTION": "cli",
+        "PROJECT_DIR": str(proj.common),
+        "PROJECT_NAME": daemon_mod.project_label(str(proj.common)),
+        "BASE_BRANCH": proj.base,
+        "TASK_NAME": task,
+    }
+    if branch:
+        env["BRANCH_NAME"] = branch
+    if worktree is not None:
+        env["WORKTREE_PATH"] = str(worktree)
+        env["WORKTREE_NAME"] = worktree.name
+    if extra:
+        env.update(extra)
+    _fire_global(event, env, cwd=proj.base_worktree)
+
+
 def cmd_server(args: argparse.Namespace) -> int:
     if args.action is None:
         args._sparser.print_help()
@@ -46,6 +78,7 @@ def cmd_server(args: argparse.Namespace) -> int:
             print(f"could not start: {e}", file=sys.stderr)
             return 1
         print(f"shared server pid={info.pid} {info.url}")
+        _fire_global("restart-server")
         return 0
 
     if args.action == "stop":
@@ -60,6 +93,7 @@ def cmd_server(args: argparse.Namespace) -> int:
             print(f"could not restart: {e}", file=sys.stderr)
             return 1
         print(f"shared server pid={info.pid} {info.url}")
+        _fire_global("restart-server")
         return 0
 
     st = server_mod.status()
@@ -101,6 +135,11 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
     sys.stderr.flush()
+    if r.ok and r.worktree is not None and not args.dry_run:
+        proj = state.Project.from_dir(r.worktree)
+        if proj is not None:
+            _fire_task_global("dispatched", proj, r.worktree.name,
+                              worktree=r.worktree)
     return 0 if r.ok else 1
 
 
@@ -319,6 +358,9 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
     print(f"{args.name}: -> todo (branch and worktree deleted)")
+    if r.ok:
+        _fire_task_global("reset", proj, t.name, branch=t.branch,
+                          worktree=Path(t.worktree))
     return 0 if r.ok else 1
 
 
@@ -345,6 +387,9 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
     print(f"{args.name}: closed and archived")
+    if r.ok:
+        _fire_task_global("archived", proj, t.name, branch=t.branch,
+                          worktree=Path(t.worktree))
     return 0 if r.ok else 1
 
 
@@ -373,6 +418,9 @@ def cmd_task_merge(args: argparse.Namespace) -> int:
         print(f"  {s}")
     for p in r.problems:
         print(f"  ! {p}", file=sys.stderr)
+    if r.ok:
+        _fire_task_global("merged", proj, t.name, branch=t.branch,
+                          worktree=Path(t.worktree))
     return 0 if r.ok else 1
 
 

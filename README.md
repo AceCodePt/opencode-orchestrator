@@ -85,9 +85,31 @@ approve itself. A repo you merely clone can never auto-run its gate. `orch init`
 they scaffold work into (each is the owner acting); `doctor` fails on an untrusted
 project.
 
-Requires opencode **1.18.11 or newer**.
+Requires opencode **1.18.11 or newer** — see Prerequisites.
 
 `doctor` exits non-zero when the machinery itself is wrong, so it composes in a shell.
+
+## Prerequisites
+
+- **Linux.** orch reads `/proc` for runtime facts and drives detached processes, and
+  assumes a POSIX shell for hooks.
+- **Python 3.10+** — stdlib only, no install step (`bin/orch` is a plain script).
+- **git** — worktrees, branches, and the bare repo *are* the state store.
+- **opencode 1.18.11 or newer** on `PATH` — agents run headless against one shared
+  `opencode serve`; `doctor` checks the live version against the floor.
+
+## Optional technologies
+
+- **systemd user session** (`systemctl --user`, `loginctl`) — only `orch install` /
+  `uninstall` use it: the always-on supervisor that survives logout and reboot.
+  Without it nothing settles unless you keep `orch daemon run` in the foreground.
+- **gh (GitHub CLI), authenticated** — only `orch project create`'s default
+  create-and-push-a-private-repo path; `--no-gh` skips it.
+- **fd** — faster project discovery; orch falls back to `find` when absent.
+- **shellcheck** — without it gates degrade to syntax-only validation and `doctor`
+  warns.
+- **Provider API keys** — opencode needs a configured provider to run agents; the env
+  filter deliberately lets `*_API_KEY` / `*_AUTH_TOKEN` through.
 
 ## The primary agent (`orch ask`)
 
@@ -151,6 +173,36 @@ dispatches ungated work, and it never dispatches a task you didn't opt in: a tas
 needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
 — `orch task add --auto` or `orch task draft --auto` — lets the machine pick it.
 The scheduler also never dispatches in an untrusted project.
+
+## Global hooks (machine-level notifications)
+
+Same contract as the project hooks — named after what happened, executable, fired
+with an env-var contract — but global: they live in `~/.config/orch/hooks/`, belong
+to the machine owner, and no project agent can touch them. `orch init` writes an
+inert `*.example` template for every event; copy one to its real name and
+`chmod +x`, and the daemon and CLI fire it.
+
+They are **advisory and fire-and-forget**: each hook is spawned detached (a slow
+hook never blocks a daemon pass) and a non-zero exit — or a missing hook — changes
+nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
+
+| Event | Fired when |
+| --- | --- |
+| `alert` | a task is blocked on a permission/question, or a project is untrusted |
+| `needs-review` | a task needs a human (dirty work, retries exhausted, conflict, missing worktree) |
+| `merged` | verified work merged into base (daemon gate-pass or `orch task merge`) |
+| `removed` | a no-op branch cleaned up |
+| `dispatched` | a task agent dispatched (`orch task start` or the scheduler) |
+| `dispatch-failed` | a dispatch failed |
+| `resolve-failed` | automatic conflict resolution failed |
+| `restart-server` | the shared server restarted |
+| `reset` | `orch task reset` |
+| `archived` | `orch task archive` |
+
+Every hook runs with the full environment plus `ORCH_EVENT`, `ORCH_ACTION`,
+`PROJECT_NAME`, `PROJECT_DIR`, and — when task-scoped — `TASK_NAME`, `BRANCH_NAME`,
+`WORKTREE_PATH`, `WORKTREE_NAME`, `BASE_BRANCH`, plus `ORCH_REASON`/`ORCH_DETAIL`
+(and `ORCH_REQUEST_ID`/`ORCH_SESSION_ID`/`ORCH_KIND` for blocked alerts).
 
 ## Security model
 

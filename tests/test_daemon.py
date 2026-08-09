@@ -49,6 +49,37 @@ def test_busy_session_needs_no_action() -> None:
     print("ok: a busy session is left alone")
 
 
+def _hook_env_saved() -> dict[str, str | None]:
+    return {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+
+
+def _hook_env_restore(saved: dict[str, str | None]) -> None:
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+def _install_hook(hooks_dir: Path, name: str, marker: Path, extra: str = "") -> None:
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    p = hooks_dir / name
+    p.write_text("#!/usr/bin/env bash\n"
+                 f"{extra}"
+                 f"echo \"$ORCH_EVENT:$ORCH_ACTION:$PROJECT_NAME:$TASK_NAME\" "
+                 f"> {marker}\n")
+    p.chmod(0o755)
+
+
+def _wait_for(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_blocked_session_alerts_once() -> None:
     b = observe.Blocked(kind="external_directory", request_id="per_1",
                         session_id="ses_1", detail="/etc/*")
@@ -62,6 +93,101 @@ def test_blocked_session_alerts_once() -> None:
         tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
     assert daemon.ALERT not in _kinds(acts2), "the alert must dedupe by request id"
     print("ok: a blocked agent is alerted once, deduped by request id")
+
+
+def test_alert_fires_the_global_hook_once() -> None:
+    saved = _hook_env_saved()
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        marker = Path(tmp.name) / "marker"
+        _install_hook(Path(tmp.name) / "orch" / "hooks", "alert", marker)
+        b = observe.Blocked(kind="external_directory", request_id="per_1",
+                            session_id="ses_1", detail="/etc/*")
+        sup = daemon.Supervisor(dry_run=False)
+        mem = sup.mem
+        acts = daemon.decide(_snap(
+            tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
+        sup.apply(acts)
+        sup.apply(acts)  # deduped: must not fire twice
+        assert _wait_for(marker)
+        assert marker.read_text().strip() == "alert:alert:lab.git:task-a"
+        assert marker.read_text().strip().count("\n") == 0, "one fire only"
+    finally:
+        tmp.cleanup()
+        _hook_env_restore(saved)
+    print("ok: a blocked session fires the global alert hook exactly once")
+
+
+def test_needs_review_fires_the_global_hook() -> None:
+    saved = _hook_env_saved()
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        marker = Path(tmp.name) / "marker"
+        _install_hook(Path(tmp.name) / "orch" / "hooks", "needs-review", marker)
+        sup = daemon.Supervisor(dry_run=False)
+        mem = sup.mem
+        t = _task(session=state.SESSION_NONE, worktree=None, dirty=False, diff=False)
+        acts = daemon.decide(_snap(tasks=[t], mem=mem, now=NOW + 1000))
+        assert daemon.NEEDS_REVIEW in _kinds(acts)
+        sup.apply(acts)
+        assert _wait_for(marker)
+        assert marker.read_text().strip() == "needs-review:needs-review:lab.git:task-a"
+    finally:
+        tmp.cleanup()
+        _hook_env_restore(saved)
+    print("ok: a needs-review escalation fires the global needs-review hook")
+
+
+def test_dry_run_never_fires_hooks() -> None:
+    saved = _hook_env_saved()
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        marker = Path(tmp.name) / "marker"
+        _install_hook(Path(tmp.name) / "orch" / "hooks", "alert", marker)
+        b = observe.Blocked(kind="external_directory", request_id="per_1",
+                            session_id="ses_1", detail="/etc/*")
+        sup = daemon.Supervisor(dry_run=True)
+        mem = sup.mem
+        acts = daemon.decide(_snap(
+            tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
+        sup.apply(acts)
+        time.sleep(0.3)
+        assert not marker.exists(), "dry-run must not fire hooks"
+    finally:
+        tmp.cleanup()
+        _hook_env_restore(saved)
+    print("ok: --dry-run skips global hooks")
+
+
+def test_bad_hook_script_is_fail_open() -> None:
+    saved = _hook_env_saved()
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        hooks_dir = Path(tmp.name) / "orch" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        p = hooks_dir / "alert"
+        p.write_text("#!/no/such/interpreter\necho x\n")
+        p.chmod(0o755)
+        b = observe.Blocked(kind="external_directory", request_id="per_1",
+                            session_id="ses_1", detail="/etc/*")
+        sup = daemon.Supervisor(dry_run=False)
+        mem = sup.mem
+        acts = daemon.decide(_snap(
+            tasks=[_task(session=state.SESSION_BLOCKED, blocked=[b])], mem=mem))
+        log = sup.apply(acts)  # must not raise
+        assert any("could not spawn" in l for l in log)
+    finally:
+        tmp.cleanup()
+        _hook_env_restore(saved)
+    print("ok: a hook that cannot spawn is logged fail-open, the loop continues")
 
 
 def test_newly_settled_task_waits_out_the_budget() -> None:

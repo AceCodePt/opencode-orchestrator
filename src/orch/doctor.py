@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, gate, harness, server, state
+from . import dispatch, gate, harness, hooks, server, state
 
 OK = "ok"
 WARN = "warn"
@@ -321,6 +321,29 @@ def check_tooling() -> list[Check]:
     return out
 
 
+def check_global_hooks() -> list[Check]:
+    out: list[Check] = []
+    d = hooks.hooks_dir()
+    found = sorted(
+        p for p in d.iterdir()
+        if p.is_file() and os.access(p, os.X_OK)
+    ) if d.exists() else []
+    if not found:
+        out.append(Check(OK, "global hooks",
+                         "none configured (opt-in); `orch init` writes "
+                         ".example templates to " + str(d)))
+        return out
+    for p in found:
+        if p.name in hooks.GLOBAL_HOOKS:
+            out.append(Check(OK, f"global hook {p.name}",
+                             f"fired on {hooks.GLOBAL_HOOKS[p.name]}"))
+        else:
+            out.append(Check(
+                WARN, f"global hook {p.name} is not a known event",
+                "only names in hooks.GLOBAL_HOOKS fire; rename it to match"))
+    return out
+
+
 def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     cwd = cwd or Path.cwd()
     checks: list[Check] = []
@@ -333,6 +356,7 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_tooling()
     checks += check_project(cwd)
     checks += check_trust(cwd)
+    checks += check_global_hooks()
     worst = 0
     for c in checks:
         if c.status == FAIL:

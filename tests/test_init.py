@@ -56,6 +56,31 @@ def test_init_auto_trusts_the_project() -> None:
     print("ok: orch init trusts the project it scaffolds")
 
 
+def test_init_writes_global_hook_examples() -> None:
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+    try:
+        root, repo_tmp = _repo()
+        r = init_mod.run(root)
+        hooks_dir = Path(tmp.name) / "orch" / "hooks"
+        from orch import hooks
+        assert all((hooks_dir / f"{e}.example").exists()
+                   for e in hooks.GLOBAL_HOOKS), r.created
+        r2 = init_mod.run(root)
+        assert not r2.created, "a second init skips the existing examples"
+        repo_tmp.cleanup()
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: orch init writes the global hook .example templates")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

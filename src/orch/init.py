@@ -201,6 +201,19 @@ def run(start: Path, force: bool = False, version: str = "0",
                                                                     when=when))
     write(orch / ".version", version + "\n")
 
+    from . import hooks
+    g_created, g_skipped = hooks.install_examples(force=force)
+    for name in g_created:
+        created.append(f"global-hooks/{name}")
+    for name in g_skipped:
+        skipped.append(f"global-hooks/{name}")
+    notes.append(
+        "global notification hooks (machine-level, outside any repo) are "
+        "templated as ~/.config/orch/hooks/*.example - copy one to its real name, "
+        "chmod +x, and the daemon/CLI fire it asynchronously. Advisory only: a "
+        "non-zero exit never blocks anything."
+    )
+
     notes.append(
         "hooks/*.sample hold reference templates for the task-lifecycle events "
         "(pre/post-task-create, pre/post-task-cleanup, pre-branch-delete). Copy one "
