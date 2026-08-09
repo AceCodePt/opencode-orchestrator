@@ -64,7 +64,7 @@ def _fake_run(calls: list) -> None:
 
 
 def _fake_init(calls: list) -> None:
-    def run(_start, force=False, version="0", force_hooks=False):
+    def run(_start, force=False, version="0"):
         calls.append(("init", str(_start)))
         return project.init_mod.InitResult(["config.json"], [], [])
     project.init_mod.run = run

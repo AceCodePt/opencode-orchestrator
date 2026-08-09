@@ -211,7 +211,9 @@ ungated project.
 ### 4. Project `.orchestration/` — project knowledge
 
 - `hooks/session-idle` — the gate: verify, and on success commit the work. The daemon
-  fires it on settle; the CLI fires it via `gate-run`.
+  fires it on settle; the CLI fires it via `gate-run`. `orch init` scaffolds
+  `hooks/session-idle.sample` — inert until copied to the real name, made
+  executable, and committed.
 - Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
   `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
   `hooks/*.sample` references for all five — inert until copied to the real name,

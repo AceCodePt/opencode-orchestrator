@@ -158,10 +158,14 @@ in one source file has one place to check.
 
 - **The scaffolded gate is fail-closed** and documents the contract: on pass it
   commits the work (idempotently); on failure the output is fed back by the daemon.
+  `orch init` writes it as `hooks/session-idle.sample`, inert until the project
+  copies it to the real name and commits it — the same opt-in contract as the
+  lifecycle hooks.
 - **A bare target is refused, not silently written beside.** Hook definitions must
   live inside a worktree and be tracked.
-- **`--force` must never clobber a gate** — the most valuable file in a project, its
-  loss unrecoverable. `--force-hooks` is a separate, explicit act.
+- **Samples are never a gate.** `orch init` writes every hook as an inert
+  `*.sample`; a project has no gate at all until it copies one to the real name,
+  makes it executable, and commits it. Nothing is overwritten without `--force`.
 
 ## `merge.py`
 

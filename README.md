@@ -143,8 +143,9 @@ anyway, and `ORCH_ROOTS=/` supervises the whole filesystem. Then
 `orch task draft "<free text>"` has a
 one-shot agent convert an idea — or a whole pasted spec — into `tasks/<name>/task.md`
 specs for you to review and commit. Both commands leave the project on the
-base worktree with the fail-closed gate; edit `.orchestration/hooks/session-idle`
-to real checks before dispatching, and keep the project under `$HOME`/`/mnt`
+base worktree with the fail-closed gate; copy `.orchestration/hooks/session-idle.sample`
+to `hooks/session-idle` and edit it to real checks before dispatching, and keep the
+project under `$HOME`/`/mnt`
 (`ORCH_ROOTS`) so the daemon supervises it.
 
 ## Two things worth knowing before dispatching

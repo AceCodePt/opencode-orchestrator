@@ -98,7 +98,8 @@ def check_project(cwd: Path) -> list[Check]:
             Check(FAIL, "no session-idle hook",
                   "absence of a gate is not a pass. Without it every task reports "
                   "no-gate-configured, and treating that as success would manufacture "
-                  "confidence in unchecked work")
+                  "confidence in unchecked work. Copy hooks/session-idle.sample to "
+                  "hooks/session-idle, make it executable, and commit it")
         )
     for name in AGENT_HOOKS + TASK_HOOKS:
         p = hooks_dir / name

@@ -24,8 +24,7 @@ __version__ = "0.1.0"
 
 def cmd_init(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = init_mod.run(start, force=args.force, version=__version__,
-                     force_hooks=args.force_hooks)
+    r = init_mod.run(start, force=args.force, version=__version__)
     print(init_mod.render(r))
     return 0 if (r.created or r.skipped) else 2
 
@@ -781,7 +780,7 @@ def cmd_project_create(args: argparse.Namespace) -> int:
     if not r.ok:
         return 1
     print("\nnext:")
-    print("  edit .orchestration/hooks/session-idle to this project's real checks, then commit")
+    print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit")
     print('  bin/orch task draft "<free text>"   # an agent turns an idea into tasks/ specs')
     print("  bin/orch server start && bin/orch install && bin/orch doctor")
     print("  bin/orch task list && bin/orch task start <name>")
@@ -891,10 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("init", help="scaffold .orchestration/ with the gate template")
     i.add_argument("-C", "--directory")
     i.add_argument("--force", action="store_true",
-                   help="overwrite existing files, except gates")
-    i.add_argument("--force-hooks", action="store_true",
-                   help="also overwrite hooks, replacing a real gate with "
-                        "the fail-closed scaffold")
+                   help="overwrite existing files (samples included)")
     i.set_defaults(func=cmd_init)
 
     d = sub.add_parser("doctor", help="verify the contracts that fail silently")

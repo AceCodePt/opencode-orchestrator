@@ -30,13 +30,16 @@ TEMPLATE_CONFIG = {
     },
 }
 
-TEMPLATE_SESSION_IDLE = """#!/usr/bin/env bash
-# session-idle - what "verify" means for this project.
+TEMPLATE_SESSION_IDLE_SAMPLE = """#!/usr/bin/env bash
+# session-idle.sample - what "verify" means for this project.
+#
+# Copy this file to hooks/session-idle, make it executable, and commit it to
+# enable the gate. Only the version committed on the base branch runs - edit,
+# then commit, before dispatching.
 #
 # Contract (full version in .orchestration/README.md): exit 0 commits the work
 # and passes; non-zero fails and everything written to stdout/stderr is fed back
-# to the agent as its next instructions. Only the version committed on the base
-# branch runs - edit, then commit, before dispatching.
+# to the agent as its next instructions.
 
 set -euo pipefail
 cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
@@ -81,9 +84,10 @@ and the output is fed back to the agent by the daemon, which retries up to
 
 The gate that runs is the version **committed on the base branch**, never the
 working-tree copy, so edit the hook and commit it before dispatching. To configure
-it, put the project's real checks in `hooks/session-idle` above the commit block
-(e.g. `pnpm check && pnpm test`, `cargo clippy -- -D warnings && cargo test`,
-`ruff check . && pytest -q`); the scaffold exits non-zero on purpose until then.
+it, copy `hooks/session-idle.sample` to `hooks/session-idle`, make it executable,
+and put the project's real checks above the commit block (e.g.
+`pnpm check && pnpm test`, `cargo clippy -- -D warnings && cargo test`,
+`ruff check . && pytest -q`); the sample exits non-zero on purpose until then.
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
@@ -96,8 +100,10 @@ authority: `orch project scheduler <n>` writes the working-tree copy for you to
 review and commit. A machine-wide cap across all projects lives outside the repo in
 `~/.config/orch/daemon.json` (`orch daemon budget`).
 
-Reference samples for the task-lifecycle hooks live in `hooks/*.sample` — inert until
-you copy one to its real name, make it executable, and commit it.
+Reference samples for the hooks live in `hooks/*.sample` — inert until
+you copy one to its real name, make it executable, and commit it. The
+`session-idle.sample` is the gate: copy it to `hooks/session-idle` for
+the daemon to verify anything at all.
 """
 
 TASK_HOOKS = {
@@ -165,8 +171,7 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
     return Path(top), notes
 
 
-def run(start: Path, force: bool = False, version: str = "0",
-        force_hooks: bool = False) -> InitResult:
+def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     target, notes = resolve_target(start)
     if target is None:
         return InitResult([], [], notes)
@@ -178,14 +183,10 @@ def run(start: Path, force: bool = False, version: str = "0",
     hooks = orch / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
 
-    def write(p: Path, body: str, executable: bool = False,
-              protected: bool = False) -> None:
+    def write(p: Path, body: str, executable: bool = False) -> None:
         rel = str(p.relative_to(target))
         if p.exists() and not force:
             skipped.append(rel)
-            return
-        if p.exists() and protected and not force_hooks:
-            skipped.append(f"{rel} (protected; --force-hooks to overwrite)")
             return
         p.write_text(body)
         if executable:
@@ -194,8 +195,7 @@ def run(start: Path, force: bool = False, version: str = "0",
 
     write(orch / "README.md", TEMPLATE_README)
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
-    write(hooks / "session-idle", TEMPLATE_SESSION_IDLE, executable=True,
-          protected=True)
+    write(hooks / "session-idle.sample", TEMPLATE_SESSION_IDLE_SAMPLE)
     for name, when in TASK_HOOKS.items():
         write(hooks / f"{name}.sample", TEMPLATE_HOOK_SAMPLE.format(name=name,
                                                                     when=when))
@@ -215,14 +215,16 @@ def run(start: Path, force: bool = False, version: str = "0",
     )
 
     notes.append(
-        "hooks/*.sample hold reference templates for the task-lifecycle events "
-        "(pre/post-task-create, pre/post-task-cleanup, pre-branch-delete). Copy one "
-        "to its real name to enable it; a project with no database needs none."
+        "hooks/*.sample hold reference templates (task-lifecycle events and the "
+        "session-idle gate). Copy one to its real name to enable it; a project "
+        "with no database needs none, but nothing is verified until "
+        "hooks/session-idle exists."
     )
 
     notes.append(
-        "the scaffolded session-idle hook exits non-zero on purpose: an unconfigured "
-        "gate must not report success. Edit it before dispatching real work."
+        "the scaffolded session-idle.sample exits non-zero on purpose: an "
+        "unconfigured gate must not report success. Copy it to hooks/session-idle "
+        "and edit it before dispatching real work."
     )
     notes.append(
         "COMMIT the hook before dispatching. The daemon runs the version committed on "
