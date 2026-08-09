@@ -268,33 +268,6 @@ def test_trust_round_trip_keyed_by_the_repo() -> None:
     print("ok: trust is a machine-level marker keyed by the repo's git dir")
 
 
-def test_preseed_permission_appends_idempotently() -> None:
-    saved = os.environ.get("XDG_STATE_HOME")
-    tmp = tempfile.TemporaryDirectory()
-    os.environ["XDG_STATE_HOME"] = tmp.name
-    try:
-        root, repo_tmp = _repo()
-        common = Path(_git(root, "rev-parse", "--path-format=absolute",
-                           "--git-common-dir"))
-        rule = {"tool": "bash", "pattern": "git status *"}
-        ok, msg = state.preseed_permission(common, rule)
-        assert ok, msg
-        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
-        assert cfg["permissions"]["always"] == [rule]
-        ok, msg = state.preseed_permission(common, rule)
-        assert ok and "already" in msg
-        cfg = json.loads((root / ".orchestration" / "config.json").read_text())
-        assert cfg["permissions"]["always"] == [rule], "no duplicates"
-        repo_tmp.cleanup()
-    finally:
-        tmp.cleanup()
-        if saved is None:
-            os.environ.pop("XDG_STATE_HOME", None)
-        else:
-            os.environ["XDG_STATE_HOME"] = saved
-    print("ok: preseed appends a rule to the base worktree's config, idempotently")
-
-
 def test_base_branch_comes_from_config() -> None:
     root, tmp = _repo()
     (root / ".orchestration" / "config.json").write_text(
@@ -399,7 +372,7 @@ def test_write_scheduler_policy_preserves_keys_on_base() -> None:
     cfg.write_text(json.dumps({
         "baseBranch": "main",
         "gate": {"retryCap": 5},
-        "permissions": {"always": [{"tool": "bash", "pattern": "git *"}]},
+        "custom": {"keep": True},
     }) + "\n")
     common = Path(_git(root, "rev-parse", "--path-format=absolute",
                        "--git-common-dir"))
@@ -408,7 +381,7 @@ def test_write_scheduler_policy_preserves_keys_on_base() -> None:
     cfg = json.loads((root / ".orchestration" / "config.json").read_text())
     assert cfg["scheduler"] == {"enabled": True, "maxConcurrent": 3}
     assert cfg["gate"] == {"retryCap": 5}, "unrelated keys survive"
-    assert cfg["permissions"]["always"][0]["pattern"] == "git *"
+    assert cfg["custom"] == {"keep": True}
     ok, _ = state.write_scheduler_policy(common, "main", False, None)
     assert ok
     cfg = json.loads((root / ".orchestration" / "config.json").read_text())

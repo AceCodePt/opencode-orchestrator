@@ -20,16 +20,6 @@ TEMPLATE_CONFIG = {
         "exclude": ["**/*.md", "docs/**", "tasks/**"],
         "retryCap": 3,
     },
-    "permissions": {
-        "$comment": (
-            "Declarative always-allow rules for unattended agents, e.g. "
-            "{\"tool\": \"bash\", \"pattern\": \"git status *\"}. `orch task "
-            "answer <name> allow --preseed` appends here. Only the committed "
-            "copy on the base branch applies, and an agent cannot edit "
-            ".orchestration/ (the global opencode config denies it)."
-        ),
-        "always": [],
-    },
     "scheduler": {
         "$comment": (
             "Let the daemon auto-dispatch todo tasks itself (hitl: false only). "
@@ -99,7 +89,7 @@ A project with no database legitimately needs no `post-task-create`. Absent hook
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
 
 `config.json` holds project policy: `baseBranch`, the `gate` block
-(`include`/`exclude`/`retryCap`), `permissions.always`, and — if you want the daemon
+(`include`/`exclude`/`retryCap`), and — if you want the daemon
 to dispatch `todo` tasks itself — a `scheduler` block (`enabled` + `maxConcurrent`,
 the per-project cap). Like the gate, the **committed copy on the base branch** is the
 authority: `orch project scheduler <n>` writes the working-tree copy for you to

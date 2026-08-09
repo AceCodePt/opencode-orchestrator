@@ -410,17 +410,8 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
             if reply not in ("allow", "deny"):
                 print("a permission takes `allow` or `deny`", file=sys.stderr)
                 return 2
-            if args.preseed and reply != "allow":
-                print("--preseed only makes sense with allow", file=sys.stderr)
-                return 2
             harness.reply_permission(port, b.session_id, b.request_id, reply)
             print(f"{reply}ed permission {b.request_id} for {args.name}")
-            if args.preseed:
-                ok, msg = state.preseed_permission(
-                    proj.common, {"tool": b.kind, "pattern": b.detail})
-                print(f"  {msg}")
-                if not ok:
-                    return 1
     except Exception as e:  # noqa: BLE001
         print(f"could not answer {b.request_id}: {e}", file=sys.stderr)
         return 1
@@ -938,9 +929,6 @@ def build_parser() -> argparse.ArgumentParser:
                      help="allow|deny for a permission; the answer text for a question")
     ta2.add_argument("-C", "--directory")
     ta2.add_argument("--request", help="answer a specific pending request id")
-    ta2.add_argument("--preseed", action="store_true",
-                     help="also record this `allow` as an always-rule in "
-                          ".orchestration/config.json (review and commit it)")
     ta2.set_defaults(func=cmd_task_answer)
 
     td = tsub.add_parser(

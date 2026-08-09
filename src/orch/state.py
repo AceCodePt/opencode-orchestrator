@@ -115,30 +115,6 @@ def untrust_project(common: Path | str) -> bool:
     return True
 
 
-def preseed_permission(common: Path, rule: dict) -> tuple[bool, str]:
-    """Record an always-allow rule for unattended agents at the orchestration
-    level: appended to the base worktree's .orchestration/config.json for a
-    human to review and commit. It is not applied until committed, and an agent
-    cannot edit it (the deny rule covers .orchestration/)."""
-    proj = Project.from_common(common)
-    if proj is None or proj.base_worktree is None:
-        return False, "no base worktree to preseed into"
-    cfg_path = proj.base_worktree / ORCH_DIR / "config.json"
-    if not cfg_path.exists():
-        return False, "no .orchestration/config.json on the base worktree"
-    cfg = _read_config(cfg_path.parent)
-    always = cfg.setdefault("permissions", {}).setdefault("always", [])
-    for r in always:
-        if (isinstance(r, dict) and r.get("tool") == rule.get("tool")
-                and r.get("pattern") == rule.get("pattern")):
-            return True, "already preseeded"
-    always.append(rule)
-    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
-    return True, (f"preseeded {rule.get('tool')} {rule.get('pattern')!r} into "
-                  f"{cfg_path}; review and commit it on {proj.base} for it to "
-                  f"apply to unattended agents")
-
-
 def _find_orch_dirs(root: str, maxdepth: int = MAX_DEPTH) -> list[Path]:
     if not os.path.isdir(root):
         return []

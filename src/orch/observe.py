@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from . import harness
 
@@ -17,7 +16,6 @@ class Blocked:
     request_id: str
     session_id: str
     detail: str
-    always: Any = None
 
 
 @dataclass
@@ -48,7 +46,6 @@ def _describe_permission(p: dict) -> Blocked:
         request_id=rid,
         session_id=sid,
         detail=detail,
-        always=p.get("always") or p.get("save"),
     )
 
 

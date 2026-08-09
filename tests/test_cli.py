@@ -37,7 +37,7 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
 
 
 def _args(**kw) -> argparse.Namespace:
-    a = argparse.Namespace(directory=None, preseed=False)
+    a = argparse.Namespace(directory=None)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -60,7 +60,7 @@ def test_answer_allow_replies_to_a_permission() -> None:
         assert rc == 0, rc
         (port, sid, pid, reply), kw = replies[0]
         assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "allow")
-        assert kw == {}, "an answer is one-time; persistence is orchestration-level"
+        assert kw == {}, "an answer is one-time; nothing is persisted"
     finally:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
@@ -84,30 +84,6 @@ def test_answer_rejects_non_allow_deny_for_a_permission() -> None:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
     print("ok: a permission only accepts allow or deny")
-
-
-def test_answer_preseed_deny_is_rejected_without_replying() -> None:
-    t = _blocked()
-    _FakeProject._instance = _FakeProject([t])
-    sent: list[tuple] = []
-    orig_status = cli.server_mod.status
-    orig_from = cli.state.Project.from_dir
-    orig_reply = cli.harness.reply_permission
-    cli.state.Project.from_dir = _FakeProject.from_dir
-    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
-                                     "port": 4096}
-    cli.harness.reply_permission = lambda *a, **k: sent.append((a, k))
-    try:
-        rc = cli.cmd_task_answer(_args(name="task-a", reply="deny",
-                                       request=None, preseed=True))
-        assert rc == 2, rc
-        assert sent == [], \
-            "--preseed + deny must be rejected before the deny is sent"
-    finally:
-        cli.state.Project.from_dir = orig_from
-        cli.server_mod.status = orig_status
-        cli.harness.reply_permission = orig_reply
-    print("ok: `answer deny --preseed` is rejected without sending the reply")
 
 
 def test_answer_question_routes_to_reply_question() -> None:
@@ -198,7 +174,7 @@ def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
     orch = root / ".orchestration"
     orch.mkdir(parents=True)
     (orch / "config.json").write_text(
-        '{"baseBranch": "main", "permissions": {"always": []}}\n')
+        '{"baseBranch": "main"}\n')
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "seed")
     return root, tmp
@@ -213,7 +189,6 @@ def test_project_scheduler_sets_the_cap_preserving_keys() -> None:
         assert rc == 0, rc
         cfg = json.loads((root / ".orchestration" / "config.json").read_text())
         assert cfg["scheduler"] == {"enabled": True, "maxConcurrent": 2}
-        assert cfg["permissions"] == {"always": []}, "other keys survive"
         assert "review and commit" in buf.getvalue()
         cli.cmd_project_scheduler(_args(directory=str(root), max="off"))
         cfg = json.loads((root / ".orchestration" / "config.json").read_text())

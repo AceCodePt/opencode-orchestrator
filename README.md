@@ -54,7 +54,6 @@ bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
 bin/orch task list --global      # every project: what is waiting on you (blocked, stuck, unmerged)
 bin/orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
-bin/orch task answer <name> allow --preseed  # also record it as an always-rule in .orchestration/config.json
 bin/orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
@@ -177,10 +176,8 @@ not a hostile one, but the blast radius is bounded:
   owner relaxes via `~/.config/orch/env.json` (`drop`/`keep`); a project can only
   *restrict* further (`"agentEnv": {"drop": [...]}`) and a gate can opt into the full
   env with `"gate": {"env": "full"}`.
-- **Permissions are one-time, or orchestration-level.** `orch task answer` approves a
-  blocked permission once — nothing is persisted to opencode's runtime config. To make a
-  rule stick, `--preseed` records it in `.orchestration/config.json`
-  (`permissions.always`) for you to review and commit; only the committed copy applies.
+- **Permissions are one-time.** `orch task answer` approves a blocked permission
+  once; nothing is persisted to opencode's runtime config.
 - **The control plane is loopback-only and the logs are private.** The shared server
   binds `127.0.0.1`; state and session logs live in `~/.local/state/orch` created
   `0700` with `0600` files, so other users cannot read conversations or the server port.
@@ -203,9 +200,8 @@ held, not torn down: the daemon treats a live detached `opencode run` process in
 worktree as the agent working and only settles once it exits.
 
 The security controls are covered by unit tests: the **trust gate** (untrusted projects
-only alert), the **env filter** (agents and gates run without the owner's secrets), the
-**`.orchestration` deny** installed by `orch install`, and the **permission preseed**
-(`task answer --preseed`).
+only alert), the **env filter** (agents and gates run without the owner's secrets), and
+the **`.orchestration` deny** installed by `orch install`.
 
 `orch daemon` supervises: it settles tasks, runs the committed gate itself, retriggers
 failing agents up to `retryCap`, merges verified work, archives done work, restarts a

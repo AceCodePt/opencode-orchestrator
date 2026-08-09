@@ -193,7 +193,7 @@ string cannot do this job.
 | `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit). The project is trusted for the daemon |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project; `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take |
-| `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted; `--preseed` additionally records the `allow` as an always-rule in `.orchestration/config.json` for review and commit |
+| `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
 | `orch task merge <name>` | re-run a merge after a conflict |
@@ -401,9 +401,8 @@ still bounded:
   (`gate.env: full`). Env filtering is defence in depth, not containment: a hostile
   agent with `bash` can still read `~/.ssh` from disk, which is why the threat model
   stays lazy-agent.
-- **Permissions are one-time or orchestration-level.** `task answer` never persists to
-  opencode's runtime config; `--preseed` writes an always-rule into
-  `.orchestration/config.json` for the human to review and commit.
+- **Permissions are one-time.** `task answer` approves a blocked permission once;
+  nothing is persisted to opencode's runtime config.
 - **Loopback control plane, private state.** The shared server binds `127.0.0.1`;
   `~/.local/state/orch` is created `0700` with `0600` files, so other users can read
   neither the port nor the session logs.
