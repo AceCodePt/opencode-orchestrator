@@ -112,5 +112,7 @@ so v1 is what 1.18.13 emitted in practice.
 
 ## Full list
 
-93 event types, tab-separated with their property names, in
-[`events-raw.tsv`](./events-raw.tsv).
+90 event types, with their property names, in `src/orch/opencode_events.py` — the
+single source of truth. The `/doc` OpenAPI lists 93 schemas, but the stream does
+not emit every one, and it does emit `server.heartbeat`, which has no schema; the
+map holds the emitted vocabulary.
