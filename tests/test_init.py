@@ -81,6 +81,37 @@ def test_init_writes_global_hook_examples() -> None:
     print("ok: orch init writes the global hook .example templates")
 
 
+def test_init_scaffolds_opencode_event_samples() -> None:
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+    try:
+        root, repo_tmp = _repo()
+        from orch import opencode_events
+        r = init_mod.run(root)
+        hooks_dir = root / ".orchestration" / "hooks"
+        for event in ("permission.asked", "session.next.tool.called",
+                      "session.status"):
+            name = opencode_events.hook_name(event)
+            assert (hooks_dir / f"{name}.sample").exists(), r.created
+        gate = (hooks_dir / "session-idle.sample").read_text()
+        assert "session-idle" in gate and "commit" in gate, \
+            "session.idle must keep the gate sample, not a generic event one"
+        assert "permission.asked" in (hooks_dir / "permission-asked.sample").read_text()
+        r2 = init_mod.run(root)
+        assert not r2.created, "a second init skips the existing samples"
+        repo_tmp.cleanup()
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: orch init scaffolds an inert sample per opencode event")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

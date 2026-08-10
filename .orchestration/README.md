@@ -1,54 +1,51 @@
-# `.orchestration/` — this project's own orchestration
+# `.orchestration/`
 
-This directory is `orch` dogfooding itself, and it is deliberately **inside the
-worktree and tracked**.
+This project's orchestration, deliberately **inside the worktree and tracked**.
 
-That is the whole correction. `rdk-template`'s equivalent lives in
-`/home/sagi/stuff/rdk-template/`, the parent directory next to the bare repo, which
-belongs to no git repository — so it has no history, no backup, and no way to
-differ per branch. A bare repo has no working tree, so anything placed beside it is
-outside version control by construction.
-
-Tracked-in-a-worktree buys three things:
-
-1. **History.** You can see when a hook changed and why.
-2. **Per-branch behaviour.** A task branch carries its own hooks, so changing how
-   checks run is an ordinary reviewable change on a branch.
-3. **It travels.** Clone the repo and the orchestration comes with it.
-
-## What is here, and what is deliberately not
-
-- `config.json` — which files matter for the diff gate, the retry cap, the base
-  branch.
-- `hooks/session-idle` — what "verify" means for this project, and the thing that
-  commits a passing task's work.
-
-There is no `post-task-create` here, and that is a signal rather than an omission.
-This project has no database to create and no `.env` to rewrite, so it needs
-almost no hooks.
-
-There is no `.opencode/` router plugin any more. The daemon runs the gate itself
-and injects failures itself; nothing is installed into the project's `.opencode/`.
-
-## The contract
+Never place these beside the bare repo. A bare repo has no working tree, so
+anything next to it is outside version control by construction - no history, no
+backup, and no ability to differ per branch.
 
 Hooks are named after **what happened**, not what to do. Two dispatchers fire them
-from this one directory:
+from this one directory under one env-var contract (`TASK_NAME`, `BRANCH_NAME`,
+`WORKTREE_PATH`, `WORKTREE_NAME`):
 
-- The **CLI** fires task-lifecycle events: `pre-task-create`, `post-task-create`,
-  `pre-task-cleanup`, `post-task-cleanup`, `pre-branch-delete`.
-- The **daemon** fires agent-lifecycle events: `session-idle`, when a task's
-  session settles.
+- the **CLI** fires task-lifecycle events: `pre-task-create`, `post-task-create`,
+  `pre-task-cleanup`, `post-task-cleanup`, `pre-branch-delete`
+- the **daemon** fires agent-lifecycle events: `session-idle` - the gate, run
+  when a task's session settles
 
-Both pass `TASK_NAME`, `BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`.
-
-`session-idle` is the gate. Exit 0 passes **and commits the work**; non-zero fails
+`session-idle` is the gate: exit 0 passes **and commits the work**; non-zero fails
 and the output is fed back to the agent by the daemon, which retries up to
 `gate.retryCap` before marking the task needs-review. A **missing** hook is
-`no-gate-configured` — never a pass. Absence of checks must never be reported as
-success.
+`no-gate-configured` - which is not a pass.
 
-Note one asymmetry: `pre-task-create` necessarily runs from the *dispatching*
-worktree because the new one does not exist yet, while `post-task-create` runs from
-the new worktree's own checkout. So a task branch can change its own post-create
-behaviour but not its pre-create behaviour.
+The gate that runs is the version **committed on the base branch**, never the
+working-tree copy, so edit the hook and commit it before dispatching. To configure
+it, copy `hooks/session-idle.sample` to `hooks/session-idle`, make it executable,
+and put the project's real checks above the commit block (e.g.
+`pnpm check && pnpm test`, `cargo clippy -- -D warnings && cargo test`,
+`ruff check . && pytest -q`); the sample exits non-zero on purpose until then.
+
+A project with no database legitimately needs no `post-task-create`. Absent hooks
+are fine; a missing `session-idle` is not, because then nothing verifies the work.
+
+`config.json` holds project policy: `baseBranch`, the `gate` block
+(`include`/`exclude`/`retryCap`), and — if you want the daemon
+to dispatch `todo` tasks itself — a `scheduler` block (`enabled` + `maxConcurrent`,
+the per-project cap). Like the gate, the **committed copy on the base branch** is the
+authority: `orch project scheduler <n>` writes the working-tree copy for you to
+review and commit. A machine-wide cap across all projects lives outside the repo in
+`~/.config/orch/daemon.json` (`orch daemon budget`).
+
+Reference samples for the hooks live in `hooks/*.sample` — inert until
+you copy one to its real name, make it executable, and commit it. The
+`session-idle.sample` is the gate: copy it to `hooks/session-idle` for
+the daemon to verify anything at all.
+
+The remaining `hooks/*.sample` files are one per opencode server event
+(the vocabulary in `src/orch/opencode_events.py`), fired by the daemon's SSE
+consumer when the server emits that event — the event's JSON arrives on stdin.
+Copy one to its real name, make it executable, and commit it to react to the
+event. `session.idle` has no event sample here — that name is the gate, so it
+keeps the gate template above.

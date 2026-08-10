@@ -129,20 +129,45 @@ def test_install_examples_is_idempotent() -> None:
     tmp = tempfile.TemporaryDirectory()
     try:
         cfg, _state = _env(tmp)
+        from orch import opencode_events
+        n_events = len(opencode_events.OPENCODE_EVENTS)
         created, skipped = hooks.install_examples()
         assert created, "the first init writes the examples"
         assert skipped == []
         assert all((cfg / "orch" / "hooks" / f"{e}.example").exists()
                    for e in hooks.GLOBAL_HOOKS)
+        assert all(
+            (cfg / "orch" / "hooks" / f"{opencode_events.hook_name(e)}.example").exists()
+            for e in opencode_events.OPENCODE_EVENTS
+        )
         created2, skipped2 = hooks.install_examples()
         assert created2 == [] and skipped2
-        assert len(skipped2) == len(hooks.GLOBAL_HOOKS)
+        assert len(skipped2) == len(hooks.GLOBAL_HOOKS) + n_events
         # examples are inert: not executable, and not a fired event name
         assert hooks.run("alert", {}) is None
     finally:
         tmp.cleanup()
         _restore(saved)
     print("ok: install_examples is idempotent and the examples are inert")
+
+
+def test_opencode_event_examples_are_reference_templates() -> None:
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        cfg, _state = _env(tmp)
+        from orch import opencode_events
+        hooks.install_examples()
+        p = cfg / "orch" / "hooks" / "permission-asked.example"
+        body = p.read_text()
+        assert "permission.asked" in body, "the example documents its event type"
+        assert "SSE consumer" in body, "an event example must describe its firing"
+        assert "stdin" in body, "an event example must document the payload channel"
+        assert hooks.run("permission-asked", {}) is None, "examples stay inert"
+    finally:
+        tmp.cleanup()
+        _restore(saved)
+    print("ok: opencode event examples are reference templates, wired but inert")
 
 
 def main() -> int:

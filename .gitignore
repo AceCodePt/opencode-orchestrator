@@ -5,3 +5,6 @@ __pycache__/
 
 # orch runtime state (not intent)
 .orchestration/.state/
+
+# sample hooks scaffolded by `orch init` (a real hook is a copy committed as hooks/<name>)
+.orchestration/hooks/*.sample

@@ -30,6 +30,13 @@ TEMPLATE_CONFIG = {
     },
 }
 
+TEMPLATE_GITIGNORE = """# Generated scaffolding and runtime state, not project intent.
+# Real hooks (a copy of hooks/*.sample made executable and committed) ARE tracked;
+# only the inert samples are ignored.
+.state/
+hooks/*.sample
+"""
+
 TEMPLATE_SESSION_IDLE_SAMPLE = """#!/usr/bin/env bash
 # session-idle.sample - what "verify" means for this project.
 #
@@ -104,6 +111,13 @@ Reference samples for the hooks live in `hooks/*.sample` — inert until
 you copy one to its real name, make it executable, and commit it. The
 `session-idle.sample` is the gate: copy it to `hooks/session-idle` for
 the daemon to verify anything at all.
+
+The remaining `hooks/*.sample` files are one per opencode server event
+(the vocabulary in `src/orch/opencode_events.py`), fired by the daemon's SSE
+consumer when the server emits that event — the event's JSON arrives on stdin.
+Copy one to its real name, make it executable, and commit it to react to the
+event. `session.idle` has no event sample here — that name is the gate, so it
+keeps the gate template above.
 """
 
 TASK_HOOKS = {
@@ -180,8 +194,8 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     skipped: list[str] = []
 
     orch = target / ".orchestration"
-    hooks = orch / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
+    hooks_dir = orch / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
 
     def write(p: Path, body: str, executable: bool = False) -> None:
         rel = str(p.relative_to(target))
@@ -193,32 +207,57 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
             p.chmod(0o755)
         created.append(rel)
 
+    from . import hooks
+    from . import opencode_events
+
     write(orch / "README.md", TEMPLATE_README)
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
-    write(hooks / "session-idle.sample", TEMPLATE_SESSION_IDLE_SAMPLE)
+    write(orch / ".gitignore", TEMPLATE_GITIGNORE)
+    write(hooks_dir / "session-idle.sample", TEMPLATE_SESSION_IDLE_SAMPLE)
     for name, when in TASK_HOOKS.items():
-        write(hooks / f"{name}.sample", TEMPLATE_HOOK_SAMPLE.format(name=name,
-                                                                    when=when))
+        write(hooks_dir / f"{name}.sample", TEMPLATE_HOOK_SAMPLE.format(
+            name=name, when=when))
+    for event, props in opencode_events.OPENCODE_EVENTS.items():
+        name = opencode_events.hook_name(event)
+        if name == "session-idle":
+            continue
+        write(hooks_dir / f"{name}.sample",
+              hooks.event_hook_template(name, "sample", event, props,
+                                        commit=True))
     write(orch / ".version", version + "\n")
 
-    from . import hooks
+    project_hooks = "\n".join(
+        f"    - {name} - {when}" for name, when in TASK_HOOKS.items()
+    )
+    notes.append(
+        "project hooks scaffold as hooks/*.sample, inert until copied to the "
+        "real name, made executable, and committed:\n"
+        "    - session-idle - the gate: verify and, on a pass, commit the work. "
+        "Nothing is verified until hooks/session-idle exists.\n"
+        + project_hooks
+    )
+    notes.append(
+        f"one sample per opencode server event is scaffolded too "
+        f"({len(opencode_events.OPENCODE_EVENTS) - 1} in hooks/*.sample; "
+        "session-idle is the gate above). The daemon's SSE consumer fires the "
+        "real hook when the server emits the event, with the event's JSON on "
+        "stdin; the vocabulary lives in src/orch/opencode_events.py."
+    )
+
     g_created, g_skipped = hooks.install_examples(force=force)
     for name in g_created:
         created.append(f"global-hooks/{name}")
     for name in g_skipped:
         skipped.append(f"global-hooks/{name}")
+    global_hooks = "\n".join(
+        f"    - {event} - {when}" for event, when in hooks.GLOBAL_HOOKS.items()
+    )
     notes.append(
         "global notification hooks (machine-level, outside any repo) are "
-        "templated as ~/.config/orch/hooks/*.example - copy one to its real name, "
-        "chmod +x, and the daemon/CLI fire it asynchronously. Advisory only: a "
-        "non-zero exit never blocks anything."
-    )
-
-    notes.append(
-        "hooks/*.sample hold reference templates (task-lifecycle events and the "
-        "session-idle gate). Copy one to its real name to enable it; a project "
-        "with no database needs none, but nothing is verified until "
-        "hooks/session-idle exists."
+        "templated as ~/.config/orch/hooks/*.example - copy one to its real "
+        "name, chmod +x, and the daemon/CLI fire it asynchronously. Advisory "
+        "only: a non-zero exit never blocks anything.\n"
+        + global_hooks
     )
 
     notes.append(

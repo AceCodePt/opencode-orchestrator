@@ -43,6 +43,29 @@ echo "{event} (example): no-op"
 exit 0
 """
 
+def event_hook_template(name: str, ext: str, event: str, props: str,
+                        commit: bool) -> str:
+    """One reference template for an opencode server event, shared by the
+    project hooks/*.sample (`commit=True`) and the global
+    ~/.config/orch/hooks/*.example (`commit=False`) so the two cannot drift.
+    The daemon's SSE consumer fires the real hook when the server emits the
+    event, with the event's JSON on stdin."""
+    enable = " and commit it" if commit else ""
+    return f"""#!/usr/bin/env bash
+# {name}.{ext} - opencode server event "{event}".
+# The daemon's SSE consumer fires this when the server emits "{event}": copy this
+# file to hooks/{name}, make it executable{enable}. The event arrives as JSON on
+# stdin, with ORCH_EVENT={name} (plus session/project env when one applies).
+# Fire-and-forget: a non-zero exit is logged to ~/.local/state/orch, never
+# blocking the stream.
+# Properties: {props}
+
+set -uo pipefail
+read -r payload
+echo "{name} (opencode event): $payload"
+exit 0
+"""
+
 
 def config_dir() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
@@ -112,8 +135,10 @@ def run(event: str, env: Mapping[str, str] | None = None,
 
 
 def install_examples(force: bool = False) -> tuple[list[str], list[str]]:
-    """Write an inert `.example` template for every documented global hook.
-    Returns (created, skipped) file names."""
+    """Write an inert `.example` template for every documented global hook and
+    every opencode server event. Returns (created, skipped) file names."""
+    from . import opencode_events
+
     created: list[str] = []
     skipped: list[str] = []
     d = config_dir()
@@ -125,4 +150,14 @@ def install_examples(force: bool = False) -> tuple[list[str], list[str]]:
             continue
         p.write_text(EXAMPLE_TEMPLATE.format(event=event, when=when))
         created.append(name)
+    for event, props in opencode_events.OPENCODE_EVENTS.items():
+        name = opencode_events.hook_name(event)
+        fname = f"{name}.example"
+        p = d / fname
+        if p.exists() and not force:
+            skipped.append(fname)
+            continue
+        p.write_text(event_hook_template(name, "example", event, props,
+                                         commit=False))
+        created.append(fname)
     return created, skipped
