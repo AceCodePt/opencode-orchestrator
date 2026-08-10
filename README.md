@@ -9,7 +9,8 @@ project-owned gate, and merges it — unattended, with no database and no plugin
 
 `orch` is a **globally installed tool** — one CLI and one daemon per machine. Projects
 keep a small tracked `.orchestration/` directory holding only what that project knows
-(the gate and config), and nothing is installed into the project's `.opencode/`.
+(the gate, hook samples, and config), and nothing is installed into the project's
+`.opencode/`.
 
 The state is the repo. Tasks are derived from git — `tasks/<name>/task.md` declares a
 task, a branch named `<name>` claims it, the worktree decides whether it is done.
@@ -37,7 +38,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                    # scaffold .orchestration/ (config + gate template + hook samples) and trust the project
+bin/orch init                    # scaffold .orchestration/ (config + gate template + a hook sample per opencode event) and trust the project
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
 bin/orch project trust [--dir]    # let the daemon gate/merge/dispatch this project (created projects are trusted automatically)
 bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
@@ -67,6 +68,7 @@ bin/orch install                 # systemd user unit, enabled, with linger
 bin/orch uninstall                # remove config-level traces, keep projects alone
 bin/orch daemon status            # is anything actually supervising
 bin/orch daemon run --once --dry-run # decide and print, change nothing
+bin/orch daemon run --no-sse         # skip the /event stream consumer
 bin/orch version                  # show the orch version
 ```
 
@@ -183,6 +185,14 @@ to the machine owner, and no project agent can touch them. `orch init` writes an
 inert `*.example` template for every event; copy one to its real name and
 `chmod +x`, and the daemon and CLI fire it.
 
+Besides the ten machine events below, `orch init` also scaffolds a
+`*.example` per opencode server event (the vocabulary in `src/orch/opencode_events.py`,
+dots mapped to dashes — `session.idle` → `session-idle.example`). The daemon's
+SSE consumer reads the server's `GET /event` stream and fires a copied
+executable hook for each event, with the event's JSON on stdin and
+`ORCH_EVENT=<dashed-name>` set — a session-scoped event also fires its project
+hook in the owning worktree.
+
 They are **advisory and fire-and-forget**: each hook is spawned detached (a slow
 hook never blocks a daemon pass) and a non-zero exit — or a missing hook — changes
 nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
@@ -258,7 +268,8 @@ the **`.orchestration` deny** installed by `orch install`.
 
 `orch daemon` supervises: it settles tasks, runs the committed gate itself, retriggers
 failing agents up to `retryCap`, merges verified work, archives done work, restarts a
-dead or unresponsive shared server, and flags blocked permissions. A **merge conflict**
+dead or unresponsive shared server, flags blocked permissions, and consumes the shared
+server's `/event` SSE stream to fire per-event hooks. A **merge conflict**
 is left in progress and the task reads `needs-review (merge-conflict)`. Who resolves it
 follows the `hitl` flag: a `hitl: true` task needs a human in the base worktree
 (`git add`/`git commit`); a `hitl: false` task gets an agent dispatched into the base
@@ -276,6 +287,11 @@ committed it.
 Not built yet: routing `needs-review` onwards or unblocking a parent agent, and a
 machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
 
+The per-event hooks are live: the daemon's SSE consumer reads the server's
+`GET /event` stream and fires a copied, executable hook per event type in
+`src/orch/opencode_events.py` (project `hooks/*.sample` and global
+`hooks/*.example`), with the event JSON on stdin.
+
 When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
 `needs-review` tasks from the scan, `orch task list --global` gathers that from
 every supervised project into one waiting-on-you report (blocked, merge conflicts,
@@ -288,9 +304,17 @@ the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux) polls
 
 Tests: `for t in tests/test_*.py; do python3 "$t"; done`.
 
+The opencode-event hook samples are covered by unit tests too: `tests/test_opencode_events.py`
+sanity-checks the catalog — well-formed event names, unique dots-to-dashes hook names, and no
+collisions with the lifecycle or global hooks. The SSE consumer itself is covered by
+`tests/test_sse.py`: stream parsing, global + project hook firing, session routing, and the
+session-idle gate never firing from the stream.
+
 ## Layout
 
 - `bin/` — dispatcher
-- `src/orch/` — state (scan), dispatch, daemon, gate, merge, server, doctor, CLI
+- `src/orch/` — state (scan), dispatch, daemon, gate, merge, server, doctor, CLI,
+  `opencode_events.py` (the server-event catalog), and `sse.py` (the daemon's
+  `/event` stream consumer that fires per-event hooks)
 - `docs/` — architecture and decisions
 - `tasks/` — one folder per task, each with a `task.md`

@@ -218,6 +218,13 @@ ungated project.
   `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
   `hooks/*.sample` references for all five — inert until copied to the real name,
   made executable, and committed.
+- One `hooks/*.sample` per opencode server event (the vocabulary in
+  `src/orch/opencode_events.py`, the single source of truth). The daemon's SSE
+  consumer reads the shared server's `GET /event` stream and fires a copied,
+  executable hook for each event, with the event's JSON on stdin and
+  `ORCH_EVENT=<dashed-name>` set; a session-scoped event also fires in the
+  worktree that owns the session. `session.idle` is the one project-side
+  exception: that name is the gate, so it keeps the gate sample.
 - `config.json` — `baseBranch`, `gate.include`/`exclude`/`retryCap`, `scheduler`
   (`enabled`/`maxConcurrent`). Like the gate, the **committed copy on the base branch**
   is the authority for these values (`orch project scheduler` writes the working-tree
@@ -233,7 +240,9 @@ CLI fires task-lifecycle events, the daemon fires `session-idle`.
 Mirror of the project-hook contract at the machine level: `~/.config/orch/hooks/`
 (created `0700`, owned by the machine owner, outside every repo, so no project
 agent can edit them). `orch init` writes an inert `.example` template for each
-documented event; an executable file at the exact event name opts in. The daemon
+documented event, plus one for every opencode server event (fired by the daemon's
+SSE consumer, same as the project event hooks); an executable file at the exact
+event name opts in. The daemon
 and the CLI both fire them — `alert` (blocked permission/question, untrusted
 project), `needs-review`, `merged`, `removed`, `dispatched`, `dispatch-failed`,
 `resolve-failed`, `restart-server`, `reset`, `archived`.

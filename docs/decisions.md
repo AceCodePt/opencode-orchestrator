@@ -166,6 +166,26 @@ in one source file has one place to check.
 - **Samples are never a gate.** `orch init` writes every hook as an inert
   `*.sample`; a project has no gate at all until it copies one to the real name,
   makes it executable, and commits it. Nothing is overwritten without `--force`.
+- **Every opencode event gets a hook, and the daemon fires it from the SSE stream.**
+  `orch init` scaffolds one hook per event type (project `.sample` + global
+  `.example`), dots mapped to dashes, from `src/orch/opencode_events.py` — the
+  single source of truth for the vocabulary, replacing `docs/events-raw.tsv`;
+  with nothing left to mirror there is no drift test. The project and global
+  samples come from one template (`hooks.event_hook_template`), so the two copies
+  cannot drift either. The daemon's `EventWatcher` thread reads the shared
+  server's `GET /event` stream and fires a copied, executable hook per event,
+  with the event JSON on stdin; a session-scoped event routes to the project
+  whose worktree owns the session. Hooks are fire-and-forget: a slow hook never
+  blocks the stream, and a non-zero exit only lands in the log. One reservation,
+  not an omission: `session.idle` is the gate's name, so in a project it keeps
+  the gate sample instead of a generic event one (globally, where there is no
+  gate, it still gets an event example) — and the consumer never fires the gate
+  from the stream, because the daemon already runs it on settle.
+- **The stream is a trigger, not a truth source.** The SSE consumer fires hooks;
+  it never decides task state. Task status still comes from git + `/proc` + the
+  server's REST endpoints, so a missed event or a dropped connection degrades to
+  "no notification", never to a wrong verdict. Reconnection is automatic and the
+  poll loop is the source of authority.
 
 ## `merge.py`
 

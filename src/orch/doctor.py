@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, gate, harness, hooks, server, state
+from . import dispatch, gate, harness, hooks, opencode_events, server, sse, state
 
 OK = "ok"
 WARN = "warn"
@@ -118,9 +118,11 @@ def check_project(cwd: Path) -> list[Check]:
         )
     samples = sorted(p.name for p in hooks_dir.glob("*.sample"))
     if samples:
+        shown = ", ".join(samples[:8])
+        extra = f" and {len(samples) - 8} more" if len(samples) > 8 else ""
         out.append(
             Check(OK, "hook samples present (inert)",
-                  ", ".join(samples) + " - copy one to its real name to enable it")
+                  shown + extra + " - copy one to its real name to enable it")
         )
     return out
 
@@ -338,10 +340,15 @@ def check_global_hooks() -> list[Check]:
         if p.name in hooks.GLOBAL_HOOKS:
             out.append(Check(OK, f"global hook {p.name}",
                              f"fired on {hooks.GLOBAL_HOOKS[p.name]}"))
+        elif p.name in {sse.hook_name(e) for e in opencode_events.OPENCODE_EVENTS}:
+            out.append(Check(OK, f"global hook {p.name}",
+                             "an opencode event hook: fired by the SSE consumer "
+                             "when the server emits that event"))
         else:
             out.append(Check(
                 WARN, f"global hook {p.name} is not a known event",
-                "only names in hooks.GLOBAL_HOOKS fire; rename it to match"))
+                "only names in hooks.GLOBAL_HOOKS and the opencode event "
+                "vocabulary fire; rename it to match"))
     return out
 
 

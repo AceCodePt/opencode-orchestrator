@@ -598,7 +598,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             return 2
         project = str(p)
     return daemon_mod.run(project, interval=args.interval,
-                          once=args.once, dry_run=args.dry_run)
+                          once=args.once, dry_run=args.dry_run,
+                          sse=not args.no_sse)
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
@@ -1092,6 +1093,9 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--once", action="store_true", help="one pass, then exit")
     dm.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
+    dm.add_argument("--no-sse", action="store_true",
+                    help="do not consume the server's /event stream (per-event "
+                         "hooks stay silent)")
     dm.add_argument("--json", action="store_true")
     # The run flags exist on both the parent and the `run` subparser so
     # `orch daemon <flag> run` and `orch daemon run <flag>` both work, matching
@@ -1104,6 +1108,9 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--once", action="store_true", help="one pass, then exit")
     dr.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
+    dr.add_argument("--no-sse", action="store_true",
+                    help="do not consume the server's /event stream (per-event "
+                         "hooks stay silent)")
     ds.add_argument("--json", action="store_true")
     db = da.add_parser(
         "budget",

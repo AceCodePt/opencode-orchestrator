@@ -788,6 +788,43 @@ def test_auto_resolved_conflict_archives_as_a_noop() -> None:
     print("ok: a resolved conflict falls through to the no-op archive path")
 
 
+def test_snapshot_builds_the_session_to_worktree_map() -> None:
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = str(Path(tmp.name) / "cfg")
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        sup = daemon.Supervisor()
+        orig_status = server.status
+        orig_discover = state.discover_projects
+        orig_scan = state.Project.scan
+        try:
+            server.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+            state.discover_projects = lambda _roots=None: {
+                "/tmp/lab/lab.git": Path("/tmp/lab/.orchestration")}
+            state.Project.scan = lambda self, port=None: [
+                state.TaskState(project="/tmp/lab/lab.git", name="task-a",
+                                base="main", retry_cap=3, declared=True,
+                                claimed=True, branch="task-a",
+                                worktree="/tmp/lab/wt",
+                                session_ids=["ses_1", "ses_2"])]
+            sup.snapshot()
+            assert sup._session_owner("ses_1") == \
+                ("/tmp/lab/lab.git", "main", "/tmp/lab/wt")
+            assert sup._session_owner("ses_2") == \
+                ("/tmp/lab/lab.git", "main", "/tmp/lab/wt")
+            assert sup._session_owner("unknown") is None
+        finally:
+            server.status = orig_status
+            state.discover_projects = orig_discover
+            state.Project.scan = orig_scan
+    finally:
+        tmp.cleanup()
+        _hook_env_restore(saved)
+    print("ok: snapshot derives the session-to-project map for event routing")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

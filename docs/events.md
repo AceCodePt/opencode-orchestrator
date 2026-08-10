@@ -116,3 +116,17 @@ so v1 is what 1.18.13 emitted in practice.
 single source of truth. The `/doc` OpenAPI lists 93 schemas, but the stream does
 not emit every one, and it does emit `server.heartbeat`, which has no schema; the
 map holds the emitted vocabulary.
+
+## Hooks for these events
+
+`orch init` scaffolds one hook sample per event type — `hooks/<event>.sample`
+(project) and `~/.config/orch/hooks/<event>.example` (global), dots mapped to
+dashes (`session.idle` → `session-idle`). The daemon's SSE consumer reads
+`GET /event` and fires the copied hook for each event, with the event's JSON on
+stdin and `ORCH_EVENT=<dashed-name>` set. A session-scoped event fires its
+project hook in the worktree that owns the session; a copied executable global
+hook fires for every event. The vocabulary lives in `src/orch/opencode_events.py`
+and the project and global samples come from one template, so they cannot drift.
+One asymmetry: `session.idle` is the gate's name, so in a project it keeps the
+gate sample instead of a generic event one; globally, where there is no gate, it
+still gets an event example.

@@ -76,6 +76,40 @@ def session_status(port: int) -> dict:
     return get(port, "/session/status") or {}
 
 
+def _parse_sse_data(line: str) -> dict | None:
+    """Parse one SSE `data:` line into an event dict, or None if it is not one."""
+    line = line.rstrip("\n")
+    if not line.startswith("data:"):
+        return None
+    raw = line[len("data:"):].strip()
+    if not raw:
+        return None
+    try:
+        ev = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return ev if isinstance(ev, dict) and ev.get("type") else None
+
+
+def event_stream(port: int, timeout: float = 30.0):
+    """Yield opencode server events from GET /event (SSE) as dicts of the shape
+    {"id": "evt_…", "type": "…", "properties": {…}}. Blocks on a live stream;
+    raises OSError/TimeoutError when the transport fails so the caller reconnects.
+    Read with readline(), never by iterating the response object."""
+    req = urllib.request.Request(
+        _url(port, "/event"), method="GET",
+        headers={"Accept": "text/event-stream"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        while True:
+            line = r.readline()
+            if not line:
+                return
+            ev = _parse_sse_data(line.decode("utf-8", "replace"))
+            if ev is not None:
+                yield ev
+
+
 def permissions(port: int) -> list[dict]:
     return _as_list(get(port, "/permission"))
 

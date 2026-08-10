@@ -108,10 +108,11 @@ def has(event: str) -> bool:
 
 
 def run(event: str, env: Mapping[str, str] | None = None,
-        cwd: Path | None = None) -> int | None:
+        cwd: Path | None = None, payload: str | None = None) -> int | None:
     """Fire a global notification hook, detached and fail-open. Returns the
     pid when one was fired, None when there is no executable hook. Raises
-    OSError if the hook exists but cannot be spawned (bad interpreter, ...)."""
+    OSError if the hook exists but cannot be spawned (bad interpreter, ...).
+    `payload`, when given, is written to the hook's stdin."""
     hook = hook_path(event)
     if not hook.exists() or not os.access(hook, os.X_OK):
         return None
@@ -125,9 +126,12 @@ def run(event: str, env: Mapping[str, str] | None = None,
             env={**os.environ, **(dict(env) if env else {})},
             stdout=handle,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
             start_new_session=True,
         )
+        if payload is not None and proc.stdin is not None:
+            proc.stdin.write(payload.encode("utf-8"))
+            proc.stdin.close()
     finally:
         if handle is not None:
             handle.close()

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate, hooks, merge, observe, server, state
+from . import dispatch, gate, hooks, merge, observe, server, sse, state
 from .harness import prompt_async
 
 SETTLE_BUDGET_S = 30
@@ -353,6 +353,19 @@ class Supervisor:
         self._projects: dict[str, Path] = {}
         self._projects_at = 0.0
         self._verify_log: list[str] = []
+        self._session_map: dict[str, tuple[str, str, str]] = {}
+        self._watcher: sse.EventWatcher | None = None
+
+    def start_event_watcher(self) -> None:
+        self._watcher = sse.EventWatcher(resolver=self._session_owner)
+        self._watcher.start()
+
+    def stop_event_watcher(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+
+    def _session_owner(self, session_id: str) -> tuple[str, str, str] | None:
+        return self._session_map.get(session_id)
 
     def _discover(self) -> dict[str, Path]:
         now = time.monotonic()
@@ -376,15 +389,22 @@ class Supervisor:
 
         tasks: list[state.TaskState] = []
         policies: dict[str, state.SchedulerPolicy] = {}
+        session_map: dict[str, tuple[str, str, str]] = {}
         for common, orch in self._discover().items():
             proj = state.Project(Path(common), orch,
                                  state.base_from_config(orch))
-            tasks.extend(proj.scan(port))
+            proj_tasks = proj.scan(port)
+            tasks.extend(proj_tasks)
+            for t in proj_tasks:
+                if t.worktree:
+                    for sid in t.session_ids:
+                        session_map.setdefault(sid, (common, proj.base, t.worktree))
             pol = state.scheduler_from_config(
                 state.committed_config(common, proj.base))
             if pol.enabled:
                 pol.start = proj.base_worktree
             policies[str(common)] = pol
+        self._session_map = session_map
 
         return Snapshot(
             now=int(time.time()),
@@ -626,19 +646,29 @@ class Supervisor:
 
 def run(project: str | None = None, roots: list[str] | None = None,
         interval: float = 10.0, once: bool = False,
-        dry_run: bool = False) -> int:
+        dry_run: bool = False, sse: bool = True) -> int:
     sup = Supervisor(project=project, roots=roots, dry_run=dry_run)
     scope = project_label(project) if project else "every discovered project"
     print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
+    if sse and not once and not dry_run:
+        sup.start_event_watcher()
+        print("orch daemon: listening on the shared server's /event stream for "
+              "per-event hooks", flush=True)
     try:
         while True:
             for line in sup.step():
                 print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
+            if sup._watcher is not None:
+                for line in list(sup._watcher.lines):
+                    print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
+                sup._watcher.lines.clear()
             if once:
                 return 0
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
+    finally:
+        sup.stop_event_watcher()
 
 
 UNIT_NAME = "orch-daemon.service"
