@@ -2,9 +2,21 @@
   "$comment": "Project knowledge only. Anything here that every project would copy verbatim belongs in orch instead.",
   "baseBranch": "main",
   "gate": {
-    "$comment": "Files that matter for the diff gate. Hash contents, not mtimes. Markdown is excluded because this repo is documentation-heavy and prose changes must not trigger check runs.",
-    "include": ["bin/**", "src/**", "**/*.sh", ".orchestration/hooks/**"],
-    "exclude": ["**/*.md", "docs/**", "tasks/**", "examples/**"],
+    "$comment": "Files that matter for the diff gate. Contents are hashed, not mtimes. Exclude anything whose change should not trigger verification.",
+    "include": [
+      "src/**",
+      "bin/**",
+      "**/*.ts",
+      "**/*.sh"
+    ],
+    "exclude": [
+      "**/*.md",
+      "docs/**",
+      "tasks/**"
+    ],
     "retryCap": 3
+  },
+  "scheduler": {
+    "$comment": "Let the daemon auto-dispatch todo tasks itself (hitl: false only). maxConcurrent caps how many task agents run in this project at once. Edit with `orch project scheduler <n>`; only the committed copy on the base branch applies."
   }
 }
