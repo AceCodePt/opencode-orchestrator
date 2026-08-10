@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -7,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import dispatch, gate  # noqa: E402
+from orch import dispatch, envfilter, gate  # noqa: E402
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -149,28 +151,94 @@ def test_ungated_dispatch_is_refused() -> None:
     print("ok: dry-run skips the gate refusal (real runs refuse ungated)")
 
 
-def test_hook_absence_is_fine_but_non_executable_is_not() -> None:
+def test_hook_absence_is_fine_but_uncommitted_hooks_do_not_run() -> None:
     root, tmp = _repo()
     ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
-    assert ok and "no pre-task-create" in msg
+    assert ok and "no pre-task-create committed" in msg, msg
 
     h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
     h.parent.mkdir(parents=True, exist_ok=True)
     h.write_text("#!/usr/bin/env bash\nexit 0\n")
-    h.chmod(0o644)
-    ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
-    assert not ok and "not executable" in msg
-
     h.chmod(0o755)
+    ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
+    assert ok, msg
+    assert "not committed" in msg and "not run" in msg, \
+        "an uncommitted working-tree hook is a no-op, not a run"
+
+    _commit(root)
     ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
     assert ok, msg
 
     h.write_text("#!/usr/bin/env bash\necho boom >&2\nexit 3\n")
-    h.chmod(0o755)
+    _commit(root)
     ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
     assert not ok and "exited 3" in msg and "boom" in msg, msg
     tmp.cleanup()
-    print("ok: absent hook fine, non-executable and failing hooks are not")
+    print("ok: absent hook fine, uncommitted hooks do not run, failing hooks are not")
+
+
+def test_hook_gets_a_filtered_environment_by_default() -> None:
+    root, tmp = _repo()
+    out = Path(tmp.name) / "hook-env"
+    h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
+    h.parent.mkdir(parents=True, exist_ok=True)
+    h.write_text("#!/usr/bin/env bash\necho \"${GH_TOKEN:-MISSING}\" > \"$OUT\"\n")
+    h.chmod(0o755)
+    _commit(root)
+
+    saved_cfg = os.environ.get("XDG_CONFIG_HOME")
+    saved_token = os.environ.get("GH_TOKEN")
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    os.environ["GH_TOKEN"] = "ghp_secret"
+    try:
+        ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {"OUT": str(out)})
+        assert ok, msg
+        assert out.read_text().strip() == "MISSING", \
+            "a lifecycle hook must not see the owner's secrets by default"
+    finally:
+        os.environ.pop("GH_TOKEN", None)
+        if saved_token is not None:
+            os.environ["GH_TOKEN"] = saved_token
+        if saved_cfg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved_cfg
+    tmp.cleanup()
+    print("ok: lifecycle hooks run with a filtered environment")
+
+
+def test_hook_can_opt_into_the_full_environment() -> None:
+    root, tmp = _repo()
+    out = Path(tmp.name) / "hook-env"
+    cfg = root / ".orchestration" / "config.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"gate": {"env": "full"}}))
+    h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
+    h.parent.mkdir(parents=True, exist_ok=True)
+    h.write_text("#!/usr/bin/env bash\necho \"${GH_TOKEN:-MISSING}\" > \"$OUT\"\n")
+    h.chmod(0o755)
+    _commit(root)
+
+    saved_cfg = os.environ.get("XDG_CONFIG_HOME")
+    saved_token = os.environ.get("GH_TOKEN")
+    os.environ["XDG_CONFIG_HOME"] = tmp.name
+    os.environ["GH_TOKEN"] = "ghp_secret"
+    try:
+        assert envfilter.gate_env_full(root) is True
+        ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {"OUT": str(out)})
+        assert ok, msg
+        assert out.read_text().strip() == "ghp_secret", \
+            "a hook opting into the full env keeps the secret"
+    finally:
+        os.environ.pop("GH_TOKEN", None)
+        if saved_token is not None:
+            os.environ["GH_TOKEN"] = saved_token
+        if saved_cfg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved_cfg
+    tmp.cleanup()
+    print("ok: gate.env=full opts a lifecycle hook into the full environment")
 
 
 def main() -> int:

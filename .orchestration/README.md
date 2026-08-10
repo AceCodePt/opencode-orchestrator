@@ -30,6 +30,10 @@ and put the project's real checks above the commit block (e.g.
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine; a missing `session-idle` is not, because then nothing verifies the work.
 
+Like the gate, the task-lifecycle hooks run the version **committed on the base
+branch** — a working-tree edit, or a hook committed only on a task branch, never
+runs. Edit a hook and commit it on the base branch before dispatching.
+
 `config.json` holds project policy: `baseBranch`, the `gate` block
 (`include`/`exclude`/`retryCap`), and — if you want the daemon
 to dispatch `todo` tasks itself — a `scheduler` block (`enabled` + `maxConcurrent`,

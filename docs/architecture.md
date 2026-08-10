@@ -217,7 +217,9 @@ ungated project.
 - Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
   `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
   `hooks/*.sample` references for all five — inert until copied to the real name,
-  made executable, and committed.
+  made executable, and committed. Like the gate, they run the version **committed on
+  the base branch** (never a working-tree edit or a hook committed only on a task
+  branch), so an agent cannot change what runs at cleanup by editing a hook.
 - One `hooks/*.sample` per opencode server event (the vocabulary in
   `src/orch/opencode_events.py`, the single source of truth). The daemon's SSE
   consumer reads the shared server's `GET /event` stream and fires a copied,
@@ -274,9 +276,10 @@ torn down, and its work is never a task.
 
 1. `orch task start <name>` (human, parent agent) or the **scheduler** (see below).
 2. CLI refuses if `refs/heads/<name>` exists — the branch is the claim, atomically.
-3. CLI runs `hooks/pre-task-create` from the dispatcher's worktree.
+3. CLI runs `hooks/pre-task-create` (the copy committed on the base branch) from the
+   dispatcher's worktree.
 4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
-5. CLI runs `hooks/post-task-create` from the new worktree.
+5. CLI runs `hooks/post-task-create` (the committed base copy) from the new worktree.
 6. CLI refuses ungated work (no committed gate) unless `--allow-ungated`.
 7. CLI dispatches into the shared server, **detached** (its own session, stdin from
    `/dev/null`) — that detached start is what marks the process as an orchestrated
@@ -428,11 +431,12 @@ still bounded:
   `edit`/`write` on `.orchestration/**` and on the config itself, so the lazy agent
   cannot silently rewrite its own gate through its file tools. Working-tree edits still
   surface as `diverged`.
-- **Agents and gates run with a filtered environment.** `SSH_AUTH_SOCK`, cloud
-  credentials, `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`, `DATABASE_URL`, `KUBECONFIG` and
-  friends are dropped before `opencode run` or a gate runs; provider keys survive.
-  Machine relaxation lives in `~/.config/orch/env.json` (`drop`/`keep`); a project can
-  only restrict further (`agentEnv.drop`) and a gate can opt into the full env
+- **Agents, gates, and project hooks run with a filtered environment.** `SSH_AUTH_SOCK`,
+  cloud credentials, `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`, `DATABASE_URL`, `KUBECONFIG`
+  and friends are dropped before `opencode run`, a gate, or a project hook runs — the
+  task lifecycle hooks included; provider keys survive. Machine relaxation lives in
+  `~/.config/orch/env.json` (`drop`/`keep`); a project can only restrict further
+  (`agentEnv.drop`) and a gate — or a project hook — can opt into the full env
   (`gate.env: full`). Env filtering is defence in depth, not containment: a hostile
   agent with `bash` can still read `~/.ssh` from disk, which is why the threat model
   stays lazy-agent.

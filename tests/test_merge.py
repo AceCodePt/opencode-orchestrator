@@ -187,19 +187,18 @@ def test_pre_task_cleanup_hook_blocks() -> None:
     bare = _bare_repo(tmp)
     wt = _claim_task(bare, "task-a")
 
-    hook = wt / ".orchestration" / "hooks" / "pre-task-cleanup"
-    hook.parent.mkdir(parents=True, exist_ok=True)
+    main_wt = bare.parent / "main"
+    hook = main_wt / ".orchestration" / "hooks" / "pre-task-cleanup"
     hook.write_text("#!/usr/bin/env bash\nexit 1\n")
     hook.chmod(0o755)
-    _git(wt, "add", "-A")
-    _git(wt, "commit", "-q", "-m", "add blocking hook")
+    _git(main_wt, "add", "-A")
+    _git(main_wt, "commit", "-q", "-m", "add blocking hook")
 
     r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
     assert any("blocked" in p for p in r.problems)
     assert wt.exists(), "worktree should survive a blocked cleanup"
 
-    main_wt = bare.parent / "main"
     assert "work for task-a" in _git(main_wt, "log", "--oneline"), \
         "merge should have landed before the hook"
     tmp.cleanup()

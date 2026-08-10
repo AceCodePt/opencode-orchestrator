@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -173,21 +175,44 @@ def _prompt_from_task_file(
 
 def run_hook(worktree: Path, name: str, env: dict[str, str],
              timeout: int = 900) -> tuple[bool, str]:
-    hook = worktree / gate.HOOKS_REL / name
-    if not hook.exists():
-        return True, f"no {name} hook"
-    if not os.access(hook, os.X_OK):
-        return False, f"{name} exists but is not executable"
+    """Run the committed copy of a lifecycle hook on the base branch — never
+    the working-tree copy — so an agent's (or anyone's) uncommitted edit cannot
+    change what runs, the same rule as the gate. Fail-open: an absent hook (or
+    one only present in the working tree) is a no-op."""
+    worktree = Path(worktree)
+    base = gate.base_branch(worktree)
+    rel = f"{gate.HOOKS_REL}/{name}"
+    committed = gate.show(worktree, base, rel)
+    if committed is None or not committed.strip():
+        note = ""
+        if (worktree / rel).exists():
+            note = f" (exists in the working tree but not committed on {base}; not run)"
+        return True, f"no {name} committed on {base}{note}"
+
+    tmp = Path(tempfile.mkdtemp(prefix="orch-hook-"))
+    exe = tmp / name
     try:
-        p = subprocess.run([str(hook)], cwd=str(worktree),
-                           env={**os.environ, **env},
-                           capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return False, f"{name} failed to run: {e}"
-    out = ((p.stdout or "") + (p.stderr or "")).strip()
-    if p.returncode != 0:
-        return False, f"{name} exited {p.returncode}: {out[-1500:]}"
-    return True, f"{name} ok"
+        exe.write_text(committed)
+        exe.chmod(0o755)
+
+        if envfilter.gate_env_full(worktree):
+            base_env = dict(os.environ)
+        else:
+            base_env = envfilter.filtered_env(
+                os.environ, repo_drop=envfilter.repo_drops(worktree))
+        hook_env = {**base_env, **env}
+        try:
+            p = subprocess.run([str(exe)], cwd=str(worktree),
+                               env=hook_env,
+                               capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"{name} failed to run: {e}"
+        out = ((p.stdout or "") + (p.stderr or "")).strip()
+        if p.returncode != 0:
+            return False, f"{name} exited {p.returncode}: {out[-1500:]}"
+        return True, f"{name} ok"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def create_worktree(p: Plan, result: Result) -> bool:

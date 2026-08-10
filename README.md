@@ -157,7 +157,9 @@ project under `$HOME`/`/mnt`
 invisible to the agent — and the daemon judges by the *committed* gate, never the
 working-tree copy. An uncommitted task file gives the agent no instructions; an
 uncommitted gate counts as no gate. `orch task start` refuses both, and `orch gate`
-explains which one is wrong.
+explains which one is wrong. The task-lifecycle hooks (`pre-task-create` and friends)
+follow the same rule: only the copy committed on the base branch runs, so commit them
+before dispatching.
 
 **The dispatch process exiting is not the task finishing.** Completion is derived from
 the worktree state by the daemon, after the session settles. Watch `orch task list`.
@@ -210,10 +212,13 @@ nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
 | `reset` | `orch task reset` |
 | `archived` | `orch task archive` |
 
-Every hook runs with the full environment plus `ORCH_EVENT`, `ORCH_ACTION`,
-`PROJECT_NAME`, `PROJECT_DIR`, and — when task-scoped — `TASK_NAME`, `BRANCH_NAME`,
-`WORKTREE_PATH`, `WORKTREE_NAME`, `BASE_BRANCH`, plus `ORCH_REASON`/`ORCH_DETAIL`
-(and `ORCH_REQUEST_ID`/`ORCH_SESSION_ID`/`ORCH_KIND` for blocked alerts).
+Every global hook runs with the full environment (they are the machine owner's own
+code); project hooks run with the filtered environment (a project can opt into the
+full env with `"gate": {"env": "full"}`). All of them get `ORCH_EVENT`,
+`ORCH_ACTION`, `PROJECT_NAME`, `PROJECT_DIR`, and — when task-scoped — `TASK_NAME`,
+`BRANCH_NAME`, `WORKTREE_PATH`, `WORKTREE_NAME`, `BASE_BRANCH`, plus
+`ORCH_REASON`/`ORCH_DETAIL` (and `ORCH_REQUEST_ID`/`ORCH_SESSION_ID`/`ORCH_KIND`
+for blocked alerts).
 
 ## Security model
 
@@ -232,13 +237,14 @@ not a hostile one, but the blast radius is bounded:
   rules (`~/.config/opencode/opencode.json`) denying `edit`/`write` on
   `.orchestration/**` and on that config itself, so an agent cannot silently rewrite its
   own gate through its file tools.
-- **Agents and gates get a filtered environment.** Secrets that no agent or gate needs
-  (`SSH_AUTH_SOCK`, cloud credentials, `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`,
-  `DATABASE_URL`, `KUBECONFIG`, …) are dropped before `opencode run` or a gate runs.
-  Provider keys (`*_API_KEY`, `*_AUTH_TOKEN`) survive — opencode needs them. The machine
-  owner relaxes via `~/.config/orch/env.json` (`drop`/`keep`); a project can only
-  *restrict* further (`"agentEnv": {"drop": [...]}`) and a gate can opt into the full
-  env with `"gate": {"env": "full"}`.
+- **Agents, gates, and project hooks get a filtered environment.** Secrets that no
+  agent, gate, or project hook needs (`SSH_AUTH_SOCK`, cloud credentials,
+  `*_PASSWORD`/`*_SECRET`/…, `GH_TOKEN`, `DATABASE_URL`, `KUBECONFIG`, …) are dropped
+  before `opencode run`, a gate, or a project hook runs — including the task lifecycle
+  hooks. Provider keys (`*_API_KEY`, `*_AUTH_TOKEN`) survive — opencode needs them.
+  The machine owner relaxes via `~/.config/orch/env.json` (`drop`/`keep`); a project
+  can only *restrict* further (`"agentEnv": {"drop": [...]}`) and a gate — or a project
+  hook — can opt into the full env with `"gate": {"env": "full"}`.
 - **Permissions are one-time.** `orch task answer` approves a blocked permission
   once; nothing is persisted to opencode's runtime config.
 - **The control plane is loopback-only and the logs are private.** The shared server
