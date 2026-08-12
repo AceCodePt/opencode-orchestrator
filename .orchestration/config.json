@@ -1,19 +1,8 @@
 {
   "$comment": "Project knowledge only. Anything here that every project would copy verbatim belongs in orch instead.",
   "baseBranch": "main",
-  "gate": {
-    "$comment": "Files that matter for the diff gate. Contents are hashed, not mtimes. Exclude anything whose change should not trigger verification.",
-    "include": [
-      "src/**",
-      "bin/**",
-      "**/*.ts",
-      "**/*.sh"
-    ],
-    "exclude": [
-      "**/*.md",
-      "docs/**",
-      "tasks/**"
-    ],
+  "verify": {
+    "$comment": "How the acceptance hook (hooks/session-idle) is bounded. retryCap caps how many times a failing verification re-prompts the agent before the task lands on needs-review.",
     "retryCap": 3
   },
   "scheduler": {

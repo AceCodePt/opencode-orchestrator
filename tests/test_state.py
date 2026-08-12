@@ -396,7 +396,7 @@ def test_write_scheduler_policy_preserves_keys_on_base() -> None:
     cfg = root / ".orchestration" / "config.json"
     cfg.write_text(json.dumps({
         "baseBranch": "main",
-        "gate": {"retryCap": 5},
+        "verify": {"retryCap": 5},
         "custom": {"keep": True},
     }) + "\n")
     common = Path(_git(root, "rev-parse", "--path-format=absolute",
@@ -405,7 +405,7 @@ def test_write_scheduler_policy_preserves_keys_on_base() -> None:
     assert ok, msg
     cfg = json.loads((root / ".orchestration" / "config.json").read_text())
     assert cfg["scheduler"] == {"enabled": True, "maxConcurrent": 3}
-    assert cfg["gate"] == {"retryCap": 5}, "unrelated keys survive"
+    assert cfg["verify"] == {"retryCap": 5}, "unrelated keys survive"
     assert cfg["custom"] == {"keep": True}
     ok, _ = state.write_scheduler_policy(common, "main", False, None)
     assert ok
@@ -420,13 +420,13 @@ def test_retry_cap_comes_from_the_committed_config() -> None:
     cfg = root / ".orchestration" / "config.json"
     cfg.write_text(json.dumps({
         "baseBranch": "main",
-        "gate": {"retryCap": 7},
+        "verify": {"retryCap": 7},
     }) + "\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "retrycap")
     cfg.write_text(json.dumps({
         "baseBranch": "main",
-        "gate": {"retryCap": 1},
+        "verify": {"retryCap": 1},
     }) + "\n")
     _task(root, "auto")
     wt = _claim(root, "auto")

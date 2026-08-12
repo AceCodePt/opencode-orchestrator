@@ -59,7 +59,7 @@ def default_roots() -> list[str]:
 
 # --- project trust ----------------------------------------------------------
 #
-# The daemon acts (gates, merges, dispatches, resolves, schedules) only on
+# The daemon acts (verifies, merges, dispatches, resolves, schedules) only on
 # projects the machine owner has approved. Approval is a machine-level fact in
 # ~/.local/state/orch/trusted.json, keyed by the repo's git common dir - never
 # part of any project, so a repo you merely clone cannot approve itself.
@@ -162,7 +162,7 @@ def _read_config(orch_dir: Path | None) -> dict:
 
 def committed_config(common: Path | str, base: str) -> dict:
     """The project's .orchestration/config.json as committed on the base
-    branch - the only copy that is authoritative (the gate says so: an
+    branch - the only copy that is authoritative (the verification hook says so: an
     uncommitted or diverged config.json is flagged, and the committed values
     are the ones in force). Falls back to the base worktree's working copy and
     then the discovered dir, in that order, for the case where the file was
@@ -570,7 +570,7 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     archived = _names_in(common, base, ARCHIVE_REL)
     branches = {b for b in _branches(common) if b != base}
     wt_by_branch = {b: p for p, b in _worktrees(common)}
-    cap = int(committed_config(common, base).get("gate", {}).get("retryCap") or 3)
+    cap = int(committed_config(common, base).get("verify", {}).get("retryCap") or 3)
 
     names = sorted(set(declared) | set(branches) | set(archived))
     merging = _base_merging(common, base)

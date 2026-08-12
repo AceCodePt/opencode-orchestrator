@@ -95,9 +95,9 @@ def test_init_scaffolds_opencode_event_samples() -> None:
                       "session.status"):
             name = opencode_events.hook_name(event)
             assert (hooks_dir / f"{name}.sample").exists(), r.created
-        gate = (hooks_dir / "session-idle.sample").read_text()
-        assert "session-idle" in gate and "commit" in gate, \
-            "session.idle must keep the gate sample, not a generic event one"
+        sample = (hooks_dir / "session-idle.sample").read_text()
+        assert "session-idle" in sample and "commit" in sample, \
+            "session.idle must keep the verification hook sample, not a generic event one"
         assert "permission.asked" in (hooks_dir / "permission-asked.sample").read_text()
         r2 = init_mod.run(root)
         assert not r2.created, "a second init skips the existing samples"

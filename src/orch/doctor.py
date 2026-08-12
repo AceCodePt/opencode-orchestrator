@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, gate, harness, hooks, opencode_events, server, sse, state
+from . import dispatch, harness, hooks, opencode_events, server, sse, state, verify
 
 OK = "ok"
 WARN = "warn"
@@ -73,20 +73,16 @@ def check_project(cwd: Path) -> list[Check]:
 
     cfg_path = orch_dir / "config.json"
     if not cfg_path.is_file():
-        out.append(Check(WARN, "config.json missing", "the diff gate has no file set to watch"))
+        out.append(Check(WARN, "config.json missing", "the verification hook config is absent"))
     else:
         try:
             cfg = json.loads(cfg_path.read_text())
-            gate = cfg.get("gate", {})
-            if not gate.get("include"):
-                out.append(Check(WARN, "config.json declares no gate.include",
-                                 "every change will look irrelevant, so the gate never runs"))
-            else:
-                out.append(Check(OK, "config.json parses",
-                                 f"retryCap={gate.get('retryCap', 'unset')}"))
-            if not gate.get("retryCap"):
-                out.append(Check(WARN, "gate.retryCap unset",
-                                 "a failing gate would re-prompt the agent forever"))
+            vc = cfg.get("verify", {})
+            out.append(Check(OK, "config.json parses",
+                             f"retryCap={vc.get('retryCap', 'unset')}"))
+            if not vc.get("retryCap"):
+                out.append(Check(WARN, "verify.retryCap unset",
+                                 "a failing verification hook would re-prompt the agent forever"))
         except (json.JSONDecodeError, OSError) as e:
             out.append(Check(FAIL, "config.json is unreadable", str(e)))
 
@@ -96,10 +92,11 @@ def check_project(cwd: Path) -> list[Check]:
     if "session-idle" not in present:
         out.append(
             Check(FAIL, "no session-idle hook",
-                  "absence of a gate is not a pass. Without it every task reports "
-                  "no-gate-configured, and treating that as success would manufacture "
-                  "confidence in unchecked work. Copy hooks/session-idle.sample to "
-                  "hooks/session-idle, make it executable, and commit it")
+                  "absence of a verification hook is not a pass. Without it every "
+                  "task reports no-verify-configured, and treating that as success "
+                  "would manufacture confidence in unchecked work. Copy "
+                  "hooks/session-idle.sample to hooks/session-idle, make it "
+                  "executable, and commit it")
         )
     for name in AGENT_HOOKS + TASK_HOOKS:
         p = hooks_dir / name
@@ -161,7 +158,7 @@ def check_daemon() -> list[Check]:
     if not info.get("installed"):
         return [Check(
             FAIL, "no supervisor installed",
-            "nothing settles tasks or runs gates, so no task will ever "
+            "nothing settles tasks or runs verification hooks, so no task will ever "
             "reach done. `orch install`",
         )]
     out: list[Check] = []
@@ -173,7 +170,7 @@ def check_daemon() -> list[Check]:
         ))
     else:
         out.append(Check(OK, f"supervisor running pid {info.get('ExecMainPID')}",
-                         "settles tasks, runs gates, retriggers agents, merges "
+                         "settles tasks, runs verification hooks, retriggers agents, merges "
                          "and archives"))
     out.extend(_check_daemon_freshness(info))
     if info.get("linger") is False:
@@ -230,30 +227,30 @@ def check_harness_version(st: dict) -> list[Check]:
                   "newer is a bonus, not a requirement")]
 
 
-def check_gates(cwd: Path) -> list[Check]:
+def check_verification(cwd: Path) -> list[Check]:
     out: list[Check] = []
     code = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True)
     if code.returncode != 0:
         return out
     top = Path(code.stdout.strip())
-    findings = gate.inspect(top)
+    findings = verify.inspect(top)
     if not findings:
         out.append(Check(
-            FAIL, "no gate configured",
+            FAIL, "no verification hook configured",
             "nothing verifies work in this project, so every task would finish as "
-            "`no-gate-configured` - which reads like a note and means nothing was "
+            "`no-verify-configured` - which reads like a note and means nothing was "
             "checked",
         ))
         return out
     for f in findings:
-        if f.state == gate.OK:
-            out.append(Check(OK, f"gate {f.name}", f.detail))
-        elif f.state == gate.DIVERGED:
-            out.append(Check(WARN, f"gate {f.name} diverges from the base branch",
+        if f.state == verify.OK:
+            out.append(Check(OK, f"verify hook {f.name}", f.detail))
+        elif f.state == verify.DIVERGED:
+            out.append(Check(WARN, f"verify hook {f.name} diverges from the base branch",
                              f.detail))
         else:
-            out.append(Check(FAIL, f"gate {f.name}: {f.state}", f.detail))
+            out.append(Check(FAIL, f"verify hook {f.name}: {f.state}", f.detail))
     return out
 
 
@@ -275,7 +272,7 @@ def check_opencode_deny() -> list[Check]:
     if not p.exists():
         return [Check(
             FAIL, "no global opencode deny for .orchestration/",
-            "an agent could edit its own gate through the file tools. "
+            "an agent could edit its own verification hook through the file tools. "
             "`orch install` writes the deny rules",
         )]
     try:
@@ -301,7 +298,7 @@ def check_trust(cwd: Path) -> list[Check]:
         return [Check(OK, "project is trusted by the daemon", str(common))]
     return [Check(
         FAIL, "project is not trusted",
-        "the daemon will not gate, merge or dispatch here. "
+        "the daemon will not verify, merge or dispatch here. "
         "`orch project trust` (from any worktree of this project)",
     )]
 
@@ -395,7 +392,7 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_daemon()
     checks += check_opencode_deny()
     checks += check_supervised_roots()
-    checks += check_gates(cwd)
+    checks += check_verification(cwd)
     checks += check_tooling()
     checks += check_project(cwd)
     checks += check_trust(cwd)

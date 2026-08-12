@@ -12,7 +12,7 @@ from . import server
 # env-var contract - but global: they live in ~/.config/orch/hooks/, belong to
 # the machine owner, and cannot be edited by any project's agent.
 #
-# Unlike the project gate, they are advisory: fired detached and async, a
+# Unlike the project verification hook, they are advisory: fired detached and async, a
 # non-zero exit (or a missing hook) never blocks the daemon or the CLI.
 
 GLOBAL_HOOKS = {

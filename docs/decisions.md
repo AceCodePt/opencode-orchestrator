@@ -21,7 +21,7 @@ in one source file has one place to check.
   Most of the decisions below are that sentence applied somewhere specific.
 - **The repo is the tracker; GitHub issues are not.** Work is tracked in the
   project's own `tasks/` — a spec file, a branch as the claim, the daemon as the
-  gate and merge — with ordering expressed as `dependencies:` front matter. The
+  verification and merge — with ordering expressed as `dependencies:` front matter. The
   earlier workflow that drove an external issue tracker (GitHub issues, triage
   labels, blocking links, agent briefs as comments) was removed: a second tracker
   was a second store, and every answer drifted toward the repo. What survived is
@@ -52,19 +52,23 @@ in one source file has one place to check.
 ## `daemon.py`
 
 - **Policy is pure; the executor is thin.** `decide()` takes a snapshot and returns
-  actions; the gate runs, the injection happens, the merge lands in `apply()`. That
+  actions; the verification hook runs, the injection happens, the merge lands in
+  `apply()`. That
   is the only reason budgets, retries and settle rules are testable at all.
-- **The worktree state is the verdict.** Dirty → uncommitted (the gate never passed).
+- **The worktree state is the verdict.** Dirty → uncommitted (the verification hook
+  never passed).
   Clean+diff → verified, merge. Clean+no-diff → nothing was produced, remove. The
-  daemon still runs the gate itself before merging — "clean + diff" alone never
-  stands in for a gate the daemon performed.
-- **The gate commits on pass** (in the hook, idempotently), so a passing task leaves
+  daemon still runs the verification hook itself before merging — "clean + diff"
+  alone never stands in for a verification the daemon performed.
+- **The hook commits on pass** (idempotently), so a passing task leaves
   a clean, committed, diffing branch. The agent never commits and never decides
   completion.
-- **A running gate is not an unexamined agent** — the old problem is gone because the
-  daemon runs the gate itself and knows it is running; a settle budget (~30s) only
+- **A running verification hook is not an unexamined agent** — the old problem is
+  gone because the daemon runs it itself and knows it is running; a settle budget
+  (~30s) only
   prevents acting on a brief idle blip.
-- **Retries are bounded and in-memory.** A failing gate injects the failure back up
+- **Retries are bounded and in-memory.** A failing verification hook injects the
+  failure back up
   to `retryCap`, tracked in the daemon's memory. A restart resets the counter — the
   task still reaches `needs-review` correctly because that status is derived.
 - **A fingerprint guards against re-injecting into a stuck agent.** If the worktree
@@ -73,12 +77,13 @@ in one source file has one place to check.
 - **Server death is handled by the worktree, not a special case.** Restart the
   server; tasks settle and their state decides. This is weaker than the old
   "escalate on server death" rule, but the old rule depended on stored verdicts that
-  no longer exist — and the gate is the daemon's own run, so a merged branch is
+  no longer exist — and the verification is the daemon's own run, so a merged
+  branch is
   verified work.
 - **Alerts dedupe by request id in memory.** One turn can raise several permission
   requests; alerting on "is /permission non-empty" fires repeatedly for one decision.
 - **`needs-review` carries a reason in the log.** `retries-exhausted`, `stalled`,
-  `worktree-gone`, `gate-failed` are recorded in the daemon's journal; `task list`
+  `worktree-gone`, `verify-failed` are recorded in the daemon's journal; `task list`
   re-derives the state from the worktree.
 - **Actions carry their project** (the common-dir), because one daemon supervises
   every project and task names are unique only within one.
@@ -97,9 +102,9 @@ in one source file has one place to check.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
-  surprising, and it never dispatches ungated work (that flag is human-only). The
+  surprising, and it never dispatches unverified work (that flag is human-only). The
   policy is read from the **committed copy on the base branch** — the same authority
-  rule as the gate — so an uncommitted edit (`orch project scheduler <n>` writes the
+  rule as the verification hook — so an uncommitted edit (`orch project scheduler <n>` writes the
   working-tree copy for review) never takes effect silently, and the policy is never
   whatever `.orchestration` directory discovery happened to find first. Beyond the
   per-project cap, a **machine-wide budget** (`orch daemon budget`, stored in
@@ -111,7 +116,8 @@ in one source file has one place to check.
   explicitly hand over (`hitl: false`, `orch task add --auto`). This inverts the
   earlier default: rather than the machine draining everything that wasn't exempted,
   you opt tasks *into* the machine one at a time. The flag is read from the committed
-  copy on base — the same authority rule as the gate — so neither an agent nor an
+  copy on base — the same authority rule as the verification hook — so neither an
+  agent nor an
   uncommitted edit can grant a task auto-dispatch.
 - **The phone notify is the consumer's job, not orch's.** The daemon's `alert`
   action only logs that a human is needed (deduped by request id); `orch task list`
@@ -119,7 +125,7 @@ in one source file has one place to check.
   knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch by polling
   `orch task list --json` or tailing the journal — the coupling points the right
   way, so adding a notifier costs orch nothing.
-- **The scheduler gates on `dependencies:` front matter.** A declared `todo` task
+- **The scheduler conditions dispatch on `dependencies:` front matter.** A declared `todo` task
   dispatches only when every dependency slug is **archived** — or was never declared,
   because a slug that never existed cannot block. An open declared task with the same
   name always holds its dependents, even one `reset` back to `todo`. The frontier is
@@ -131,7 +137,7 @@ in one source file has one place to check.
   The scheduler parses slugs (never links); a link is only how a task renders a
   reference to another task.
 - **A dependency typo is a permanently blocked task, and `doctor` says so.** A slug
-  that is neither declared nor archived can never satisfy the gate, so
+  that is neither declared nor archived can never satisfy the dependency check, so
   `check_task_dependencies` fails loudly on it.
 - **The human answers a block through the CLI, not through orch's memory.**
   `orch task answer <name> allow|deny` (or a question's text) posts to the shared
@@ -145,8 +151,9 @@ in one source file has one place to check.
   already existing — checked even in dry-run, so a dry-run cannot mislead.
 - **Order is the design.** Refuse an existing claim → `pre-task-create` from the
   dispatcher's worktree → create the worktree → `post-task-create` from the new one →
-  verify the gate is committed → only then dispatch.
-- **No gate is a refusal, not a warning.** Absence of a gate is not a pass; a
+  verify the verification hook is committed → only then dispatch.
+- **No verification hook is a refusal, not a warning.** Absence of verification is
+  not a pass; a
   dispatcher that proceeds would break the invariant.
 - **Dispatch is detached** (`start_new_session`, stdin from `/dev/null`): it must
   survive the shell that started it and must not die from a Ctrl-C meant for the CLI —
@@ -158,35 +165,41 @@ in one source file has one place to check.
   `/proc`) — exactly how orch starts it. A human-attached run in a terminal is never
   matched. `_kill_dispatch` finds the same process by worktree alone at teardown.
 
-## `gate.py`
+## `verify.py`
 
-- **The gate that runs is the one committed on the base branch, never the working-tree
-  copy** — because a dispatched agent was once observed rewriting its own gate and
-  being reported `passed`. An agent that can edit its own gate can always pass it.
-- **The staged gate copy lives outside the worktree**, so it is neither fingerprinted
+- **The hook that runs is the one committed on the base branch, never the
+  working-tree copy** — because a dispatched agent was once observed rewriting its
+  own verification hook and being reported `passed`. An agent that can edit its own
+  verification hook can always pass it.
+- **The staged hook copy lives outside the worktree**, so it is neither
+  fingerprinted
   nor visible to `git status`.
-- **NO_GATE is deliberately not a pass and not an error.** Absence of checks must
+- **NO_VERIFY is deliberately not a pass and not an error.** Absence of checks must
   never manufacture confidence.
-- **A hanging gate fails, never "unknown".** Inconclusive-therefore-fine is how a
+- **A hanging verification hook fails, never "unknown".** Inconclusive-therefore-fine is how a
   wedged suite starts passing work.
 - **`DIVERGED` does not disqualify.** The committed copy is what ran, so its verdict
-  is sound; it is flagged because an agent editing its own gate is worth a human's
+  is sound; it is flagged because an agent editing its own verification hook is
+  worth a human's
   attention.
 - **The router is gone.** There is no plugin contract, no plugin freshness check, no
-  per-directory import caching to keep in sync — the daemon runs every gate. Deleting
+  per-directory import caching to keep in sync — the daemon runs every
+  verification hook. Deleting
   the plugin deleted three whole classes of staleness problem.
 
 ## `init.py`
 
-- **The scaffolded gate is fail-closed** and documents the contract: on pass it
+- **The scaffolded verification hook is fail-closed** and documents the contract:
+  on pass it
   commits the work (idempotently); on failure the output is fed back by the daemon.
   `orch init` writes it as `hooks/session-idle.sample`, inert until the project
   copies it to the real name and commits it — the same opt-in contract as the
   lifecycle hooks.
 - **A bare target is refused, not silently written beside.** Hook definitions must
   live inside a worktree and be tracked.
-- **Samples are never a gate.** `orch init` writes every hook as an inert
-  `*.sample`; a project has no gate at all until it copies one to the real name,
+- **Samples are never a verification hook.** `orch init` writes every hook as an
+  inert `*.sample`; a project has no verification hook at all until it copies one
+  to the real name,
   makes it executable, and commits it. Nothing is overwritten without `--force`.
 - **Every opencode event gets a hook, and the daemon fires it from the SSE stream.**
   `orch init` scaffolds one hook per event type (project `.sample` + global
@@ -199,9 +212,10 @@ in one source file has one place to check.
   with the event JSON on stdin; a session-scoped event routes to the project
   whose worktree owns the session. Hooks are fire-and-forget: a slow hook never
   blocks the stream, and a non-zero exit only lands in the log. One reservation,
-  not an omission: `session.idle` is the gate's name, so in a project it keeps
-  the gate sample instead of a generic event one (globally, where there is no
-  gate, it still gets an event example) — and the consumer never fires the gate
+  not an omission: `session.idle` is the verification hook's name, so in a project
+  it keeps the verification sample instead of a generic event one (globally, where
+  there is no verification hook, it still gets an event example) — and the consumer
+  never fires the verification hook
   from the stream, because the daemon already runs it on settle.
 - **The stream is a trigger, not a truth source.** The SSE consumer fires hooks;
   it never decides task state. Task status still comes from git + `/proc` + the
@@ -213,7 +227,8 @@ in one source file has one place to check.
 
 - **Only a clean, committed branch merges.** The old "commit uncommitted work before
   merging" step is gone: uncommitted work is now `needs-review`, and auto-committing
-  it would manufacture the exact "verified" stamp the gate is supposed to produce.
+  it would manufacture the exact "verified" stamp the verification hook is
+  supposed to produce.
 - **The archive is `git mv tasks/<name>/task.md archive/<name>/task.md` + a commit.**
   The spec survives, the merge commit is the log, and the active `tasks/` tree stays
   light. `git mv` needs the destination directory to exist first.
@@ -272,7 +287,7 @@ in one source file has one place to check.
   holds for a conversation too.
 - **The primary agent is outside the daemon's loop.** It works in the base worktree
   (the human's checkout), its edits stay uncommitted for the human to review, and it
-  is never gated, merged, or torn down. Task worktrees branch from base HEAD, so its
+  is never verified, merged, or torn down. Task worktrees branch from base HEAD, so its
   uncommitted edits never leak into a task.
 - **`--compact` is opencode's own compaction, not a stand-in.**
   `POST /session/{id}/summarize` enqueues a `compaction` step and runs the message
@@ -290,7 +305,7 @@ in one source file has one place to check.
 
 - **All harness knowledge lives on the Python side.** `prompt_async`
   (`POST /session/{id}/prompt_async`) is the injection channel the daemon uses to
-  retrigger an agent on a failed gate.
+  retrigger an agent on a failed verification hook.
 - **Use `/permission`, `/question`, `/session?directory=`, not the `/api/*`
   equivalents** — the latter two returned empty against a session that was demonstrably
   busy and blocked.

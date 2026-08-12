@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import envfilter, gate, server, state
+from . import envfilter, server, state, verify
 
 HOOK_PRE = "pre-task-create"
 HOOK_POST = "post-task-create"
@@ -99,7 +97,7 @@ def plan(
 
     br = branch or name
     wt = worktree or (dispatcher.parent / name)
-    base = gate.base_branch(dispatcher)
+    base = verify.base_branch(dispatcher)
 
     if prompt:
         text = prompt
@@ -154,7 +152,7 @@ def _prompt_from_task_file(
     dispatcher: Path, name: str, base: str
 ) -> tuple[str | None, str | None]:
     rel = f"tasks/{name}/task.md"
-    committed = gate.show(dispatcher, base, rel)
+    committed = verify.show(dispatcher, base, rel)
     if committed is not None:
         return (
             f"Read {rel} and execute it. Follow its Verification section; a task is "
@@ -177,42 +175,23 @@ def run_hook(worktree: Path, name: str, env: dict[str, str],
              timeout: int = 900) -> tuple[bool, str]:
     """Run the committed copy of a lifecycle hook on the base branch — never
     the working-tree copy — so an agent's (or anyone's) uncommitted edit cannot
-    change what runs, the same rule as the gate. Fail-open: an absent hook (or
+    change what runs, the same rule as the verification hook. Fail-open: an absent hook (or
     one only present in the working tree) is a no-op."""
     worktree = Path(worktree)
-    base = gate.base_branch(worktree)
-    rel = f"{gate.HOOKS_REL}/{name}"
-    committed = gate.show(worktree, base, rel)
-    if committed is None or not committed.strip():
+    base = verify.base_branch(worktree)
+    rel = f"{verify.HOOKS_REL}/{name}"
+    r = verify.run_committed_hook(worktree, name, env=env, timeout=timeout,
+                                  base=base)
+    if not r.present:
         note = ""
         if (worktree / rel).exists():
             note = f" (exists in the working tree but not committed on {base}; not run)"
         return True, f"no {name} committed on {base}{note}"
-
-    tmp = Path(tempfile.mkdtemp(prefix="orch-hook-"))
-    exe = tmp / name
-    try:
-        exe.write_text(committed)
-        exe.chmod(0o755)
-
-        if envfilter.gate_env_full(worktree):
-            base_env = dict(os.environ)
-        else:
-            base_env = envfilter.filtered_env(
-                os.environ, repo_drop=envfilter.repo_drops(worktree))
-        hook_env = {**base_env, **env}
-        try:
-            p = subprocess.run([str(exe)], cwd=str(worktree),
-                               env=hook_env,
-                               capture_output=True, text=True, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            return False, f"{name} failed to run: {e}"
-        out = ((p.stdout or "") + (p.stderr or "")).strip()
-        if p.returncode != 0:
-            return False, f"{name} exited {p.returncode}: {out[-1500:]}"
-        return True, f"{name} ok"
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    if r.error:
+        return False, f"{name} failed to run: {r.error}"
+    if not r.ok:
+        return False, f"{name} exited {r.exit_code}: {r.output[-1500:]}"
+    return True, f"{name} ok"
 
 
 def create_worktree(p: Plan, result: Result) -> bool:
@@ -340,7 +319,7 @@ def start(
     branch: str | None = None,
     worktree: Path | None = None,
     dry_run: bool = False,
-    allow_ungated: bool = False,
+    allow_unverified: bool = False,
 ) -> Result:
     result = Result(ok=True)
 
@@ -354,7 +333,7 @@ def start(
 
     if not state.is_trusted(Path(p.project)):
         result.step("note: this project is not trusted by the daemon, so it "
-                    "will not settle, gate or merge this task. "
+                    "will not settle, verify or merge this task. "
                     "`orch project trust` fixes that.")
 
     if branch_exists(Path(p.project), p.branch):
@@ -392,25 +371,25 @@ def start(
     if not ok:
         return result.fail(msg)
 
-    findings = gate.inspect(p.worktree, p.base)
+    findings = verify.inspect(p.worktree, p.base)
     for f in findings:
-        result.step(f"gate {f.name}: {f.state} - {f.detail}")
+        result.step(f"verify {f.name}: {f.state} - {f.detail}")
 
     reason = None
     if not findings:
         reason = (
-            f"no gate is committed on {p.base}, so nothing would verify this "
-            f"task. Commit {gate.HOOKS_REL}/session-idle first."
+            f"no verification hook is committed on {p.base}, so nothing would "
+            f"verify this task. Commit {verify.HOOKS_REL}/session-idle first."
         )
-    elif gate.blocking(findings):
-        reason = "this task would run ungated:\n" + "\n".join(
+    elif verify.blocking(findings):
+        reason = "this task would run unverified:\n" + "\n".join(
             f"      - {f.name} ({f.state}): {f.detail}"
-            for f in gate.blocking(findings)
+            for f in verify.blocking(findings)
         )
-    if reason and not allow_ungated:
-        return result.fail(reason + " Pass --allow-ungated to dispatch anyway.")
+    if reason and not allow_unverified:
+        return result.fail(reason + " Pass --allow-unverified to dispatch anyway.")
     if reason:
-        result.step(f"WARNING, dispatching ungated on request: {reason}")
+        result.step(f"WARNING, dispatching unverified on request: {reason}")
 
     try:
         srv = server.start()

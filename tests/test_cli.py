@@ -261,7 +261,7 @@ def test_daemon_budget_writes_the_machine_config() -> None:
 
 
 def _global_setup(*, server_up: bool = True, daemon_active: bool = True,
-                  gate: str | None = "#!/bin/sh\nexit 0",
+                  hook: str | None = "#!/bin/sh\nexit 0",
                   agent: str = "idle", base_wt: Path | None = None) -> list:
     saved: list = []
 
@@ -283,7 +283,7 @@ def _global_setup(*, server_up: bool = True, daemon_active: bool = True,
         "installed": daemon_active,
         "ActiveState": "active" if daemon_active else "inactive"})
     _set("agent_mod.status", lambda _i, _b: {"state": agent})
-    _set("gate_mod.show", lambda _wt, _base, _rel: gate)
+    _set("verify_mod.show", lambda _wt, _base, _rel: hook)
     _set("daemon_mod.project_label", lambda common: Path(common).parent.name)
     _GProject._base_wt = base_wt
     _GProject._tasks = []
@@ -363,10 +363,10 @@ def test_task_list_global_conflict_and_missing_worktree() -> None:
     print("ok: missing worktrees and merge conflicts are needs-you")
 
 
-def test_task_list_global_no_committed_gate_is_needs_you() -> None:
+def test_task_list_global_no_committed_hook_is_needs_you() -> None:
     with tempfile.TemporaryDirectory() as wt:
         t = _claimed("task-a", worktree=wt)
-        saved = _global_setup(gate=None, base_wt=Path(wt))
+        saved = _global_setup(hook=None, base_wt=Path(wt))
         _GProject._tasks = [t]
         try:
             buf = io.StringIO()
@@ -374,10 +374,10 @@ def test_task_list_global_no_committed_gate_is_needs_you() -> None:
                 rc = cli.cmd_task_list(_gargs())
             out = buf.getvalue()
             assert rc == 1, rc
-            assert "no committed gate" in out
+            assert "no committed verification hook" in out
         finally:
             _global_teardown(saved)
-    print("ok: a project with no committed gate is needs-you")
+    print("ok: a project with no committed verification hook is needs-you")
 
 
 def test_task_list_global_looks_done_is_reported() -> None:

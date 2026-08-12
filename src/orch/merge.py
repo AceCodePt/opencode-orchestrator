@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate, server, state
+from . import dispatch, server, state, verify
 
 TASKS_REL = "tasks"
 ARCHIVE_REL = "archive"
@@ -162,7 +162,7 @@ def merge_and_cleanup(
         return r
     if state._dirty(wt):
         r.fail(f"worktree {wt} has uncommitted work; only a committed, diffing "
-               f"branch is merged. The gate must have passed and committed.")
+               f"branch is merged. The verification hook must have passed and committed.")
         return r
 
     code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", branch)

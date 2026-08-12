@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import dispatch, envfilter, gate  # noqa: E402
+from orch import dispatch, envfilter, verify  # noqa: E402
 
 
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
@@ -139,16 +139,16 @@ def test_dry_run_touches_nothing() -> None:
     print("ok: dry run creates nothing")
 
 
-def test_ungated_dispatch_is_refused() -> None:
+def test_unverified_dispatch_is_refused() -> None:
     root, tmp = _repo()
     _task_file(root, "probe")
     _commit(root)
-    r = dispatch.start(root, "probe", dry_run=True, allow_ungated=False)
-    # the ungated refusal happens before the dry-run short-circuit? no: dry-run
-    # returns before the gate check, so this is a dry-run only.
+    r = dispatch.start(root, "probe", dry_run=True, allow_unverified=False)
+    # the unverified refusal happens before the dry-run short-circuit? no: dry-run
+    # returns before the verification check, so this is a dry-run only.
     assert r.ok
     tmp.cleanup()
-    print("ok: dry-run skips the gate refusal (real runs refuse ungated)")
+    print("ok: dry-run skips the verification refusal (real runs refuse unverified)")
 
 
 def test_hook_absence_is_fine_but_uncommitted_hooks_do_not_run() -> None:
@@ -156,7 +156,7 @@ def test_hook_absence_is_fine_but_uncommitted_hooks_do_not_run() -> None:
     ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {})
     assert ok and "no pre-task-create committed" in msg, msg
 
-    h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
+    h = root / verify.HOOKS_REL / dispatch.HOOK_PRE
     h.parent.mkdir(parents=True, exist_ok=True)
     h.write_text("#!/usr/bin/env bash\nexit 0\n")
     h.chmod(0o755)
@@ -180,7 +180,7 @@ def test_hook_absence_is_fine_but_uncommitted_hooks_do_not_run() -> None:
 def test_hook_gets_a_filtered_environment_by_default() -> None:
     root, tmp = _repo()
     out = Path(tmp.name) / "hook-env"
-    h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
+    h = root / verify.HOOKS_REL / dispatch.HOOK_PRE
     h.parent.mkdir(parents=True, exist_ok=True)
     h.write_text("#!/usr/bin/env bash\necho \"${GH_TOKEN:-MISSING}\" > \"$OUT\"\n")
     h.chmod(0o755)
@@ -212,8 +212,8 @@ def test_hook_can_opt_into_the_full_environment() -> None:
     out = Path(tmp.name) / "hook-env"
     cfg = root / ".orchestration" / "config.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(json.dumps({"gate": {"env": "full"}}))
-    h = root / gate.HOOKS_REL / dispatch.HOOK_PRE
+    cfg.write_text(json.dumps({"verify": {"env": "full"}}))
+    h = root / verify.HOOKS_REL / dispatch.HOOK_PRE
     h.parent.mkdir(parents=True, exist_ok=True)
     h.write_text("#!/usr/bin/env bash\necho \"${GH_TOKEN:-MISSING}\" > \"$OUT\"\n")
     h.chmod(0o755)
@@ -224,7 +224,7 @@ def test_hook_can_opt_into_the_full_environment() -> None:
     os.environ["XDG_CONFIG_HOME"] = tmp.name
     os.environ["GH_TOKEN"] = "ghp_secret"
     try:
-        assert envfilter.gate_env_full(root) is True
+        assert envfilter.verify_env_full(root) is True
         ok, msg = dispatch.run_hook(root, dispatch.HOOK_PRE, {"OUT": str(out)})
         assert ok, msg
         assert out.read_text().strip() == "ghp_secret", \
@@ -238,7 +238,7 @@ def test_hook_can_opt_into_the_full_environment() -> None:
         else:
             os.environ["XDG_CONFIG_HOME"] = saved_cfg
     tmp.cleanup()
-    print("ok: gate.env=full opts a lifecycle hook into the full environment")
+    print("ok: verify.env=full opts a lifecycle hook into the full environment")
 
 
 def main() -> int:

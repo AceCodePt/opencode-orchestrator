@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import daemon, gate, observe, server, state  # noqa: E402
+from orch import daemon, observe, server, state, verify  # noqa: E402
 
 NOW = 1_700_000_000
 _WT_DIR = tempfile.mkdtemp(prefix="orch-lab-")
@@ -210,7 +210,7 @@ def test_settled_dirty_task_is_verified() -> None:
                                tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
     assert acts[0].retry_cap == 3
-    print("ok: a settled dirty task is verified (the gate decides commit vs retry)")
+    print("ok: a settled dirty task is verified (the verification hook decides commit vs retry)")
 
 
 def test_settled_clean_diff_task_is_verified() -> None:
@@ -224,7 +224,7 @@ def test_settled_clean_diff_task_is_verified() -> None:
     print("ok: a settled clean+diff task is verified")
 
 
-def test_settled_clean_noop_is_removed_without_a_gate() -> None:
+def test_settled_clean_noop_is_removed_without_a_verification_hook() -> None:
     mem = daemon.LoopState()
     t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
     snap = _snap(tasks=[t], mem=mem)
@@ -232,7 +232,7 @@ def test_settled_clean_noop_is_removed_without_a_gate() -> None:
     acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
                                tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.REMOVE]
-    print("ok: a clean no-diff task is removed without running a gate")
+    print("ok: a clean no-diff task is removed without running a verification hook")
 
 
 def test_missing_worktree_needs_review() -> None:
@@ -264,7 +264,7 @@ def test_unchanged_worktree_after_failure_stalls_to_review() -> None:
                                tasks=[t], mem=mem))
     assert _kinds(acts) == [daemon.NEEDS_REVIEW]
     assert "stalled" in acts[0].reason
-    print("ok: an unchanged worktree after a gate failure eventually stalls to review")
+    print("ok: an unchanged worktree after a verification failure eventually stalls to review")
 
 
 def test_unchanged_but_recently_failed_keeps_waiting() -> None:
@@ -409,7 +409,7 @@ def test_install_opencode_deny_refuses_unparseable_config() -> None:
     print("ok: an unparseable opencode config is never clobbered")
 
 
-def _gated_repo(gate_body: str) -> tuple[Path, tempfile.TemporaryDirectory]:
+def _verified_repo(hook_body: str) -> tuple[Path, tempfile.TemporaryDirectory]:
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name) / "wt"
     root.mkdir(parents=True)
@@ -419,18 +419,18 @@ def _gated_repo(gate_body: str) -> tuple[Path, tempfile.TemporaryDirectory]:
     subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
     h = root / ".orchestration" / "hooks"
     h.mkdir(parents=True)
-    (h / "session-idle").write_text(gate_body)
+    (h / "session-idle").write_text(hook_body)
     (h / "session-idle").chmod(0o755)
     (root / ".orchestration" / "config.json").write_text(
-        '{"baseBranch": "main", "gate": {"retryCap": 3}}\n')
+        '{"baseBranch": "main", "verify": {"retryCap": 3}}\n')
     (root / "seed").write_text("x")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "c"], check=True)
     return root, tmp
 
 
-def test_apply_verify_merges_a_passing_gate_and_archives() -> None:
-    root, tmp = _gated_repo(
+def test_apply_verify_merges_a_passing_hook_and_archives() -> None:
+    root, tmp = _verified_repo(
         "#!/usr/bin/env bash\n"
         "cd \"${WORKTREE_PATH:-.}\" || exit 1\n"
         "if [ -n \"$(git status --porcelain)\" ]; then\n"
@@ -450,7 +450,7 @@ def test_apply_verify_merges_a_passing_gate_and_archives() -> None:
     subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
     (wt / "answer.txt").write_text("42")
-    # dirty work, gate will pass and commit it
+    # dirty work, the hook will pass and commit it
 
     mem = daemon.LoopState()
     snap = _snap(now=int(time.time()),
@@ -474,11 +474,11 @@ def test_apply_verify_merges_a_passing_gate_and_archives() -> None:
     assert p.returncode != 0, "the task branch must be merged and deleted"
     assert not wt.exists(), "the worktree must be removed"
     tmp.cleanup()
-    print("ok: a passing gate merges, archives, and tears the task down")
+    print("ok: a passing verification hook merges, archives, and tears the task down")
 
 
-def test_apply_verify_failing_gate_retriggers_up_to_the_cap() -> None:
-    root, tmp = _gated_repo("#!/usr/bin/env bash\necho 'tests red'\nexit 1\n")
+def test_apply_verify_failing_hook_retriggers_up_to_the_cap() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\necho 'tests red'\nexit 1\n")
     injected: list[tuple[int, str, str]] = []
     orig = daemon.prompt_async
     daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text)) or None
@@ -488,7 +488,7 @@ def test_apply_verify_failing_gate_retriggers_up_to_the_cap() -> None:
                           project=str(root), worktree=str(root), branch="task-a",
                           base="main", retry_cap=3, port=4096, session_ids=["ses_1"])
         sup.apply([a])
-        assert len(injected) == 1, "a failing gate must inject the failure back"
+        assert len(injected) == 1, "a failing verification hook must inject the failure back"
         assert "tests red" in injected[0][2]
 
         a2 = daemon.Action(daemon.VERIFY, "task-a", "settled",
@@ -505,15 +505,15 @@ def test_apply_verify_failing_gate_retriggers_up_to_the_cap() -> None:
     finally:
         daemon.prompt_async = orig
     tmp.cleanup()
-    print("ok: a failing gate retriggers up to the cap, then needs-review")
+    print("ok: a failing verification hook retriggers up to the cap, then needs-review")
 
 
-def test_apply_verify_no_gate_is_reviewed() -> None:
-    root, tmp = _gated_repo("#!/usr/bin/env bash\nexit 0\n")
-    # no committed gate: remove the committed hook and commit
+def test_apply_verify_no_hook_is_reviewed() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    # no committed verification hook: remove the committed hook and commit
     subprocess.run(["git", "-C", str(root), "rm", "-q",
                     ".orchestration/hooks/session-idle"], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "no gate"],
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "no verify"],
                    check=True)
     sup = daemon.Supervisor(dry_run=False)
     a = daemon.Action(daemon.VERIFY, "task-a", "settled",
@@ -521,9 +521,9 @@ def test_apply_verify_no_gate_is_reviewed() -> None:
                       base="main", retry_cap=3, session_ids=[])
     log = "\n".join(sup.apply([a]))
     assert "needs-review" in log
-    assert "no committed gate" in log
+    assert "no committed verification hook" in log
     tmp.cleanup()
-    print("ok: no committed gate lands on needs-review, never done")
+    print("ok: no committed verification hook lands on needs-review, never done")
 
 
 def test_unit_text_keeps_the_expected_shape() -> None:
@@ -650,7 +650,7 @@ def test_scheduler_holds_a_task_until_its_dependencies_are_archived() -> None:
     dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
     assert dispatched == ["feature-slice"], \
         "once the dependency is archived, the slice dispatches"
-    print("ok: the scheduler gates dispatch on archived dependencies")
+    print("ok: the scheduler conditions dispatch on archived dependencies")
 
 
 def test_scheduler_treats_an_undeclared_dependency_as_satisfied() -> None:
@@ -723,7 +723,7 @@ def test_hitl_conflicted_task_is_reviewed_not_reverified() -> None:
     assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
     assert "merge-conflict" in acts[0].reason, acts[0].reason
     assert daemon.VERIFY not in _kinds(acts), \
-        "a conflicted task must not be re-gated or re-merged"
+        "a conflicted task must not be re-verified or re-merged"
     print("ok: a hitl conflicted task is routed to needs-review, never re-verified")
 
 

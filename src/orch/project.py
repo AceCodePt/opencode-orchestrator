@@ -72,7 +72,7 @@ def _unsupervised(parent: Path, roots: list[str]) -> str | None:
 
 def trust(start: Path) -> tuple[bool, str]:
     """Mark the current project's repo as trusted by the machine owner, so the
-    daemon will gate, merge and dispatch here. The marker lives outside the
+    daemon will verify, merge and dispatch here. The marker lives outside the
     repo - a project cannot trust itself."""
     _top, common, err = dispatch.project_of(start)
     if err or common is None:
@@ -80,7 +80,7 @@ def trust(start: Path) -> tuple[bool, str]:
     if state.is_trusted(common):
         return True, f"already trusted: {common}"
     state.trust_project(common)
-    return True, f"trusted {common} - the daemon will gate, merge and dispatch here"
+    return True, f"trusted {common} - the daemon will verify, merge and dispatch here"
 
 
 def untrust(start: Path) -> tuple[bool, str]:

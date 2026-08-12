@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gate, hooks, merge, observe, server, sse, state
+from . import dispatch, hooks, merge, observe, server, sse, state, verify
 from .harness import prompt_async
 
 SETTLE_BUDGET_S = 30
@@ -15,7 +15,7 @@ STALL_BUDGET_S = 10 * 60
 RETRIGGER_GRACE_S = 30
 REVIEW_BACKOFF_S = 15 * 60
 MERGE_BACKOFF_S = 30 * 60
-GATE_TIMEOUT_S = 20 * 60
+VERIFY_TIMEOUT_S = 20 * 60
 DISPATCH_BACKOFF_S = 60
 MAX_ORCHESTRATED_S = 6 * 3600
 
@@ -55,7 +55,7 @@ class LoopState:
     injected_at: dict[tuple[str, str], int] = field(default_factory=dict)
     settled_at: dict[tuple[str, str], int] = field(default_factory=dict)
     wait_until: dict[tuple[str, str], int] = field(default_factory=dict)
-    gating_until: dict[tuple[str, str], int] = field(default_factory=dict)
+    verifying_until: dict[tuple[str, str], int] = field(default_factory=dict)
     alerted: set[str] = field(default_factory=set)
     trusted_alerted: set[str] = field(default_factory=set)
     dispatch_backoff: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -121,7 +121,7 @@ def _hook_cwd(a: Action) -> Path | None:
 def _reset_loop(mem: LoopState, key: tuple[str, str],
                 keep: tuple[str, ...] = ()) -> None:
     for name in ("settled_at", "fingerprint", "last_fail", "injected_at",
-                 "gating_until"):
+                 "verifying_until"):
         if name not in keep:
             getattr(mem, name).pop(key, None)
 
@@ -150,7 +150,7 @@ def decide(snap: Snapshot) -> list[Action]:
         actions.append(Action(
             ALERT, None, "project-not-trusted",
             f"supervised but not trusted; run `orch project trust` from any "
-            f"worktree of this project to let the daemon gate, merge and "
+            f"worktree of this project to let the daemon verify, merge and "
             f"dispatch here", project=proj,
         ))
 
@@ -279,7 +279,7 @@ def decide(snap: Snapshot) -> list[Action]:
             if snap.now - last > STALL_BUDGET_S:
                 actions.append(Action(
                     NEEDS_REVIEW, t.name,
-                    f"stalled: unchanged for {snap.now - last}s after a gate failure",
+                    f"stalled: unchanged for {snap.now - last}s after a verification failure",
                     "the agent was told what to fix and nothing changed",
                     project=t.project, worktree=t.worktree,
                     branch=t.branch, base=t.base,
@@ -288,16 +288,16 @@ def decide(snap: Snapshot) -> list[Action]:
                 _reset_loop(mem, key, keep=("wait_until",))
             continue
 
-        if snap.now < mem.gating_until.get(key, 0):
+        if snap.now < mem.verifying_until.get(key, 0):
             continue
 
         actions.append(Action(
-            VERIFY, t.name, "settled: run the committed gate",
+            VERIFY, t.name, "settled: run the committed verification hook",
             project=t.project, worktree=t.worktree, branch=t.branch,
             base=t.base, retry_cap=t.retry_cap, port=snap.port,
             session_ids=t.session_ids,
         ))
-        mem.gating_until[key] = snap.now + GATE_TIMEOUT_S
+        mem.verifying_until[key] = snap.now + VERIFY_TIMEOUT_S
         mem.settled_at.pop(key, None)
 
     _schedule(snap, actions)
@@ -439,17 +439,17 @@ class Supervisor:
 
     def _verify(self, a: Action) -> None:
         key = (a.project or "", a.task or "")
-        self.mem.gating_until.pop(key, None)
+        self.mem.verifying_until.pop(key, None)
         log: list[str] = []
         wt = Path(a.worktree or "")
         sid = a.session_ids[0] if a.session_ids else ""
 
-        v = gate.run(wt, "session-idle", base=a.base or "main",
+        v = verify.run(wt, "session-idle", base=a.base or "main",
                      session_id=sid)
-        log.append(f"gate {v.summary}")
+        log.append(f"verify {v.summary}")
 
-        if v.outcome == gate.NO_GATE:
-            log.append(f"{a.task} -> needs-review (no committed gate, so nothing "
+        if v.outcome == verify.NO_VERIFY:
+            log.append(f"{a.task} -> needs-review (no committed verification hook, so nothing "
                        f"verified this work)")
             log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
@@ -463,7 +463,7 @@ class Supervisor:
             self.mem.last_fail.pop(key, None)
             self.mem.settled_at.pop(key, None)
             if state._dirty(wt):
-                log.append("gate passed but the worktree is still dirty; "
+                log.append("verification passed but the worktree is still dirty; "
                            "reviewing rather than merging")
                 log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
                 self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
@@ -512,7 +512,7 @@ class Supervisor:
             return
 
         if not a.session_ids:
-            log.append(f"{a.task} -> needs-review (gate failed, no session left "
+            log.append(f"{a.task} -> needs-review (verification failed, no session left "
                        f"to retrigger)")
             log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
             self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
@@ -520,7 +520,7 @@ class Supervisor:
             return
 
         text = (
-            f"The `session-idle` gate failed (attempt {retries}/{cap}). "
+            f"The `session-idle` verification hook failed (attempt {retries}/{cap}). "
             f"Fix these, then continue:\n\n```\n{v.detail}\n```"
         )
         if not a.port:
@@ -693,7 +693,7 @@ def run(project: str | None = None, roots: list[str] | None = None,
 UNIT_NAME = "orch-daemon.service"
 UNIT = """\
 [Unit]
-Description=orch supervisor - settles tasks, runs gates, retriggers agents, merges and archives
+Description=orch supervisor - settles tasks, runs verification hooks, retriggers agents, merges and archives
 Documentation=https://github.com/AceCodePt/opencode-orchestrator
 After=network-online.target
 

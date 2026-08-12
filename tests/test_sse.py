@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import gate, hooks, opencode_events, sse  # noqa: E402
+from orch import hooks, opencode_events, sse, verify  # noqa: E402
 
 
 def _wait_for(path: Path, timeout: float = 5.0) -> bool:
@@ -151,7 +151,7 @@ def test_session_idle_is_never_fired_from_the_stream() -> None:
         ev = {"type": "session.idle", "properties": {"sessionID": "s1"}}
         sse.dispatch(ev, (str(root / "lab.git"), "main", str(root)),
                      trusted={str(root / "lab.git")})
-        assert not pm.exists(), "the gate must not fire from the event stream"
+        assert not pm.exists(), "the acceptance hook must not fire from the event stream"
     finally:
         tmp.cleanup()
         for k, v in saved.items():
@@ -159,7 +159,7 @@ def test_session_idle_is_never_fired_from_the_stream() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    print("ok: session.idle is reserved for the gate and never fires from the stream")
+    print("ok: session.idle is the acceptance hook and never fires from the stream")
 
 
 def test_watcher_routes_by_session_and_reconnects() -> None:

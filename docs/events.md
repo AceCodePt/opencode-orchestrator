@@ -127,6 +127,7 @@ stdin and `ORCH_EVENT=<dashed-name>` set. A session-scoped event fires its
 project hook in the worktree that owns the session; a copied executable global
 hook fires for every event. The vocabulary lives in `src/orch/opencode_events.py`
 and the project and global samples come from one template, so they cannot drift.
-One asymmetry: `session.idle` is the gate's name, so in a project it keeps the
-gate sample instead of a generic event one; globally, where there is no gate, it
+One asymmetry: `session.idle` is the verification hook's name, so in a project it
+keeps the verification sample instead of a generic event one; globally, where there
+is no verification hook, it
 still gets an event example.

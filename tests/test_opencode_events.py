@@ -31,7 +31,7 @@ def test_hook_names_do_not_clash_with_other_hooks() -> None:
     names = {opencode_events.hook_name(e) for e in opencode_events.OPENCODE_EVENTS}
     assert names & reserved == {"session-idle"}, names & reserved
     print("ok: event hook names clash with no lifecycle or global hook; "
-          "session-idle is reserved for the gate")
+          "session-idle is the acceptance hook")
 
 
 def test_hook_name_dots_to_dashes() -> None:

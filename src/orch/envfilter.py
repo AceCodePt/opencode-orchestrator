@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-# Secrets a dispatched agent or a project gate never needs. Provider keys
+# Secrets a dispatched agent or a project verification hook never needs. Provider keys
 # (`*_API_KEY`, `*_AUTH_TOKEN`) are deliberately NOT here - opencode needs them
 # to talk to the model. The machine owner can drop more, or keep something back,
 # in ~/.config/orch/env.json.
@@ -64,11 +64,11 @@ def repo_drops(worktree: Path) -> set[str]:
     return set((cfg.get("agentEnv") or {}).get("drop") or [])
 
 
-def gate_env_full(worktree: Path) -> bool:
-    """Opt-out for gates that legitimately need the full environment:
-    \"gate\": {\"env\": \"full\"} in .orchestration/config.json."""
+def verify_env_full(worktree: Path) -> bool:
+    """Opt-out for verification hooks that legitimately need the full
+    environment: \"verify\": {\"env\": \"full\"} in .orchestration/config.json."""
     cfg = _read_json(worktree / ".orchestration" / "config.json")
-    return str((cfg.get("gate") or {}).get("env", "filtered")).lower() == "full"
+    return str((cfg.get("verify") or {}).get("env", "filtered")).lower() == "full"
 
 
 def filtered_env(base: Mapping[str, str] | None = None, extra_drop=(), extra_keep=(),

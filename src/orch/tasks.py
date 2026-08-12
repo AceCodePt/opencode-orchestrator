@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, envfilter, gate, state
+from . import dispatch, envfilter, state, verify
 
 TEMPLATE = """---
 hitl: {hitl}
@@ -111,7 +111,7 @@ def add_many(
 
     deps = [dispatch.slug(d) for d in (depends or []) if dispatch.slug(d)]
 
-    base = gate.base_branch(root)
+    base = verify.base_branch(root)
     note = off_base_note(root, base)
     if note:
         result.notes.append(note)
@@ -202,7 +202,7 @@ def draft_prompt(text: str, auto: bool) -> str:
         "Describe WHAT the system should do, not HOW to implement it — the "
         "dispatched agent explores the codebase fresh and makes its own "
         "implementation decisions. Give every task a Verification the project's "
-        "gate could actually run. Put the description's checkboxes into "
+        "verification hook could actually run. Put the description's checkboxes into "
         "Requirements. Do not create TASKS.md, do not touch any file outside "
         "tasks/, do not commit. When done, report the list of files you created "
         "and the dependency edges between them.\n\n"

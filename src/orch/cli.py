@@ -10,7 +10,7 @@ from . import agent as agent_mod
 from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import doctor as doctor_mod
-from . import gate as gate_mod
+from . import verify as verify_mod
 from . import harness
 from . import hooks as hooks_mod
 from . import init as init_mod
@@ -126,7 +126,7 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         branch=args.branch,
         worktree=Path(args.worktree) if args.worktree else None,
         dry_run=args.dry_run,
-        allow_ungated=args.allow_ungated,
+        allow_unverified=args.allow_unverified,
     )
     for s in r.steps:
         print(f"  {s}")
@@ -191,15 +191,15 @@ def _q(path: str | Path) -> str:
     return shlex.quote(str(path))
 
 
-def _has_committed_gate(base_wt: Path | None, base: str) -> bool:
+def _has_committed_verification(base_wt: Path | None, base: str) -> bool:
     if base_wt is None:
         return False
-    rel = f"{gate_mod.HOOKS_REL}/session-idle"
-    return gate_mod.show(base_wt, base, rel) is not None
+    rel = f"{verify_mod.HOOKS_REL}/session-idle"
+    return verify_mod.show(base_wt, base, rel) is not None
 
 
 def _classify_wait(t: state.TaskState, base_wt: Path | None,
-                   no_gate: bool) -> tuple[str | None, str | None, str]:
+                   no_verification: bool) -> tuple[str | None, str | None, str]:
     if t.session == state.SESSION_BLOCKED:
         b = t.blocked[0] if t.blocked else None
         if b is not None and b.kind == "question":
@@ -220,10 +220,10 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None,
     if t.dirty:
         return "needs-you", f"review the uncommitted changes in {_q(t.worktree)}", \
             "worktree is dirty"
-    if no_gate:
-        rel = str(base_wt / gate_mod.HOOKS_REL / "session-idle")
+    if no_verification:
+        rel = str(base_wt / verify_mod.HOOKS_REL / "session-idle")
         return "needs-you", f"edit and commit {_q(rel)}", \
-            "no committed gate - nothing will ever verify this work"
+            "no committed verification hook - nothing will ever verify this work"
     if t.diff:
         return "looks-done", None, "unmerged (awaiting verify/merge)"
     return None, None, ""
@@ -252,11 +252,11 @@ def _task_list_global(args: argparse.Namespace) -> int:
         agent = "none"
         if info is not None and base_wt is not None:
             agent = (agent_mod.status(info, base_wt) or {}).get("state") or "none"
-        no_gate = not _has_committed_gate(base_wt, proj.base)
+        no_verification = not _has_committed_verification(base_wt, proj.base)
         for t in tasks:
             if t.archived or not t.claimed:
                 continue
-            sec, action, detail = _classify_wait(t, base_wt, no_gate)
+            sec, action, detail = _classify_wait(t, base_wt, no_verification)
             if sec is None:
                 continue
             if sec == "looks-done" and not daemon_active:
@@ -494,15 +494,15 @@ def cmd_task_draft(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
-def cmd_gate(args: argparse.Namespace) -> int:
+def cmd_verify(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
     top, _, err = dispatch_mod.project_of(start)
     if err or top is None:
         print(err or "not in a worktree", file=sys.stderr)
         return 2
-    findings = gate_mod.inspect(top)
+    findings = verify_mod.inspect(top)
     if not findings:
-        print("no gates configured - nothing verifies work in this project")
+        print("no verification hook configured - nothing verifies work in this project")
         return 2
     worst = 0
     for f in findings:
@@ -510,19 +510,19 @@ def cmd_gate(args: argparse.Namespace) -> int:
                 "missing": "! "}.get(f.state, "? ")
         print(f"{mark}{f.name}: {f.state}")
         print(f"    {f.detail}")
-        if f.state == gate_mod.DIVERGED:
+        if f.state == verify_mod.DIVERGED:
             worst = max(worst, 1)
         elif not f.trustworthy:
             worst = max(worst, 2)
     return worst
 
 
-def cmd_gate_run(args: argparse.Namespace) -> int:
+def cmd_verify_run(args: argparse.Namespace) -> int:
     wt = Path(args.directory) if args.directory else Path.cwd()
-    v = gate_mod.run(wt, args.event)
+    v = verify_mod.run(wt, args.event)
     print(f"{v.event}: {v.summary}")
     if v.diverged:
-        print("  ! the worktree's gate differs from the committed one; the committed "
+        print("  ! the worktree's hook differs from the committed one; the committed "
               "one ran")
     if v.detail:
         for line in v.detail.strip().splitlines()[-20:]:
@@ -892,7 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True,
                            metavar="<command>", title="commands")
 
-    i = sub.add_parser("init", help="scaffold .orchestration/ with the gate template")
+    i = sub.add_parser("init", help="scaffold .orchestration/ with the verification hook template")
     i.add_argument("-C", "--directory")
     i.add_argument("--force", action="store_true",
                    help="overwrite existing files (samples included)")
@@ -928,7 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--worktree")
     ts.add_argument("--dry-run", action="store_true",
                     help="show the plan and the exact dispatch command")
-    ts.add_argument("--allow-ungated", action="store_true",
+    ts.add_argument("--allow-unverified", action="store_true",
                     help="dispatch even though nothing will verify the result")
     ts.set_defaults(func=cmd_task_start)
 
@@ -1029,7 +1029,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pt = pjsub.add_parser(
         "trust",
-        help="let the daemon gate, merge and dispatch this project",
+        help="let the daemon verify, merge and dispatch this project",
     )
     pt.add_argument("-C", "--directory")
     pt.set_defaults(func=cmd_project_trust)
@@ -1059,14 +1059,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("-C", "--directory")
     ps.set_defaults(func=cmd_project_scheduler)
 
-    g = sub.add_parser("gate", help="can this project's gates be trusted")
+    g = sub.add_parser("verify", help="can this project's verification hook be trusted")
     g.add_argument("-C", "--directory")
-    g.set_defaults(func=cmd_gate)
+    g.set_defaults(func=cmd_verify)
 
-    gr = sub.add_parser("gate-run", help="run the committed gate here and report")
+    gr = sub.add_parser("verify-run", help="run the committed verification hook here and report")
     gr.add_argument("-C", "--directory")
     gr.add_argument("--event", default="session-idle")
-    gr.set_defaults(func=cmd_gate_run)
+    gr.set_defaults(func=cmd_verify_run)
 
     a = sub.add_parser(
         "ask",
@@ -1086,7 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="max seconds to wait for a reply (default: %(default)s)")
     a.set_defaults(func=cmd_ask)
 
-    dm = sub.add_parser("daemon", help="supervise tasks, gates and the server")
+    dm = sub.add_parser("daemon", help="supervise tasks, verification and the server")
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")
     dr = da.add_parser("run",
                        help="run the supervision loop (foreground; Ctrl-C stops)")

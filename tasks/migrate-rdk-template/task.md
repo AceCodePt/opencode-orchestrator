@@ -51,7 +51,7 @@ the TUI launch move into `orch`; only project knowledge moves into
 
 Dispatch a real task in `rdk-template` through `orch`, end to end: the entry flips
 and commits, the worktree appears, the DB and env are correct, the TUI comes up on
-a reachable port, and the child's `session-idle` gate runs the project's checks.
+a reachable port, and the child's `session-idle` verification hook runs the project's checks.
 Then confirm no `task-runner.sh` exists anywhere outside `orch`.
 
 ## Prohibited Patterns

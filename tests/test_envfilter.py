@@ -74,23 +74,23 @@ def test_machine_drop_is_additive() -> None:
     print("ok: the machine owner can drop more variables")
 
 
-def test_repo_drops_and_gate_env_full() -> None:
+def test_repo_drops_and_verify_env_full() -> None:
     tmp = tempfile.TemporaryDirectory()
     try:
         root = Path(tmp.name) / "wt"
         (root / ".orchestration").mkdir(parents=True)
         (root / ".orchestration" / "config.json").write_text(json.dumps({
             "agentEnv": {"drop": ["REPO_SECRET"]},
-            "gate": {"env": "full"},
+            "verify": {"env": "full"},
         }))
         assert envfilter.repo_drops(root) == {"REPO_SECRET"}
-        assert envfilter.gate_env_full(root) is True
+        assert envfilter.verify_env_full(root) is True
         env = envfilter.filtered_env(_env(REPO_SECRET="v"),
                                      repo_drop=envfilter.repo_drops(root))
         assert "REPO_SECRET" not in env
     finally:
         tmp.cleanup()
-    print("ok: a repo can only restrict further, and a gate can opt into full env")
+    print("ok: a repo can only restrict further, and a verification hook can opt into full env")
 
 
 def test_agent_git_identity_is_injected() -> None:

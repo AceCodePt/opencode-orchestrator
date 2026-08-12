@@ -6,11 +6,14 @@ import subprocess
 import threading
 from pathlib import Path
 
-from . import envfilter, gate, harness, hooks, opencode_events, server, state
+from . import envfilter, harness, hooks, opencode_events, server, state, verify
 
 RECONNECT_S = 2.0
 
-GATE_EVENT = "session-idle"
+# The acceptance hook: the project's committed hooks/session-idle the daemon
+# runs on settle. It is never fired from the event stream - it has acceptance
+# semantics (commits on pass), not advisory ones.
+ACCEPTANCE_EVENT = "session-idle"
 
 
 def hook_name(event_type: str) -> str:
@@ -73,18 +76,18 @@ def fire_project(common: Path, base: str, name: str, ev: dict,
                  worktree: Path) -> list[str]:
     """Run the committed hooks/<name> for an opencode event, detached and
     fail-open, with the event JSON on stdin. Only the committed copy on the
-    base branch runs; a working-tree edit is ignored, and the gate's own event
-    (session-idle) is never fired from the stream."""
-    if name == GATE_EVENT:
+    base branch runs; a working-tree edit is ignored, and the acceptance hook's
+    own event (session-idle) is never fired from the stream."""
+    if name == ACCEPTANCE_EVENT:
         return []
     base_wt = state._base_worktree(common, base)
     if base_wt is None:
         return []
-    rel = f"{gate.HOOKS_REL}/{name}"
-    committed = gate.show(base_wt, base, rel)
+    rel = f"{verify.HOOKS_REL}/{name}"
+    committed = verify.show(base_wt, base, rel)
     if committed is None or not committed.strip():
         return []
-    if envfilter.gate_env_full(base_wt):
+    if envfilter.verify_env_full(base_wt):
         base_env = dict(os.environ)
     else:
         base_env = envfilter.filtered_env(
