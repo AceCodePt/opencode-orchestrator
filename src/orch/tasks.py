@@ -8,7 +8,8 @@ from pathlib import Path
 from . import dispatch, envfilter, state, verify
 
 TEMPLATE = """---
-hitl: {hitl}
+wait_human_start: {wait_human_start}
+wait_human_merge: {wait_human_merge}
 dependencies: {dependencies}
 ---
 
@@ -61,10 +62,15 @@ def task_rel(name: str) -> str:
     return f"tasks/{name}/task.md"
 
 
-def template(title: str, hitl: bool = True, dependencies: list[str] | None = None) -> str:
+def template(title: str, wait_human_start: bool = False,
+             wait_human_merge: bool = False,
+             dependencies: list[str] | None = None) -> str:
     deps = dependencies or []
-    return TEMPLATE.format(title=title, hitl="true" if hitl else "false",
-                           dependencies="[" + ", ".join(deps) + "]")
+    return TEMPLATE.format(
+        title=title,
+        wait_human_start="true" if wait_human_start else "false",
+        wait_human_merge="true" if wait_human_merge else "false",
+        dependencies="[" + ", ".join(deps) + "]")
 
 
 def off_base_note(root: Path, base: str) -> str | None:
@@ -87,7 +93,6 @@ def add_many(
     start: Path,
     names: list[str],
     title: str | None = None,
-    auto: bool = False,
     depends: list[str] | None = None,
 ) -> AddResult:
     result = AddResult()
@@ -131,7 +136,7 @@ def add_many(
             result.skipped.append(f"{rel} (already exists)")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(template(shown, hitl=not auto, dependencies=deps))
+        path.write_text(template(shown, dependencies=deps))
         result.created.append(rel)
 
     if result.created:
@@ -150,15 +155,19 @@ def add_many(
     return result
 
 
-def draft_prompt(text: str, auto: bool) -> str:
-    hitl = "false" if auto else "true"
+def draft_prompt(text: str) -> str:
     prompt = (
         "You are converting free text into task specifications for an "
         "orchestrator that dispatches one agent per task into its own git "
-        "worktree. Write each spec to tasks/{{slug}}/task.md (create files and "
+        "worktree. Write each spec to tasks/{slug}/task.md (create files and "
         "directories as needed). Every spec must follow exactly this template, "
-        "with hitl: {hitl} and a dependencies: [] list in the front matter:\n\n"
-        "---\nhitl: {hitl}\ndependencies: []\n---\n\n"
+        "with wait_human_start: false, wait_human_merge: false, and a "
+        "dependencies: [] list in the front matter:\n\n"
+        "---\n"
+        "wait_human_start: false\n"
+        "wait_human_merge: false\n"
+        "dependencies: []\n"
+        "---\n\n"
         "# Task: <title>\n\n"
         "## Metadata\n\n"
         "- **Complexity:** <Low|Medium|High>\n"
@@ -179,8 +188,8 @@ def draft_prompt(text: str, auto: bool) -> str:
         "Requirements are the user stories (As an <actor>, I want <feature>, so "
         "that <benefit>), and it records Implementation Decisions and Out of "
         "Scope. Do not reference file paths or line numbers — they go stale. It "
-        "stays hitl: {hitl} and is never dispatched; it is the anchor the slices "
-        "point at.\n"
+        "sets wait_human_start: true and is never auto-dispatched; it is the "
+        "anchor the slices point at.\n"
         "- **Slice tasks** at tasks/<feature>-<slice>/task.md — vertical tracer "
         "bullets, one per independent deliverable. Each cuts a narrow but "
         "COMPLETE path through every layer (schema, API, UI, tests), is sized to "
@@ -207,7 +216,7 @@ def draft_prompt(text: str, auto: bool) -> str:
         "tasks/, do not commit. When done, report the list of files you created "
         "and the dependency edges between them.\n\n"
         "Description:\n"
-    ).format(hitl=hitl)
+    )
     return prompt + text
 
 
@@ -219,8 +228,7 @@ def _task_files(root: Path) -> set[str]:
             if (d / "task.md").is_file()}
 
 
-def draft_specs(start: Path, text: str, auto: bool = False,
-                timeout: float = 600.0) -> AddResult:
+def draft_specs(start: Path, text: str, timeout: float = 600.0) -> AddResult:
     """Have a one-shot agent turn free text into one or more task specs. The
     human reviews and commits the result; this never claims or dispatches."""
     from . import server
@@ -245,7 +253,7 @@ def draft_specs(start: Path, text: str, auto: bool = False,
     before = _task_files(root)
     cmd = ["opencode", "run", "--attach", srv.url, "--dir", str(root),
            "--format", "json", "--title", "spec-draft",
-           draft_prompt(text, auto)]
+           draft_prompt(text)]
     try:
         p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
                            timeout=timeout,

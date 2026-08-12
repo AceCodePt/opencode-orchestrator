@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Measure Concurrent Check Runs and Decide the Semaphore Limit

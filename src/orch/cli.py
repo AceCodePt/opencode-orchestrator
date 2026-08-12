@@ -126,7 +126,6 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         branch=args.branch,
         worktree=Path(args.worktree) if args.worktree else None,
         dry_run=args.dry_run,
-        allow_unverified=args.allow_unverified,
     )
     for s in r.steps:
         print(f"  {s}")
@@ -165,8 +164,10 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         state_info = ""
         if t.session != state.SESSION_NONE:
             state_info = f" session={t.session}"
-        if t.hitl:
-            state_info += " hitl"
+        if t.wait_human_start:
+            state_info += " start-wait"
+        if t.wait_human_merge:
+            state_info += " merge-wait"
         if t.dependencies:
             state_info += " deps=[" + ",".join(t.dependencies) + "]"
         if t.dirty:
@@ -191,15 +192,7 @@ def _q(path: str | Path) -> str:
     return shlex.quote(str(path))
 
 
-def _has_committed_verification(base_wt: Path | None, base: str) -> bool:
-    if base_wt is None:
-        return False
-    rel = f"{verify_mod.HOOKS_REL}/session-idle"
-    return verify_mod.show(base_wt, base, rel) is not None
-
-
-def _classify_wait(t: state.TaskState, base_wt: Path | None,
-                   no_verification: bool) -> tuple[str | None, str | None, str]:
+def _classify_wait(t: state.TaskState, base_wt: Path | None) -> tuple[str | None, str | None, str]:
     if t.session == state.SESSION_BLOCKED:
         b = t.blocked[0] if t.blocked else None
         if b is not None and b.kind == "question":
@@ -220,10 +213,9 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None,
     if t.dirty:
         return "needs-you", f"review the uncommitted changes in {_q(t.worktree)}", \
             "worktree is dirty"
-    if no_verification:
-        rel = str(base_wt / verify_mod.HOOKS_REL / "session-idle")
-        return "needs-you", f"edit and commit {_q(rel)}", \
-            "no committed verification hook - nothing will ever verify this work"
+    if t.diff and t.wait_human_merge:
+        return "needs-you", f"orch task merge -C {_q(base_wt)} {t.name}", \
+            "verified, awaiting your merge"
     if t.diff:
         return "looks-done", None, "unmerged (awaiting verify/merge)"
     return None, None, ""
@@ -252,11 +244,10 @@ def _task_list_global(args: argparse.Namespace) -> int:
         agent = "none"
         if info is not None and base_wt is not None:
             agent = (agent_mod.status(info, base_wt) or {}).get("state") or "none"
-        no_verification = not _has_committed_verification(base_wt, proj.base)
         for t in tasks:
             if t.archived or not t.claimed:
                 continue
-            sec, action, detail = _classify_wait(t, base_wt, no_verification)
+            sec, action, detail = _classify_wait(t, base_wt)
             if sec is None:
                 continue
             if sec == "looks-done" and not daemon_active:
@@ -320,7 +311,8 @@ def _task_json(t: state.TaskState) -> dict:
         "session_ids": t.session_ids,
         "dispatch_alive": t.dispatch_alive,
         "dispatch_orchestrated": t.dispatch_orchestrated,
-        "hitl": t.hitl,
+        "wait_human_start": t.wait_human_start,
+        "wait_human_merge": t.wait_human_merge,
         "dependencies": t.dependencies,
         "base": t.base,
     }
@@ -397,7 +389,7 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto,
+    r = tasks_mod.add_many(start, args.name, title=args.title,
                            depends=args.depends)
     print(tasks_mod.render(r))
     return 0 if r.ok else 2
@@ -488,8 +480,7 @@ def cmd_task_draft(args: argparse.Namespace) -> int:
         print("no description given (pass text, or --file - for stdin)",
               file=sys.stderr)
         return 2
-    r = tasks_mod.draft_specs(start, text, auto=args.auto,
-                              timeout=args.timeout)
+    r = tasks_mod.draft_specs(start, text, timeout=args.timeout)
     print(tasks_mod.render(r))
     return 0 if r.ok else 1
 
@@ -502,8 +493,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 2
     findings = verify_mod.inspect(top)
     if not findings:
-        print("no verification hook configured - nothing verifies work in this project")
-        return 2
+        print("no verification hook committed - tasks are accepted without verification")
+        return 0
     worst = 0
     for f in findings:
         mark = {"ok": "  ", "diverged": "~ ", "uncommitted": "! ",
@@ -527,6 +518,8 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
     if v.detail:
         for line in v.detail.strip().splitlines()[-20:]:
             print(f"  {line}")
+    if v.outcome == verify_mod.NO_VERIFY:
+        return 0
     return 0 if v.justifies_done else 1
 
 
@@ -928,8 +921,6 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--worktree")
     ts.add_argument("--dry-run", action="store_true",
                     help="show the plan and the exact dispatch command")
-    ts.add_argument("--allow-unverified", action="store_true",
-                    help="dispatch even though nothing will verify the result")
     ts.set_defaults(func=cmd_task_start)
 
     tl = tsub.add_parser("list", help="tasks recorded for this project")
@@ -960,9 +951,6 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("-C", "--directory",
                     help="write into this worktree instead of the current one")
     ta.add_argument("--title", help="entry title (default: derived from the name)")
-    ta.add_argument("--auto", action="store_true",
-                    help="let the scheduler pick this task; by default a task "
-                         "needs a human to start it")
     ta.add_argument("--depends", nargs="+", default=[],
                     help="task slugs this task blocks on (dependencies front "
                          "matter); the scheduler waits until they are archived")
@@ -993,8 +981,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="read the description from a file, or - for stdin")
     td.add_argument("-C", "--directory",
                     help="write into this worktree instead of the current one")
-    td.add_argument("--auto", action="store_true",
-                    help="mark every drafted spec hitl: false (scheduler-eligible)")
     td.add_argument("--timeout", type=float, default=600.0,
                     help="max seconds for the drafting agent (default: %(default)s)")
     td.set_defaults(func=cmd_task_draft)

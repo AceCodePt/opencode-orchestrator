@@ -79,7 +79,7 @@ Without it, nothing is ever settled or verified, so nothing reaches done — and
 everything else still looks healthy, which is why `doctor` fails when it is missing.
 
 **The daemon only *acts* on trusted projects.** Discovery is wide, but authority is
-trust-gated: a project the machine owner has not approved (`orch project trust`) is never
+trust-bound: a project the machine owner has not approved (`orch project trust`) is never
 verified, merged, scheduled or resolved — it only raises an `alert` saying so. The marker
 lives in `~/.local/state/orch/trusted.json`, outside the repo, so a project cannot
 approve itself. A repo you merely clone can never auto-run its verification hook. `orch init`,
@@ -156,8 +156,8 @@ project under `$HOME`/`/mnt`
 *from* the base branch, so anything uncommitted, or committed on some other branch, is
 invisible to the agent — and the daemon judges by the *committed* hook, never the
 working-tree copy. An uncommitted task file gives the agent no instructions; an
-uncommitted hook counts as no verification. `orch task start` refuses both, and `orch verify`
-explains which one is wrong. The task-lifecycle hooks (`pre-task-create` and friends)
+uncommitted hook counts as no verification (absence of a hook is the implicit
+unverified state — tasks run without checks). The task-lifecycle hooks (`pre-task-create` and friends)
 follow the same rule: only the copy committed on the base branch runs, so commit them
 before dispatching.
 
@@ -181,11 +181,11 @@ fails on a dependency slug that is neither declared nor archived (a typo would b
 task forever).
 
 The model is opencode's choice, not orch's — the scheduler just spawns the agent.
-Without it, dispatching stays a human act (`orch task start`). The scheduler never
-dispatches unverified work, and it never dispatches a task you didn't opt in: a task
-needs a human by default (`hitl: true` in the task.md front matter); only `hitl: false`
-— `orch task add --auto` or `orch task draft --auto` — lets the machine pick it.
-The scheduler also never dispatches in an untrusted project.
+Without it, dispatching stays a human act (`orch task start`). A task opts the human
+back into the loop with `wait_human_start: true` in its task.md front matter; the
+scheduler only leaves those alone and never dispatches in an untrusted project. A
+`wait_human_merge: true` task is verified and committed but not merged — the human
+approves it with `orch task merge`.
 
 ## Global hooks (machine-level notifications)
 
@@ -234,7 +234,7 @@ This tool's job is to run LLM agents that execute code on your machine, unattend
 the honest question is what the *controls* are — the threat model is still a lazy agent,
 not a hostile one, but the blast radius is bounded:
 
-- **Authority is trust-gated.** The daemon only gates/merges/dispatches/resolves in
+- **Authority is trust-bound.** The daemon only verifies/merges/dispatches/resolves in
   projects you approved (`orch project trust`); anything else only alerts. Discovery
   (`$HOME`, `/mnt`, `ORCH_ROOTS`) stays wide so you can see everything, but nothing
   auto-runs on a repo you merely cloned. `doctor` flags an untrusted project and warns
@@ -271,12 +271,12 @@ Working and exercised against live agents: `init`, `verify`, `doctor`, `server`,
 and the daemon — including the full loop of settle → verify → commit-on-pass → merge →
 archive, the failure loop of verify-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
-of `todo` tasks, opt-in per project and trust-gated). A slow agent that spends minutes
+of `todo` tasks, opt-in per project and trust-bound). A slow agent that spends minutes
 inside a tool is
 held, not torn down: the daemon treats a live detached `opencode run` process in the
 worktree as the agent working and only settles once it exits.
 
-The security controls are covered by unit tests: the **trust gate** (untrusted projects
+The security controls are covered by unit tests: the **trust boundary** (untrusted projects
 only alert), the **env filter** (agents and verification hooks run without the owner's secrets), and
 the **`.orchestration` deny** installed by `orch install`.
 
@@ -285,8 +285,9 @@ failing agents up to `retryCap`, merges verified work, archives done work, resta
 dead or unresponsive shared server, flags blocked permissions, and consumes the shared
 server's `/event` SSE stream to fire per-event hooks. A **merge conflict**
 is left in progress and the task reads `needs-review (merge-conflict)`. Who resolves it
-follows the `hitl` flag: a `hitl: true` task needs a human in the base worktree
-(`git add`/`git commit`); a `hitl: false` task gets an agent dispatched into the base
+follows `wait_human_start`: a task a human had to start needs the human to resolve it
+in the base worktree (`git add`/`git commit`); a machine-started task gets an agent
+dispatched into the base
 worktree to resolve and commit on its own (up to `retryCap` tries, then it escalates to
 a human). Either way, once the merge lands the daemon archives the task. The policy is
 a pure function of a snapshot, so those cases are tested rather than hoped for.
@@ -308,7 +309,7 @@ The per-event hooks are live: the daemon's SSE consumer reads the server's
 When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
 `needs-review` tasks from the scan, `orch task list --global` gathers that from
 every supervised project into one waiting-on-you report (blocked, merge conflicts,
-missing/dirty worktrees, projects with no committed verification hook, and unmerged work),
+missing/dirty worktrees, awaiting-merge tasks, and unmerged work),
 `orch task answer` lets you reply to a blocked
 permission or question directly, and the daemon journal logs every `alert:` and
 `needs-review`. Notify add-ons integrate **with** `orch`, not the other way around:

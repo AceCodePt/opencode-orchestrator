@@ -262,8 +262,8 @@ def run(
     if not r.present:
         return Verdict(
             event, NO_VERIFY,
-            f"no {rel} committed on {base}. This is not a pass: nothing objected "
-            f"because nothing looked.",
+            f"no {rel} committed on {base}. No verification hook means the work "
+            f"is accepted without verification.",
         )
     if r.timed_out:
         return Verdict(

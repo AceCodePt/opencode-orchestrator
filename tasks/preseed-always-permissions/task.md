@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Pre-Seed `always` Permission Rules So Unattended Agents Do Not Stall

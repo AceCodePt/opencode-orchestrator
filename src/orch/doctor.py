@@ -89,15 +89,6 @@ def check_project(cwd: Path) -> list[Check]:
     hooks_dir = orch_dir / "hooks"
     present = {p.name for p in hooks_dir.iterdir()} if hooks_dir.is_dir() else set()
 
-    if "session-idle" not in present:
-        out.append(
-            Check(FAIL, "no session-idle hook",
-                  "absence of a verification hook is not a pass. Without it every "
-                  "task reports no-verify-configured, and treating that as success "
-                  "would manufacture confidence in unchecked work. Copy "
-                  "hooks/session-idle.sample to hooks/session-idle, make it "
-                  "executable, and commit it")
-        )
     for name in AGENT_HOOKS + TASK_HOOKS:
         p = hooks_dir / name
         if name not in present:
@@ -237,10 +228,10 @@ def check_verification(cwd: Path) -> list[Check]:
     findings = verify.inspect(top)
     if not findings:
         out.append(Check(
-            FAIL, "no verification hook configured",
-            "nothing verifies work in this project, so every task would finish as "
-            "`no-verify-configured` - which reads like a note and means nothing was "
-            "checked",
+            OK, "no verification hook",
+            "tasks are accepted without verification. To verify, copy "
+            "hooks/session-idle.sample to hooks/session-idle, make it executable, "
+            "and commit it on the base branch",
         ))
         return out
     for f in findings:
@@ -259,7 +250,7 @@ def check_supervised_roots() -> list[Check]:
     if "/" in roots:
         return [Check(
             WARN, "ORCH_ROOTS includes /",
-            "discovery spans the whole filesystem. Authority is trust-gated, "
+            "discovery spans the whole filesystem. Authority is trust-bound, "
             "but supervision should still be narrowed",
         )]
     return [Check(OK, "supervised roots", ", ".join(roots))]

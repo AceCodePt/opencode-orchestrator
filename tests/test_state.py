@@ -76,23 +76,28 @@ def test_scan_lists_declared_tasks_as_todo() -> None:
     print("ok: declared tasks scan as todo")
 
 
-def test_hitl_defaults_to_true_and_comes_from_the_committed_front_matter() -> None:
+def test_wait_flags_default_false_and_come_from_the_committed_front_matter() -> None:
     root, tmp = _repo()
     (root / "tasks" / "manual").mkdir(parents=True)
-    (root / "tasks" / "manual" / "task.md").write_text("# Manual\n\nDo it.\n")
+    (root / "tasks" / "manual" / "task.md").write_text(
+        "---\nwait_human_start: true\n---\n\n# Manual\n\nDo it.\n")
     (root / "tasks" / "auto").mkdir(parents=True)
-    (root / "tasks" / "auto" / "task.md").write_text(
-        "---\nhitl: false\n---\n\n# Auto\n\nDo it.\n")
+    (root / "tasks" / "auto" / "task.md").write_text("# Auto\n\nDo it.\n")
+    (root / "tasks" / "waiter").mkdir(parents=True)
+    (root / "tasks" / "waiter" / "task.md").write_text(
+        "---\nwait_human_merge: true\n---\n\n# Waiter\n\nDo it.\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "tasks")
     by = {t.name: t for t in _proj(root).scan()}
-    assert by["manual"].hitl, "no front matter means a human must pick it"
-    assert not by["auto"].hitl, "hitl: false opts the task into the scheduler"
-    (root / "tasks" / "auto" / "task.md").write_text("# Auto\n\nDo it.\n")
-    assert not {t.name: t for t in _proj(root).scan()}["auto"].hitl, \
+    assert by["manual"].wait_human_start, "wait_human_start: true opts the task out of the scheduler"
+    assert not by["auto"].wait_human_start, "no front matter means the machine may pick it"
+    assert by["waiter"].wait_human_merge, "wait_human_merge: true awaits a human merge"
+    assert not by["auto"].wait_human_merge, "wait_human_merge defaults false"
+    (root / "tasks" / "waiter" / "task.md").write_text("# Waiter\n\nDo it.\n")
+    assert {t.name: t for t in _proj(root).scan()}["waiter"].wait_human_merge, \
         "an uncommitted working-tree edit must not count - the committed copy rules"
     tmp.cleanup()
-    print("ok: hitl defaults to true and is read from the committed task.md "
+    print("ok: wait flags default false and are read from the committed task.md "
           "front matter, never the working tree")
 
 
@@ -102,10 +107,10 @@ def test_dependencies_default_to_empty_and_parse_from_the_committed_front_matter
     (root / "tasks" / "plain" / "task.md").write_text("# Plain\n\nDo it.\n")
     (root / "tasks" / "linked").mkdir(parents=True)
     (root / "tasks" / "linked" / "task.md").write_text(
-        "---\nhitl: true\ndependencies: [spec, auth-migrate]\n---\n\n# Linked\n\nDo it.\n")
+        "---\nwait_human_start: true\ndependencies: [spec, auth-migrate]\n---\n\n# Linked\n\nDo it.\n")
     (root / "tasks" / "csv").mkdir(parents=True)
     (root / "tasks" / "csv" / "task.md").write_text(
-        "---\nhitl: true\ndependencies: spec, auth-migrate\n---\n\n# Csv\n\nDo it.\n")
+        "---\nwait_human_start: true\ndependencies: spec, auth-migrate\n---\n\n# Csv\n\nDo it.\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "tasks")
     by = {t.name: t for t in _proj(root).scan()}
@@ -113,7 +118,7 @@ def test_dependencies_default_to_empty_and_parse_from_the_committed_front_matter
     assert by["linked"].dependencies == ["spec", "auth-migrate"]
     assert by["csv"].dependencies == ["spec", "auth-migrate"]
     (root / "tasks" / "linked" / "task.md").write_text(
-        "---\nhitl: true\ndependencies: [tampered]\n---\n\n# Linked\n\nDo it.\n")
+        "---\nwait_human_start: true\ndependencies: [tampered]\n---\n\n# Linked\n\nDo it.\n")
     assert {t.name: t for t in _proj(root).scan()}["linked"].dependencies == \
         ["spec", "auth-migrate"], \
         "an uncommitted working-tree edit must not count - the committed copy rules"

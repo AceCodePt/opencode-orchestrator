@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Key Approval Notifications on Request ID and Survive Bursts

@@ -139,16 +139,15 @@ def test_dry_run_touches_nothing() -> None:
     print("ok: dry run creates nothing")
 
 
-def test_unverified_dispatch_is_refused() -> None:
+def test_dispatch_proceeds_without_a_verification_hook() -> None:
     root, tmp = _repo()
     _task_file(root, "probe")
     _commit(root)
-    r = dispatch.start(root, "probe", dry_run=True, allow_unverified=False)
-    # the unverified refusal happens before the dry-run short-circuit? no: dry-run
-    # returns before the verification check, so this is a dry-run only.
-    assert r.ok
+    r = dispatch.start(root, "probe", dry_run=True)
+    assert r.ok, r.problems
+    assert any("accepted without verification" in s for s in r.steps), r.steps
     tmp.cleanup()
-    print("ok: dry-run skips the verification refusal (real runs refuse unverified)")
+    print("ok: dispatch proceeds without a verification hook (absence is implicit)")
 
 
 def test_hook_absence_is_fine_but_uncommitted_hooks_do_not_run() -> None:

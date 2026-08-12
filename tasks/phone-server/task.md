@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Phone-Facing Server — Read Status and Answer Approvals Over the Tailnet

@@ -17,8 +17,9 @@ from this one directory under one env-var contract (`TASK_NAME`, `BRANCH_NAME`,
 
 `session-idle` is the verification hook: exit 0 passes **and commits the work**; non-zero fails
 and the output is fed back to the agent by the daemon, which retries up to
-`verify.retryCap` before marking the task needs-review. A **missing** hook is
-`no-verify-configured` - which is not a pass.
+`verify.retryCap` before marking the task needs-review. A **missing** hook means
+the work is accepted without verification - the hook is the opt-in, and its
+absence is the implicit unverified state.
 
 The verification hook that runs is the version **committed on the base branch**, never the
 working-tree copy, so edit the hook and commit it before dispatching. To configure
@@ -28,7 +29,8 @@ and put the project's real checks above the commit block (e.g.
 `ruff check . && pytest -q`); the sample exits non-zero on purpose until then.
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
-are fine; a missing `session-idle` is not, because then nothing verifies the work.
+are fine, and so is a missing `session-idle`: it means the project's tasks are
+accepted without verification.
 
 Like the verification hook, the task-lifecycle hooks run the version **committed on the base
 branch** — a working-tree edit, or a hook committed only on a task branch, never

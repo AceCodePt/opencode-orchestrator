@@ -319,7 +319,6 @@ def start(
     branch: str | None = None,
     worktree: Path | None = None,
     dry_run: bool = False,
-    allow_unverified: bool = False,
 ) -> Result:
     result = Result(ok=True)
 
@@ -330,6 +329,13 @@ def start(
 
     result.worktree = p.worktree
     result.step(f"task {p.task} -> {p.worktree} (branch {p.branch}, base {p.base})")
+
+    findings = verify.inspect(p.dispatcher, p.base)
+    for f in findings:
+        result.step(f"verify {f.name}: {f.state} - {f.detail}")
+    if not findings:
+        result.step("no verification hook committed - this task's work will be "
+                    "accepted without verification")
 
     if not state.is_trusted(Path(p.project)):
         result.step("note: this project is not trusted by the daemon, so it "
@@ -370,26 +376,6 @@ def start(
     result.step(f"post-create: {msg}")
     if not ok:
         return result.fail(msg)
-
-    findings = verify.inspect(p.worktree, p.base)
-    for f in findings:
-        result.step(f"verify {f.name}: {f.state} - {f.detail}")
-
-    reason = None
-    if not findings:
-        reason = (
-            f"no verification hook is committed on {p.base}, so nothing would "
-            f"verify this task. Commit {verify.HOOKS_REL}/session-idle first."
-        )
-    elif verify.blocking(findings):
-        reason = "this task would run unverified:\n" + "\n".join(
-            f"      - {f.name} ({f.state}): {f.detail}"
-            for f in verify.blocking(findings)
-        )
-    if reason and not allow_unverified:
-        return result.fail(reason + " Pass --allow-unverified to dispatch anyway.")
-    if reason:
-        result.step(f"WARNING, dispatching unverified on request: {reason}")
 
     try:
         srv = server.start()

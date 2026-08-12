@@ -93,11 +93,16 @@ Per claimed task, each cycle:
 3. **Settled** (session idle or gone) past a settle budget (~30s):
    - worktree missing → `needs-review`
    - clean + no diff → `remove` (no-op)
-   - otherwise run the committed verification hook:
-     - **pass** → the hook committed → diff → `merge`; no diff → `remove`
-     - **fail** → inject the failure via `prompt_async`; retry++; `< cap` wait for the
-       agent to work again, `>= cap` → `needs-review` (`retries-exhausted`)
-     - **no committed verification hook** → `needs-review` — never a pass
+   - otherwise: the committed verification hook decides, or its absence is the
+     implicit unverified state:
+     - **hook present, pass** → the hook committed → diff → `merge`; no diff → `remove`
+     - **hook present, fail** → inject the failure via `prompt_async`; retry++;
+       `< cap` wait for the agent to work again, `>= cap` → `needs-review`
+       (`retries-exhausted`)
+     - **no committed verification hook** → the daemon commits the work itself and
+       accepts it without verification — absence is implicit, never a failure
+     - **`wait_human_merge`** → the accepted work is left ready for `orch task merge`,
+       not merged by the daemon
 4. **Fingerprint unchanged** since the last failure for longer than a stall budget →
    `needs-review` (`stalled`) — the agent was told what to fix and changed nothing.
 
@@ -295,7 +300,7 @@ torn down, and its work is never a task.
    dispatcher's worktree.
 4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
 5. CLI runs `hooks/post-task-create` (the committed base copy) from the new worktree.
-6. CLI refuses unverified work (no committed verification hook) unless `--allow-unverified`.
+6. CLI notes whether a committed verification hook exists; absence is fine — verification is opt-in by committing the hook.
 7. CLI dispatches into the shared server, **detached** (its own session, stdin from
    `/dev/null`) — that detached start is what marks the process as an orchestrated
    agent, so the daemon can find it by "matching the worktree, no controlling tty":
@@ -330,7 +335,7 @@ against `maxConcurrent`) with the next unclaimed declared task whose **dependenc
 satisfied**, in name order. A task whose `task.md` is uncommitted on base, or a project
 with no base worktree to dispatch from, is skipped. Failed dispatches back off (60s) and
 the daemon's journal records why — `dispatch_error` is in-memory only. The scheduler
-never dispatches unverified work — `--allow-unverified` is a human flag only.
+never dispatches a task whose front matter says `wait_human_start: true`.
 
 **Ordering is the `dependencies:` front matter.** Each `tasks/<name>/task.md` may
 declare the tasks that block it, as slugs in the gray-matter block:
@@ -339,7 +344,7 @@ dependency is **archived** (or was never declared — a slug that never existed 
 block); an open declared task always holds its dependents, even one reset back to
 `todo`. The frontier — everything dispatchable right now — is the all-dependencies-archived
 set, so the question "what can I grab?" is derived from the repo, never stored. A spec
-task (`hitl: true`, the anchor for a feature) is never auto-dispatched and is never
+task (`wait_human_start: true`, the anchor for a feature) is never auto-dispatched and is never
 "done"; it closes by convention when its slices archive. `orch doctor` fails on a
 dependency slug that is neither declared nor archived — a typo would block the task
 forever.
@@ -352,13 +357,13 @@ reaches the budget (`0` disables scheduling machine-wide; `off`/absent means
 per-project caps only). The budget bounds auto-dispatch only — a human
 `orch task start` is not refused.
 
-**You pick which tasks run; the machine does the work.** A task needs a human by
-default — `hitl: true` is the default in the front matter (the gray-matter block at
-the top of `tasks/<name>/task.md`) and the scheduler skips it until a human starts it
-(`orch task start`). To let the machine drain a task unattended, opt it in with
-`hitl: false` (`orch task add --auto`). The flag is read from the **committed** copy
-on base — never the working tree — so neither an agent nor an uncommitted edit can
-auto-grant a task.
+**The machine runs and merges by default; the human opts in per task.** Two front-matter
+flags (the gray-matter block at the top of `tasks/<name>/task.md`) put the human back
+in the loop: `wait_human_start: true` keeps the scheduler from auto-dispatching a task
+until a human runs `orch task start`; `wait_human_merge: true` verifies and commits a
+task but leaves it ready — only `orch task merge <name>` folds it in. Both default to
+false, and both are read from the **committed** copy on base — never the working tree —
+so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
 
 ## Flow B — the verification loop
 
@@ -369,13 +374,14 @@ auto-grant a task.
    remove + archive.
 4. **non-zero** → the daemon injects the output into the session and waits for the
    agent to work again. This is bounded by `verify.retryCap`, tracked in memory.
-5. **Cap spent** → `needs-review` (`retries-exhausted`). No verification hook →
-   `needs-review` (`no-verify-configured`), because absence of checks must never be a pass.
+5. **Cap spent** → `needs-review` (`retries-exhausted`). **No verification hook** →
+   the daemon commits the work itself and accepts it without verification — the hook
+   is the opt-in; its absence is the implicit unverified state.
 6. **Merge conflicts** → the daemon leaves the merge **in progress** (so the state is
    derivable: the scan sees `MERGE_HEAD` and reads the task as
    `needs-review` (`merge-conflict`)) and never re-runs it. **Who resolves follows
-   `hitl`**: a human resolves a `hitl: true` task in the base worktree
-   (`git add`/`git commit`); a `hitl: false` task gets its own agent dispatched into
+   `wait_human_start`**: a human resolves a human-started task in the base worktree
+   (`git add`/`git commit`); a machine-started task gets its own agent dispatched into
    the base worktree (`opencode run --title <name>-merge-conflict`) to resolve and
    commit, bounded by the same `retryCap` before it escalates to a human. Once the
    merge lands either way, the branch is an ancestor of base and the daemon's no-op
@@ -434,10 +440,11 @@ built on the daemon's log + scan rather than on a verdict table.
    verification decide.
 5. The verification hook's entry point comes from the base branch; the working-tree
    copy is never the judge, and a diverging copy is flagged.
-6. Absence of a verification hook is not a pass. `no-verify-configured` →
-   `needs-review`.
-7. A dirty worktree is not done. Only a committed, diffing branch can merge, and only
-   a verification hook the daemon ran itself can produce one.
+6. Verification is opt-in: a project without a committed hook accepts its tasks
+   without verification. A present hook that fails never passes.
+7. A dirty worktree is not done. Only a committed, diffing branch can merge, and it is
+   produced either by a verification hook the daemon ran itself or, when no hook is
+   committed, by the daemon's own implicit acceptance commit.
 8. Kill by recorded pid (a specific process found by exact cmdline), never by pattern.
 9. Unavailability never produces a pass. Store gone (there is none), server down,
    verification hook timed out, worktree gone: each lands on `needs-review`.
@@ -450,7 +457,7 @@ built on the daemon's log + scan rather than on a verdict table.
 route to looking finished; it is not assumed to attack the machine. The blast radius is
 still bounded:
 
-- **Authority is trust-gated.** The daemon settles, verifies, merges, dispatches and
+- **Authority is trust-bound.** The daemon settles, verifies, merges, dispatches and
   resolves only in projects the machine owner approved (`orch project trust`);
   untrusted projects raise a single deduped `alert` and nothing else. Discovery stays
   wide so everything is visible, but a repo you merely clone can never auto-run its

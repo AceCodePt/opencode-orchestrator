@@ -102,7 +102,8 @@ in one source file has one place to check.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
-  surprising, and it never dispatches unverified work (that flag is human-only). The
+  surprising, and it never dispatches a task whose front matter says
+  `wait_human_start: true`. The
   policy is read from the **committed copy on the base branch** — the same authority
   rule as the verification hook — so an uncommitted edit (`orch project scheduler <n>` writes the
   working-tree copy for review) never takes effect silently, and the policy is never
@@ -111,14 +112,15 @@ in one source file has one place to check.
   `~/.config/orch/daemon.json`) caps the scheduler's total in-flight task agents
   across all projects; like the per-project cap it bounds auto-dispatch only, never
   a human's `orch task start`.
-- **A human picks each task; the machine does the work.** `hitl` is the default
-  state of a task's front matter, so the scheduler runs nothing a human did not
-  explicitly hand over (`hitl: false`, `orch task add --auto`). This inverts the
-  earlier default: rather than the machine draining everything that wasn't exempted,
-  you opt tasks *into* the machine one at a time. The flag is read from the committed
-  copy on base — the same authority rule as the verification hook — so neither an
-  agent nor an
-  uncommitted edit can grant a task auto-dispatch.
+- **The machine runs and merges by default; the human opts in per task.** Two
+  front-matter flags, both default false: `wait_human_start: true` keeps the
+  scheduler from auto-dispatching a task until a human runs `orch task start`;
+  `wait_human_merge: true` verifies and commits a task but leaves it ready for
+  `orch task merge <name>` instead of auto-merging. This decomposes the earlier
+  `hitl` flag (which meant "a human starts it" and also "a human resolves its
+  conflicts") into one flag per human checkpoint. Both flags are read from the
+  committed copy on base — the same authority rule as the verification hook — so
+  neither an agent nor an uncommitted edit can grant or revoke them.
 - **The phone notify is the consumer's job, not orch's.** The daemon's `alert`
   action only logs that a human is needed (deduped by request id); `orch task list`
   renders blocked sessions and `needs-review` from the scan. orch has zero phone
@@ -151,10 +153,7 @@ in one source file has one place to check.
   already existing — checked even in dry-run, so a dry-run cannot mislead.
 - **Order is the design.** Refuse an existing claim → `pre-task-create` from the
   dispatcher's worktree → create the worktree → `post-task-create` from the new one →
-  verify the verification hook is committed → only then dispatch.
-- **No verification hook is a refusal, not a warning.** Absence of verification is
-  not a pass; a
-  dispatcher that proceeds would break the invariant.
+  note whether a verification hook is committed → dispatch.
 - **Dispatch is detached** (`start_new_session`, stdin from `/dev/null`): it must
   survive the shell that started it and must not die from a Ctrl-C meant for the CLI —
   and the detachment doubles as the orchestration marker.
@@ -174,8 +173,12 @@ in one source file has one place to check.
 - **The staged hook copy lives outside the worktree**, so it is neither
   fingerprinted
   nor visible to `git status`.
-- **NO_VERIFY is deliberately not a pass and not an error.** Absence of checks must
-  never manufacture confidence.
+- **NO_VERIFY is the implicit unverified state, not a failure.** Verification is
+  opt-in per project: committing the `session-idle` hook turns it on; its absence
+  means the daemon accepts the work without verification. There is deliberately no
+  switch to turn verification off — the presence or absence of the hook is the whole
+  statement. A present hook that fails still never passes; only a present-and-passing
+  (or absent-and-implicitly-accepted) task reaches done.
 - **A hanging verification hook fails, never "unknown".** Inconclusive-therefore-fine is how a
   wedged suite starts passing work.
 - **`DIVERGED` does not disqualify.** The committed copy is what ran, so its verdict
@@ -235,8 +238,9 @@ in one source file has one place to check.
 - **The merge is `--no-ff` and a conflict is left in progress, never silently retried.**
   On conflict the daemon does not abort: `MERGE_HEAD` stays, the scan derives the task
   as `needs-review (merge-conflict)`, and the daemon backs off instead of re-running
-  the merge every cycle. **Resolution follows `hitl`**: a human resolves a `hitl: true`
-  task in the base worktree; a `hitl: false` task gets an agent dispatched into the
+  the merge every cycle. **Resolution follows `wait_human_start`**: a human resolves
+  a human-started task in the base worktree; a machine-started task gets an agent
+  dispatched into the
   base worktree to resolve and commit, bounded by `retryCap` before it escalates to a
   human. Either way, once the merge lands the branch is merged into base and the
   no-op path archives the task. The resolution agent is detected by base-worktree path

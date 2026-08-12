@@ -135,7 +135,7 @@ def test_task_list_json_reports_dependencies() -> None:
 
     _FakeProject._instance = _FakeProject([
         state.TaskState(project="/tmp/lab/lab.git", name="slice-a", base="main",
-                        declared=True, hitl=False,
+                        declared=True, wait_human_start=False,
                         dependencies=["feature", "auth-migrate"]),
     ])
     orig_status = cli.server_mod.status
@@ -261,7 +261,6 @@ def test_daemon_budget_writes_the_machine_config() -> None:
 
 
 def _global_setup(*, server_up: bool = True, daemon_active: bool = True,
-                  hook: str | None = "#!/bin/sh\nexit 0",
                   agent: str = "idle", base_wt: Path | None = None) -> list:
     saved: list = []
 
@@ -283,7 +282,6 @@ def _global_setup(*, server_up: bool = True, daemon_active: bool = True,
         "installed": daemon_active,
         "ActiveState": "active" if daemon_active else "inactive"})
     _set("agent_mod.status", lambda _i, _b: {"state": agent})
-    _set("verify_mod.show", lambda _wt, _base, _rel: hook)
     _set("daemon_mod.project_label", lambda common: Path(common).parent.name)
     _GProject._base_wt = base_wt
     _GProject._tasks = []
@@ -298,11 +296,13 @@ def _global_teardown(saved: list) -> None:
 def _claimed(name: str = "task-a", *, worktree: str | None = None,
              session: str = state.SESSION_IDLE, dirty: bool = False,
              diff: bool = True, conflicted: bool = False,
-             blocked: list | None = None) -> state.TaskState:
+             blocked: list | None = None,
+             wait_human_merge: bool = False) -> state.TaskState:
     return state.TaskState(
         project="/tmp/lab/lab.git", name=name, base="main", claimed=True,
         branch=name, worktree=worktree, session=session, dirty=dirty,
-        diff=diff, conflicted=conflicted, blocked=blocked or [])
+        diff=diff, conflicted=conflicted, blocked=blocked or [],
+        wait_human_merge=wait_human_merge)
 
 
 def test_task_list_global_reports_blocked_and_exits_1() -> None:
@@ -363,10 +363,10 @@ def test_task_list_global_conflict_and_missing_worktree() -> None:
     print("ok: missing worktrees and merge conflicts are needs-you")
 
 
-def test_task_list_global_no_committed_hook_is_needs_you() -> None:
+def test_task_list_global_awaiting_merge_is_needs_you() -> None:
     with tempfile.TemporaryDirectory() as wt:
-        t = _claimed("task-a", worktree=wt)
-        saved = _global_setup(hook=None, base_wt=Path(wt))
+        t = _claimed("task-a", worktree=wt, wait_human_merge=True)
+        saved = _global_setup(base_wt=Path(wt))
         _GProject._tasks = [t]
         try:
             buf = io.StringIO()
@@ -374,10 +374,11 @@ def test_task_list_global_no_committed_hook_is_needs_you() -> None:
                 rc = cli.cmd_task_list(_gargs())
             out = buf.getvalue()
             assert rc == 1, rc
-            assert "no committed verification hook" in out
+            assert "task merge -C" in out, out
+            assert "awaiting your merge" in out, out
         finally:
             _global_teardown(saved)
-    print("ok: a project with no committed verification hook is needs-you")
+    print("ok: a wait_human_merge task is needs-you with a merge action")
 
 
 def test_task_list_global_looks_done_is_reported() -> None:

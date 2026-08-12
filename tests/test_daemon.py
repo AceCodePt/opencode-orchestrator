@@ -350,7 +350,7 @@ def test_untrusted_projects_only_alert() -> None:
 
 
 def test_untrusted_projects_are_not_scheduled() -> None:
-    t = _task(claimed=False, declared=True, hitl=False)
+    t = _task(claimed=False, declared=True, wait_human_start=False)
     snap = _snap(tasks=[t], trusted=set(),
                  policies={t.project: state.SchedulerPolicy(
                      enabled=True, max_concurrent=1, start=Path(WT))})
@@ -508,22 +508,86 @@ def test_apply_verify_failing_hook_retriggers_up_to_the_cap() -> None:
     print("ok: a failing verification hook retriggers up to the cap, then needs-review")
 
 
-def test_apply_verify_no_hook_is_reviewed() -> None:
+def test_apply_verify_no_hook_accepts_implicitly() -> None:
     root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
     # no committed verification hook: remove the committed hook and commit
     subprocess.run(["git", "-C", str(root), "rm", "-q",
                     ".orchestration/hooks/session-idle"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "no verify"],
                    check=True)
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "answer.txt").write_text("42")
+
     sup = daemon.Supervisor(dry_run=False)
     a = daemon.Action(daemon.VERIFY, "task-a", "settled",
-                      project=str(root), worktree=str(root), branch="task-a",
+                      project=str(root), worktree=str(wt), branch="task-a",
                       base="main", retry_cap=3, session_ids=[])
     log = "\n".join(sup.apply([a]))
-    assert "needs-review" in log
-    assert "no committed verification hook" in log
+    assert "without verification" in log, log
+    assert "merged" in log or "archived" in log, log
+    p = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "-q",
+                        "refs/heads/task-a"], capture_output=True)
+    assert p.returncode != 0, "the task branch must be merged and deleted"
+    assert not wt.exists(), "the worktree must be removed"
     tmp.cleanup()
-    print("ok: no committed verification hook lands on needs-review, never done")
+    print("ok: with no verification hook the daemon accepts the work implicitly and merges")
+
+
+def test_apply_verify_wait_human_merge_leaves_the_branch() -> None:
+    root, tmp = _verified_repo(
+        "#!/usr/bin/env bash\n"
+        "cd \"${WORKTREE_PATH:-.}\" || exit 1\n"
+        "if [ -n \"$(git status --porcelain)\" ]; then\n"
+        "  git add -A\n"
+        "  git -c user.name=orch -c user.email=orch@localhost commit -q -m g\n"
+        "fi\n"
+        "exit 0\n")
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "answer.txt").write_text("42")
+
+    sup = daemon.Supervisor(dry_run=False)
+    a = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                      project=str(root), worktree=str(wt), branch="task-a",
+                      base="main", retry_cap=3, session_ids=[],
+                      wait_human_merge=True)
+    log = "\n".join(sup.apply([a]))
+    assert "awaiting your merge" in log, log
+    assert "merged" not in log, log
+    p = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "-q",
+                        "refs/heads/task-a"], capture_output=True)
+    assert p.returncode == 0, "the branch must survive awaiting the human's merge"
+    assert wt.exists(), "the worktree must survive"
+    tmp.cleanup()
+    print("ok: wait_human_merge leaves the verified branch awaiting the human")
+
+
+def test_decide_skips_reverification_when_waiting_for_human_merge() -> None:
+    mem = daemon.LoopState()
+    t = _task(claimed=True, worktree=WT, branch="task-a", dirty=False, diff=True,
+              session=state.SESSION_IDLE, wait_human_merge=True)
+    mem.settled_at[(t.project, t.name)] = NOW
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1, tasks=[t],
+                               mem=mem))
+    assert daemon.VERIFY not in _kinds(acts), _kinds(acts)
+    print("ok: a clean+diff task waiting for a human merge is not re-verified")
 
 
 def test_unit_text_keeps_the_expected_shape() -> None:
@@ -614,19 +678,20 @@ def test_apply_dispatch_failure_sets_backoff() -> None:
     print("ok: a failed auto-dispatch backs off and records why")
 
 
-def test_scheduler_skips_hitl_tasks() -> None:
+def test_scheduler_skips_wait_human_start_tasks() -> None:
     mem = daemon.LoopState()
-    hitl = _task(claimed=False, branch=None, worktree=None, hitl=True)
+    manual = _task(claimed=False, branch=None, worktree=None, wait_human_start=True)
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
                                 start=Path("/tmp/lab"))
-    acts = daemon.decide(_snap(tasks=[hitl], mem=mem, policies={hitl.project: pol}))
+    acts = daemon.decide(_snap(tasks=[manual], mem=mem,
+                               policies={manual.project: pol}))
     assert daemon.DISPATCH not in _kinds(acts), \
-        "a task that needs a human is never auto-picked"
+        "a task that needs a human start is never auto-picked"
     auto = _task(name="task-auto", claimed=False, branch=None, worktree=None,
-                 hitl=False)
+                 wait_human_start=False)
     acts = daemon.decide(_snap(tasks=[auto], mem=mem, policies={auto.project: pol}))
     assert _kinds(acts) == [daemon.DISPATCH], _kinds(acts)
-    print("ok: the scheduler leaves hitl tasks for a human and picks the rest")
+    print("ok: the scheduler leaves wait_human_start tasks for a human and picks the rest")
 
 
 def test_scheduler_holds_a_task_until_its_dependencies_are_archived() -> None:
@@ -634,9 +699,9 @@ def test_scheduler_holds_a_task_until_its_dependencies_are_archived() -> None:
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=2,
                                 start=Path("/tmp/lab"))
     dep_open = _task(name="feature", claimed=False, branch=None, worktree=None,
-                     hitl=False)
+                     wait_human_start=False)
     slice_ = _task(name="feature-slice", claimed=False, branch=None, worktree=None,
-                   hitl=False, dependencies=["feature"])
+                   wait_human_start=False, dependencies=["feature"])
     acts = daemon.decide(_snap(tasks=[dep_open, slice_], mem=mem,
                                policies={dep_open.project: pol}))
     dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
@@ -658,7 +723,7 @@ def test_scheduler_treats_an_undeclared_dependency_as_satisfied() -> None:
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
                                 start=Path("/tmp/lab"))
     slice_ = _task(name="slice-a", claimed=False, branch=None, worktree=None,
-                   hitl=False, dependencies=["never-written"])
+                   wait_human_start=False, dependencies=["never-written"])
     acts = daemon.decide(_snap(tasks=[slice_], mem=mem, policies={slice_.project: pol}))
     assert _kinds(acts) == [daemon.DISPATCH], \
         "a slug that was never declared cannot block - only an open declared task does"
@@ -670,11 +735,11 @@ def test_global_budget_caps_dispatches_across_projects() -> None:
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,
                                 start=Path("/tmp/lab"))
     p1_todo = _task(project="/tmp/lab/p1.git", name="p1-a", claimed=False,
-                    branch=None, worktree=None, hitl=False)
+                    branch=None, worktree=None, wait_human_start=False)
     p2_todo = _task(project="/tmp/lab/p2.git", name="p2-a", claimed=False,
-                    branch=None, worktree=None, hitl=False)
+                    branch=None, worktree=None, wait_human_start=False)
     p2_todo2 = _task(project="/tmp/lab/p2.git", name="p2-b", claimed=False,
-                     branch=None, worktree=None, hitl=False)
+                     branch=None, worktree=None, wait_human_start=False)
     snap = _snap(tasks=[p1_todo, p2_todo, p2_todo2], mem=mem,
                  policies={p1_todo.project: pol, p2_todo.project: pol},
                  global_max=2)
@@ -691,7 +756,7 @@ def test_global_budget_counts_claimed_tasks() -> None:
     claimed = _task(project="/tmp/lab/p1.git", name="running", claimed=True,
                     branch="running", worktree=WT, session=state.SESSION_NONE)
     todo = _task(project="/tmp/lab/p2.git", name="p2-a", claimed=False,
-                 branch=None, worktree=None, hitl=False)
+                 branch=None, worktree=None, wait_human_start=False)
     snap = _snap(tasks=[claimed, todo], mem=mem,
                  policies={claimed.project: pol, todo.project: pol},
                  global_max=1)
@@ -705,17 +770,17 @@ def test_global_budget_zero_disables_the_scheduler() -> None:
     mem = daemon.LoopState()
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,
                                 start=Path("/tmp/lab"))
-    todo = _task(claimed=False, branch=None, worktree=None, hitl=False)
+    todo = _task(claimed=False, branch=None, worktree=None, wait_human_start=False)
     snap = _snap(tasks=[todo], mem=mem, policies={todo.project: pol},
                  global_max=0)
     assert daemon.DISPATCH not in _kinds(daemon.decide(snap))
     print("ok: a machine-wide budget of 0 means nothing is auto-dispatched")
 
 
-def test_hitl_conflicted_task_is_reviewed_not_reverified() -> None:
+def test_wait_human_start_conflicted_task_is_reviewed_not_reverified() -> None:
     mem = daemon.LoopState()
     t = _task(session=state.SESSION_IDLE, dirty=False, diff=True, conflicted=True,
-              hitl=True)
+              wait_human_start=True)
     snap = _snap(tasks=[t], mem=mem)
     daemon.decide(snap)
     acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
@@ -724,7 +789,7 @@ def test_hitl_conflicted_task_is_reviewed_not_reverified() -> None:
     assert "merge-conflict" in acts[0].reason, acts[0].reason
     assert daemon.VERIFY not in _kinds(acts), \
         "a conflicted task must not be re-verified or re-merged"
-    print("ok: a hitl conflicted task is routed to needs-review, never re-verified")
+    print("ok: a wait_human_start conflicted task is routed to needs-review, never re-verified")
 
 
 def _conflicted_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
@@ -744,7 +809,7 @@ def _conflicted_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
     (orch / "config.json").write_text('{"baseBranch": "main"}\n')
     d = root / "tasks" / "task-a"
     d.mkdir(parents=True)
-    (d / "task.md").write_text("---\nhitl: false\n---\n\n# Task A\n\nDo it.\n")
+    (d / "task.md").write_text("---\nwait_human_start: false\n---\n\n# Task A\n\nDo it.\n")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
 
@@ -769,7 +834,7 @@ def test_auto_conflicted_task_dispatches_a_resolution_agent() -> None:
     proj = state.Project.from_dir(root)
     assert proj is not None
     t = next(x for x in proj.scan() if x.name == "task-a")
-    assert t.conflicted and not t.hitl, "the task must be auto and conflicted"
+    assert t.conflicted and not t.wait_human_start, "the task must be auto and conflicted"
     mem = daemon.LoopState()
     snap = _snap(now=NOW, tasks=[t], mem=mem)
     acts = daemon.decide(snap)

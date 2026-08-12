@@ -50,11 +50,11 @@ def test_title_is_derived_from_the_slug() -> None:
 
 def test_template_carries_every_required_section() -> None:
     body = tasks.template("Fix Auth")
-    assert body.startswith("---\nhitl: true\ndependencies: []\n---\n\n# Task: Fix Auth\n")
+    assert body.startswith("---\nwait_human_start: false\nwait_human_merge: false\ndependencies: []\n---\n\n# Task: Fix Auth\n")
     for section in ("## Metadata", "## Context", "## Requirements",
                     "## Verification", "## Prohibited Patterns"):
         assert section in body, section
-    print("ok: the template carries the hitl and dependencies front matter and every required section")
+    print("ok: the template carries the wait flags and dependencies front matter and every required section")
 
 
 def test_template_carries_dependencies() -> None:
@@ -70,7 +70,7 @@ def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
     r = tasks.add_many(root, ["fix-auth"])
     assert r.ok, r.notes
     body = (root / "tasks" / "fix-auth" / "task.md").read_text()
-    assert body.startswith("---\nhitl: true\ndependencies: []\n---\n\n# Task: Fix Auth")
+    assert body.startswith("---\nwait_human_start: false\nwait_human_merge: false\ndependencies: []\n---\n\n# Task: Fix Auth")
     assert not (root / "TASKS.md").exists(), \
         "no TASKS.md is written or generated any more"
     assert any("COMMIT" in n for n in r.notes), "must say the files need committing"
@@ -160,26 +160,29 @@ def test_the_current_worktree_is_the_default_target() -> None:
     print("ok: the current worktree is the default target")
 
 
-def test_template_carries_the_hitl_front_matter() -> None:
-    manual = tasks.template("Manual Pick")
-    assert manual.startswith("---\nhitl: true\n"), manual[:40]
-    auto = tasks.template("Auto Pick", hitl=False)
-    assert "hitl: false" in auto, auto[:60]
+def test_template_carries_the_wait_flags() -> None:
+    manual = tasks.template("Manual Pick", wait_human_start=True)
+    assert manual.startswith("---\nwait_human_start: true\n"), manual[:40]
+    waiting = tasks.template("Await Merge", wait_human_merge=True)
+    assert "wait_human_merge: true" in waiting, waiting[:60]
+    auto = tasks.template("Auto Pick")
+    assert "wait_human_start: false" in auto, auto[:60]
+    assert "wait_human_merge: false" in auto, auto[:60]
     main, feature, tmp = _project()
-    r = tasks.add_many(feature, ["urgent-fix"], auto=True)
+    r = tasks.add_many(feature, ["urgent-fix"])
     assert r.ok, r.notes
     body = (feature / "tasks" / "urgent-fix" / "task.md").read_text()
-    assert "hitl: false" in body, body[:60]
-    r = tasks.add_many(feature, ["manual-fix"])
-    body = (feature / "tasks" / "manual-fix" / "task.md").read_text()
-    assert "hitl: true" in body, body[:60]
+    assert "wait_human_start: false" in body, body[:60]
     tmp.cleanup()
-    print("ok: task.md carries the hitl flag in its front matter; auto opts in")
+    print("ok: task.md carries the wait flags in its front matter, both default false")
 
 
-def test_draft_prompt_sets_hitl_and_embeds_the_text() -> None:
-    p = tasks.draft_prompt("build a parser {with braces}", auto=True)
-    assert "hitl: false" in p
+def test_draft_prompt_teaches_the_wait_flags_and_embeds_the_text() -> None:
+    p = tasks.draft_prompt("build a parser {with braces}")
+    assert "wait_human_start: false" in p
+    assert "wait_human_merge: false" in p
+    assert "wait_human_start: true" in p, \
+        "the prompt must make the spec task wait for a human start"
     assert "dependencies: []" in p
     assert "tasks/{slug}/task.md" in p
     assert "The spec task" in p, "the prompt must teach spec tasks vs slice tasks"
@@ -188,9 +191,7 @@ def test_draft_prompt_sets_hitl_and_embeds_the_text() -> None:
     assert "expand-contract" in p, \
         "the prompt must teach the wide-refactor exception"
     assert p.endswith("build a parser {with braces}"), "raw text is preserved"
-    p2 = tasks.draft_prompt("x", auto=False)
-    assert "hitl: true" in p2
-    print("ok: the draft prompt carries the hitl flag, deps discipline, and the raw text verbatim")
+    print("ok: the draft prompt teaches the wait flags, deps discipline, and the raw text verbatim")
 
 
 def test_draft_specs_reports_the_files_the_agent_wrote() -> None:
@@ -204,7 +205,7 @@ def test_draft_specs_reports_the_files_the_agent_wrote() -> None:
         if cmd and cmd[0] == "opencode":
             spec = root / "tasks" / "parsing" / "task.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
-            spec.write_text("---\nhitl: true\n---\n# Task: Parsing\n")
+            spec.write_text("---\nwait_human_start: true\n---\n# Task: Parsing\n")
             return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return orig_run(cmd, cwd=cwd, capture_output=capture_output,
                         text=text, timeout=timeout, **kwargs)

@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Migrate `rdk-template` to `.orchestration/` and Delete the Untracked Originals

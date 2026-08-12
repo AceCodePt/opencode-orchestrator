@@ -1,5 +1,6 @@
 ---
-hitl: true
+wait_human_start: true
+wait_human_merge: false
 ---
 
 # Task: Outcome Routing With a Per-Event Human-in-the-Loop Toggle

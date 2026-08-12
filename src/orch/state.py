@@ -415,8 +415,23 @@ def _dependencies_from(meta: dict) -> list[str]:
     return out
 
 
-def _hitl_from(meta: dict) -> bool:
-    return not str(meta.get("hitl", "")).strip().lower() in ("false", "no", "0")
+def _flag_from(meta: dict, key: str, fallback: str | None = None) -> bool:
+    """A boolean front-matter flag. Default false; `hitl` is accepted as a
+    fallback for `wait_human_start` during the transition."""
+    raw = meta.get(key)
+    if raw is None and fallback is not None:
+        raw = meta.get(fallback)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() not in ("false", "no", "0")
+
+
+def _wait_human_start_from(meta: dict) -> bool:
+    return _flag_from(meta, "wait_human_start", "hitl")
+
+
+def _wait_human_merge_from(meta: dict) -> bool:
+    return _flag_from(meta, "wait_human_merge")
 
 
 def _branches(common: Path) -> set[str]:
@@ -535,7 +550,8 @@ class TaskState:
     blocked: list[observe.Blocked] = field(default_factory=list)
     dispatch_alive: bool = False
     dispatch_orchestrated: bool = False
-    hitl: bool = False
+    wait_human_start: bool = False
+    wait_human_merge: bool = False
     dependencies: list[str] = field(default_factory=list)
     conflicted: bool = False
     notes: list[str] = field(default_factory=list)
@@ -586,7 +602,8 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
         )
         if name in declared:
             fm = _front_matter(common, base, name)
-            st.hitl = _hitl_from(fm)
+            st.wait_human_start = _wait_human_start_from(fm)
+            st.wait_human_merge = _wait_human_merge_from(fm)
             st.dependencies = _dependencies_from(fm)
         if merging and claimed and name in branches:
             _rc, sha = _git(common, "rev-parse", name)

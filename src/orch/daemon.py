@@ -45,6 +45,7 @@ class Action:
     session_ids: list[str] = field(default_factory=list)
     blocked: list[observe.Blocked] = field(default_factory=list)
     start: str | None = None
+    wait_human_merge: bool = False
 
 
 @dataclass
@@ -83,6 +84,20 @@ class Snapshot:
 def project_label(project: str) -> str:
     p = Path(project)
     return p.parent.name if p.name == ".git" else p.name
+
+
+def _commit_dirty(worktree: Path, message: str) -> None:
+    """Commit whatever the agent left uncommitted, with the orch identity.
+    Used only when there is no verification hook to do the commit."""
+    if not state._dirty(worktree):
+        return
+    subprocess.run(["git", "-C", str(worktree), "add", "-A"],
+                   capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(worktree), "-c", "user.name=orch",
+         "-c", "user.email=orch@localhost", "commit", "-q", "-m", message],
+        capture_output=True, text=True,
+    )
 
 
 def _hook_env(a: Action, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -203,7 +218,7 @@ def decide(snap: Snapshot) -> list[Action]:
             continue
 
         if t.conflicted:
-            if t.hitl:
+            if t.wait_human_start:
                 actions.append(Action(
                     NEEDS_REVIEW, t.name, "merge-conflict",
                     "the merge into base conflicts and is left in progress; resolve it "
@@ -273,6 +288,10 @@ def decide(snap: Snapshot) -> list[Action]:
             _reset_loop(mem, key)
             continue
 
+        if t.wait_human_merge and not t.dirty and t.diff:
+            # clean, committed, waiting for the human's `orch task merge`
+            continue
+
         fp = state.fingerprint(t.worktree)
         if mem.fingerprint.get(key) == fp:
             last = mem.last_fail.get(key, 0)
@@ -296,6 +315,7 @@ def decide(snap: Snapshot) -> list[Action]:
             project=t.project, worktree=t.worktree, branch=t.branch,
             base=t.base, retry_cap=t.retry_cap, port=snap.port,
             session_ids=t.session_ids,
+            wait_human_merge=t.wait_human_merge,
         ))
         mem.verifying_until[key] = snap.now + VERIFY_TIMEOUT_S
         mem.settled_at.pop(key, None)
@@ -328,7 +348,7 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
             if snap.global_max is not None and \
                     global_in_flight >= snap.global_max:
                 return
-            if t.claimed or not t.declared or t.archived or t.hitl:
+            if t.claimed or not t.declared or t.archived or t.wait_human_start:
                 continue
             key = (project, t.name)
             if snap.now < mem.dispatch_backoff.get(key, 0):
@@ -445,97 +465,97 @@ class Supervisor:
         sid = a.session_ids[0] if a.session_ids else ""
 
         v = verify.run(wt, "session-idle", base=a.base or "main",
-                     session_id=sid)
+                       session_id=sid)
         log.append(f"verify {v.summary}")
 
         if v.outcome == verify.NO_VERIFY:
-            log.append(f"{a.task} -> needs-review (no committed verification hook, so nothing "
-                       f"verified this work)")
-            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-            _reset_loop(self.mem, key, keep=("wait_until",))
-            self._verify_log = log
-            return
+            log.append(f"{a.task} -> no verification hook committed; the work is "
+                       f"accepted without verification")
+            _commit_dirty(wt, "orch: accepted without verification")
+        elif not v.justifies_done:
+            retries = self.mem.retries.get(key, 0) + 1
+            self.mem.retries[key] = retries
+            self.mem.fingerprint[key] = state.fingerprint(wt)
+            self.mem.last_fail[key] = int(time.time())
+            self.mem.injected_at[key] = int(time.time())
+            cap = a.retry_cap or 3
 
-        if v.justifies_done:
-            self.mem.retries.pop(key, None)
-            self.mem.fingerprint.pop(key, None)
-            self.mem.last_fail.pop(key, None)
-            self.mem.settled_at.pop(key, None)
-            if state._dirty(wt):
-                log.append("verification passed but the worktree is still dirty; "
-                           "reviewing rather than merging")
+            if retries >= cap:
+                log.append(f"{a.task} -> needs-review (retries-exhausted "
+                           f"{retries}/{cap})")
+                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+                self.mem.fingerprint.pop(key, None)
+                self._verify_log = log
+                return
+
+            if not a.session_ids:
+                log.append(f"{a.task} -> needs-review (verification failed, no session left "
+                           f"to retrigger)")
                 log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
                 self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
                 self._verify_log = log
                 return
-            if not state._diff(Path(a.project or ""), a.base or "main",
-                               a.branch or ""):
-                r = merge.remove_task(Path(a.project or ""), a.task or "",
-                                      a.branch or "", wt, a.base or "main")
-                for s in r.steps:
-                    log.append(s)
-                for p in r.problems:
-                    log.append(f"! {p}")
-                if not r.ok:
-                    self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
-                else:
-                    log.extend(self._fire_hook("removed", _hook_env(a), _hook_cwd(a)))
+
+            text = (
+                f"The `session-idle` verification hook failed (attempt {retries}/{cap}). "
+                f"Fix these, then continue:\n\n```\n{v.detail}\n```"
+            )
+            if not a.port:
+                log.append(f"{a.task} -> needs-review (no server to inject into)")
+                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+                self._verify_log = log
+                return
+            try:
+                prompt_async(a.port, a.session_ids[0], text)
+                log.append(f"injected failure (attempt {retries}/{cap}) into "
+                           f"session {a.session_ids[0]}")
+            except Exception as e:  # noqa: BLE001
+                log.append(f"could not inject: {e}")
+                self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+            self._verify_log = log
+            return
+
+        self.mem.retries.pop(key, None)
+        self.mem.fingerprint.pop(key, None)
+        self.mem.last_fail.pop(key, None)
+        self.mem.settled_at.pop(key, None)
+        if state._dirty(wt):
+            log.append("the work is still uncommitted after acceptance; "
+                       "reviewing rather than merging")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self._verify_log = log
+            return
+        if not state._diff(Path(a.project or ""), a.base or "main",
+                           a.branch or ""):
+            r = merge.remove_task(Path(a.project or ""), a.task or "",
+                                  a.branch or "", wt, a.base or "main")
+            for s in r.steps:
+                log.append(s)
+            for p in r.problems:
+                log.append(f"! {p}")
+            if not r.ok:
+                self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
             else:
-                r = merge.merge_and_cleanup(Path(a.project or ""), a.task or "",
-                                            a.branch or "", wt, a.base or "main")
-                for s in r.steps:
-                    log.append(s)
-                for p in r.problems:
-                    log.append(f"! {p}")
-                if not r.ok:
-                    self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
-                else:
-                    log.extend(self._fire_hook("merged", _hook_env(a), _hook_cwd(a)))
+                log.extend(self._fire_hook("removed", _hook_env(a), _hook_cwd(a)))
             self._verify_log = log
             return
-
-        retries = self.mem.retries.get(key, 0) + 1
-        self.mem.retries[key] = retries
-        self.mem.fingerprint[key] = state.fingerprint(wt)
-        self.mem.last_fail[key] = int(time.time())
-        self.mem.injected_at[key] = int(time.time())
-        cap = a.retry_cap or 3
-
-        if retries >= cap:
-            log.append(f"{a.task} -> needs-review (retries-exhausted "
-                       f"{retries}/{cap})")
-            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-            self.mem.fingerprint.pop(key, None)
+        if a.wait_human_merge:
+            log.append(f"{a.task} -> awaiting your merge (wait_human_merge)")
             self._verify_log = log
             return
-
-        if not a.session_ids:
-            log.append(f"{a.task} -> needs-review (verification failed, no session left "
-                       f"to retrigger)")
-            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-            self._verify_log = log
-            return
-
-        text = (
-            f"The `session-idle` verification hook failed (attempt {retries}/{cap}). "
-            f"Fix these, then continue:\n\n```\n{v.detail}\n```"
-        )
-        if not a.port:
-            log.append(f"{a.task} -> needs-review (no server to inject into)")
-            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-            self._verify_log = log
-            return
-        try:
-            prompt_async(a.port, a.session_ids[0], text)
-            log.append(f"injected failure (attempt {retries}/{cap}) into "
-                       f"session {a.session_ids[0]}")
-        except Exception as e:  # noqa: BLE001
-            log.append(f"could not inject: {e}")
-            self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+        r = merge.merge_and_cleanup(Path(a.project or ""), a.task or "",
+                                    a.branch or "", wt, a.base or "main")
+        for s in r.steps:
+            log.append(s)
+        for p in r.problems:
+            log.append(f"! {p}")
+        if not r.ok:
+            self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+        else:
+            log.extend(self._fire_hook("merged", _hook_env(a), _hook_cwd(a)))
         self._verify_log = log
 
     def _dispatch(self, a: Action) -> list[str]:

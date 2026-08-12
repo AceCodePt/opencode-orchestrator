@@ -21,6 +21,23 @@ def _wait_for(path: Path, timeout: float = 5.0) -> bool:
     return False
 
 
+def _wait_for_json(path: Path, timeout: float = 5.0) -> bool:
+    """Wait until the file holds valid JSON. A detached hook writes via
+    `cat > file`, which creates the file before the write lands, so a bare
+    existence check can read it empty."""
+    import json
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            try:
+                json.loads(path.read_text())
+                return True
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.05)
+    return False
+
+
 def _repo() -> tuple[Path, tempfile.TemporaryDirectory]:
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name)
@@ -111,9 +128,9 @@ def test_dispatch_fires_global_and_project_hooks() -> None:
         owner = (str(root), "main", str(root))
         sse.dispatch(ev, owner, trusted={str(root)})
 
-        assert _wait_for(marker), "the global event hook must fire"
+        assert _wait_for_json(marker), "the global event hook must fire"
         assert json_of(marker)["type"] == "permission.asked"
-        assert _wait_for(pm), "the project event hook must fire"
+        assert _wait_for_json(pm), "the project event hook must fire"
         assert json_of(pm)["type"] == "permission.asked"
     finally:
         tmp.cleanup()

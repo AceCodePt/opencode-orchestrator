@@ -113,7 +113,7 @@ def test_absent_hook_yields_no_finding_not_a_pass() -> None:
     findings = verify.inspect(root)
     assert _by_name(findings, "session-idle") is None
     tmp.cleanup()
-    print("ok: an absent verification hook yields no finding, never a pass")
+    print("ok: an absent verification hook yields no finding")
 
 
 def test_run_uses_the_committed_hook_not_the_working_copy() -> None:
