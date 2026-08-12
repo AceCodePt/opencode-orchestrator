@@ -96,6 +96,31 @@ def test_hitl_defaults_to_true_and_comes_from_the_committed_front_matter() -> No
           "front matter, never the working tree")
 
 
+def test_dependencies_default_to_empty_and_parse_from_the_committed_front_matter() -> None:
+    root, tmp = _repo()
+    (root / "tasks" / "plain").mkdir(parents=True)
+    (root / "tasks" / "plain" / "task.md").write_text("# Plain\n\nDo it.\n")
+    (root / "tasks" / "linked").mkdir(parents=True)
+    (root / "tasks" / "linked" / "task.md").write_text(
+        "---\nhitl: true\ndependencies: [spec, auth-migrate]\n---\n\n# Linked\n\nDo it.\n")
+    (root / "tasks" / "csv").mkdir(parents=True)
+    (root / "tasks" / "csv" / "task.md").write_text(
+        "---\nhitl: true\ndependencies: spec, auth-migrate\n---\n\n# Csv\n\nDo it.\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "tasks")
+    by = {t.name: t for t in _proj(root).scan()}
+    assert by["plain"].dependencies == []
+    assert by["linked"].dependencies == ["spec", "auth-migrate"]
+    assert by["csv"].dependencies == ["spec", "auth-migrate"]
+    (root / "tasks" / "linked" / "task.md").write_text(
+        "---\nhitl: true\ndependencies: [tampered]\n---\n\n# Linked\n\nDo it.\n")
+    assert {t.name: t for t in _proj(root).scan()}["linked"].dependencies == \
+        ["spec", "auth-migrate"], \
+        "an uncommitted working-tree edit must not count - the committed copy rules"
+    tmp.cleanup()
+    print("ok: dependencies default to empty and parse from the committed front matter")
+
+
 def test_scan_sees_a_claim_and_worktree() -> None:
     root, tmp = _repo()
     _task(root, "a-task")

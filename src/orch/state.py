@@ -394,6 +394,27 @@ def _front_matter(common: Path, base: str, name: str) -> dict:
     return meta
 
 
+def _dependencies_from(meta: dict) -> list[str]:
+    """The `dependencies:` front-matter value as a list of task slugs. Accepts a
+    JSON list (`[a, b]`), a comma/space separated string (`a, b`), or nothing."""
+    raw = str(meta.get("dependencies", "")).strip()
+    if not raw or raw.lower() in ("none", "[]", "null"):
+        return []
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1]
+        if not inner.strip():
+            return []
+        items = inner.split(",")
+    else:
+        items = raw.split(",")
+    out: list[str] = []
+    for item in items:
+        slug = item.strip().strip('"').strip("'")
+        if slug:
+            out.append(slug)
+    return out
+
+
 def _hitl_from(meta: dict) -> bool:
     return not str(meta.get("hitl", "")).strip().lower() in ("false", "no", "0")
 
@@ -515,6 +536,7 @@ class TaskState:
     dispatch_alive: bool = False
     dispatch_orchestrated: bool = False
     hitl: bool = False
+    dependencies: list[str] = field(default_factory=list)
     conflicted: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -563,7 +585,9 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
             worktree=str(wt) if wt else None,
         )
         if name in declared:
-            st.hitl = _hitl_from(_front_matter(common, base, name))
+            fm = _front_matter(common, base, name)
+            st.hitl = _hitl_from(fm)
+            st.dependencies = _dependencies_from(fm)
         if merging and claimed and name in branches:
             _rc, sha = _git(common, "rev-parse", name)
             if _rc == 0 and sha and sha.strip() == merging:

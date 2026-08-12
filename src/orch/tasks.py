@@ -9,6 +9,7 @@ from . import dispatch, envfilter, gate, state
 
 TEMPLATE = """---
 hitl: {hitl}
+dependencies: {dependencies}
 ---
 
 # Task: {title}
@@ -18,7 +19,6 @@ hitl: {hitl}
 - **Complexity:** <Low|Medium|High>
 - **Priority:** <Low|Medium|High>
 - **Status:** Ready for Handoff
-- **Dependencies:** none
 
 ## Context
 
@@ -61,8 +61,10 @@ def task_rel(name: str) -> str:
     return f"tasks/{name}/task.md"
 
 
-def template(title: str, hitl: bool = True) -> str:
-    return TEMPLATE.format(title=title, hitl="true" if hitl else "false")
+def template(title: str, hitl: bool = True, dependencies: list[str] | None = None) -> str:
+    deps = dependencies or []
+    return TEMPLATE.format(title=title, hitl="true" if hitl else "false",
+                           dependencies="[" + ", ".join(deps) + "]")
 
 
 def off_base_note(root: Path, base: str) -> str | None:
@@ -86,6 +88,7 @@ def add_many(
     names: list[str],
     title: str | None = None,
     auto: bool = False,
+    depends: list[str] | None = None,
 ) -> AddResult:
     result = AddResult()
 
@@ -105,6 +108,8 @@ def add_many(
             "--title describes one task, so it cannot be combined with "
             "several names. Add them one at a time, or edit the files afterwards."
         )
+
+    deps = [dispatch.slug(d) for d in (depends or []) if dispatch.slug(d)]
 
     base = gate.base_branch(root)
     note = off_base_note(root, base)
@@ -126,7 +131,7 @@ def add_many(
             result.skipped.append(f"{rel} (already exists)")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(template(shown, hitl=not auto))
+        path.write_text(template(shown, hitl=not auto, dependencies=deps))
         result.created.append(rel)
 
     if result.created:
@@ -152,14 +157,13 @@ def draft_prompt(text: str, auto: bool) -> str:
         "orchestrator that dispatches one agent per task into its own git "
         "worktree. Write each spec to tasks/{{slug}}/task.md (create files and "
         "directories as needed). Every spec must follow exactly this template, "
-        "with hitl: {hitl} in the front matter:\n\n"
-        "---\nhitl: {hitl}\n---\n\n"
+        "with hitl: {hitl} and a dependencies: [] list in the front matter:\n\n"
+        "---\nhitl: {hitl}\ndependencies: []\n---\n\n"
         "# Task: <title>\n\n"
         "## Metadata\n\n"
         "- **Complexity:** <Low|Medium|High>\n"
         "- **Priority:** <Low|Medium|High>\n"
-        "- **Status:** Ready for Handoff\n"
-        "- **Dependencies:** none\n\n"
+        "- **Status:** Ready for Handoff\n\n"
         "## Context\n\n"
         "<why this exists, from the description>\n\n"
         "## Requirements\n\n"
@@ -168,12 +172,40 @@ def draft_prompt(text: str, auto: bool) -> str:
         "<the observable behaviour proving it is done - make it runnable>\n\n"
         "## Prohibited Patterns\n\n"
         "- <what not to do, and why>\n\n"
-        "Decide whether the description is ONE task or several INDEPENDENT "
-        "tasks; prefer one unless the work clearly decomposes into independent "
-        "deliverables. Put the description's checkboxes into Requirements and "
-        "give each task a Verification the project's gate could run. Do not "
-        "create TASKS.md, do not touch any file outside tasks/, do not commit. "
-        "When done, report the list of files you created.\n\n"
+        "### Structure the work\n\n"
+        "Decide whether the description is ONE task or several. A single effort "
+        "gets TWO layers of specs, written in one pass:\n\n"
+        "- **The spec task** at tasks/<feature>/task.md — the parent. Its "
+        "Requirements are the user stories (As an <actor>, I want <feature>, so "
+        "that <benefit>), and it records Implementation Decisions and Out of "
+        "Scope. Do not reference file paths or line numbers — they go stale. It "
+        "stays hitl: {hitl} and is never dispatched; it is the anchor the slices "
+        "point at.\n"
+        "- **Slice tasks** at tasks/<feature>-<slice>/task.md — vertical tracer "
+        "bullets, one per independent deliverable. Each cuts a narrow but "
+        "COMPLETE path through every layer (schema, API, UI, tests), is sized to "
+        "fit in a single fresh context window, and is demoable or verifiable on "
+        "its own.\n\n"
+        "Each slice task's front matter lists its blocking edges as "
+        "`dependencies: [<slug>, ...]` — the spec task plus any earlier slices "
+        "it needs. Render each slug exactly as the task directory name it "
+        "belongs to; the project's scheduler only dispatches a slice once every "
+        "dependency is archived, so an edge to a slug that never gets written is "
+        "a permanently blocked task. Prefer one task unless the work clearly "
+        "decomposes into independent deliverables.\n\n"
+        "A wide mechanical refactor whose blast radius fans across the codebase "
+        "is NOT a vertical slice. Sequence it as expand-contract: first a task "
+        "that adds the new form beside the old so nothing breaks, then one "
+        "migrate task per batch of call sites (each listing its own "
+        "dependencies), then a final contract task that deletes the old form "
+        "once no caller remains, blocked by every migrate task.\n\n"
+        "Describe WHAT the system should do, not HOW to implement it — the "
+        "dispatched agent explores the codebase fresh and makes its own "
+        "implementation decisions. Give every task a Verification the project's "
+        "gate could actually run. Put the description's checkboxes into "
+        "Requirements. Do not create TASKS.md, do not touch any file outside "
+        "tasks/, do not commit. When done, report the list of files you created "
+        "and the dependency edges between them.\n\n"
         "Description:\n"
     ).format(hitl=hitl)
     return prompt + text

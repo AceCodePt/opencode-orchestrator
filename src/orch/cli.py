@@ -167,6 +167,8 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             state_info = f" session={t.session}"
         if t.hitl:
             state_info += " hitl"
+        if t.dependencies:
+            state_info += " deps=[" + ",".join(t.dependencies) + "]"
         if t.dirty:
             state_info += " dirty"
         elif t.diff:
@@ -319,6 +321,7 @@ def _task_json(t: state.TaskState) -> dict:
         "dispatch_alive": t.dispatch_alive,
         "dispatch_orchestrated": t.dispatch_orchestrated,
         "hitl": t.hitl,
+        "dependencies": t.dependencies,
         "base": t.base,
     }
 
@@ -394,7 +397,8 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
 
 def cmd_task_add(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
-    r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto)
+    r = tasks_mod.add_many(start, args.name, title=args.title, auto=args.auto,
+                           depends=args.depends)
     print(tasks_mod.render(r))
     return 0 if r.ok else 2
 
@@ -959,6 +963,9 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--auto", action="store_true",
                     help="let the scheduler pick this task; by default a task "
                          "needs a human to start it")
+    ta.add_argument("--depends", nargs="+", default=[],
+                    help="task slugs this task blocks on (dependencies front "
+                         "matter); the scheduler waits until they are archived")
     ta.set_defaults(func=cmd_task_add)
 
     tm = tsub.add_parser("merge",

@@ -19,6 +19,14 @@ in one source file has one place to check.
   stored.
 - **Silence that reads as health is the failure mode this project exists to prevent.**
   Most of the decisions below are that sentence applied somewhere specific.
+- **The repo is the tracker; GitHub issues are not.** Work is tracked in the
+  project's own `tasks/` — a spec file, a branch as the claim, the daemon as the
+  gate and merge — with ordering expressed as `dependencies:` front matter. The
+  earlier workflow that drove an external issue tracker (GitHub issues, triage
+  labels, blocking links, agent briefs as comments) was removed: a second tracker
+  was a second store, and every answer drifted toward the repo. What survived is
+  GitHub as *hosting only*: `orch project create` still pushes a private repo, but
+  nothing reads or writes issues, labels, or PRs.
 
 ## `state.py`
 
@@ -111,6 +119,20 @@ in one source file has one place to check.
   knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch by polling
   `orch task list --json` or tailing the journal — the coupling points the right
   way, so adding a notifier costs orch nothing.
+- **The scheduler gates on `dependencies:` front matter.** A declared `todo` task
+  dispatches only when every dependency slug is **archived** — or was never declared,
+  because a slug that never existed cannot block. An open declared task with the same
+  name always holds its dependents, even one `reset` back to `todo`. The frontier is
+  exactly the all-dependencies-archived set, so the map of what is grabbable is
+  derived, never stored.
+- **Task references are slugs that render as links.** The body-level
+  `- **Dependencies:** none` line is gone; blocking lives in the front matter as
+  `dependencies: [<slug>, ...]`, where a slug is the sibling `tasks/<slug>/` name.
+  The scheduler parses slugs (never links); a link is only how a task renders a
+  reference to another task.
+- **A dependency typo is a permanently blocked task, and `doctor` says so.** A slug
+  that is neither declared nor archived can never satisfy the gate, so
+  `check_task_dependencies` fails loudly on it.
 - **The human answers a block through the CLI, not through orch's memory.**
   `orch task answer <name> allow|deny` (or a question's text) posts to the shared
   server's permission/question endpoint for the pending request the scan already
@@ -230,6 +252,15 @@ in one source file has one place to check.
   so drafting lowers the cost of a good spec without removing the human from the
   loop. The raw text is appended to the prompt after formatting, so the description's
   own `{}` cannot break the template.
+- **`task draft` is the spec-and-slices step.** The spec-and-tickets workflow that
+  used to live in two separate skills is folded into the draft prompt: one agent
+  writes the **spec task** (`tasks/<feature>/task.md`, the anchor that is never
+  dispatched) plus **slice tasks** (`tasks/<feature>-<slice>/task.md`), each a
+  vertical tracer bullet sized to one context window, with its blocking edges as
+  `dependencies:` front matter pointing at the spec task and earlier slices. A wide
+  mechanical refactor is an expand-contract sequence, not a vertical slice. The
+  prompt teaches behavior-over-procedure and runnable Verifications; nothing is
+  claimed until a human reviews and commits.
 
 ## `agent.py`
 

@@ -125,9 +125,21 @@ unambiguous: the gate never passed.
 | --- | --- |
 | What work exists, and what does it mean? | **the base branch** — `tasks/*/task.md` as committed there |
 | What is claimed? | **git refs** — `refs/heads/<name>` |
+| What orders the work? | **the base branch** — `dependencies:` in each task's front matter |
 | Is the work committed and passing? | **the worktree** — clean + diff + the daemon's own gate run |
 | What is running right now? | **live** — `/proc`, the shared server |
 | How long since… (retries, settle) | **the daemon's memory** — restart-losing by design |
+
+## The repo is the tracker
+
+There is no external issue tracker. The project's own `tasks/` *is* the tracker:
+- a spec file declares work, a branch claims it, the daemon gates and merges it, `archive/` closes it
+- ordering is `dependencies:` front matter — a slice dispatches when its dependencies archive, which is exactly the frontier query
+- intake is `orch task draft` (free text → spec task + slice tasks) and `orch ask` (the persistent project agent)
+- triage is a human reviewing uncommitted drafted specs — approve (commit), ask-for-info (leave uncommitted), or drop
+
+GitHub is **hosting only**: `orch project create` pushes a private repo; nothing reads
+or writes issues, labels, or PRs.
 
 ## Separation of concerns
 
@@ -310,11 +322,23 @@ review and commit; only the committed values apply):
 ```
 
 Each cycle, per project, the daemon fills free slots (claimed, in-flight tasks count
-against `maxConcurrent`) with the next unclaimed declared task, in name order. A task
-whose `task.md` is uncommitted on base, or a project with no base worktree to dispatch
-from, is skipped. Failed dispatches back off (60s) and the daemon's journal records why
-— `dispatch_error` is in-memory only. The scheduler never dispatches ungated work —
-`--allow-ungated` is a human flag only.
+against `maxConcurrent`) with the next unclaimed declared task whose **dependencies are
+satisfied**, in name order. A task whose `task.md` is uncommitted on base, or a project
+with no base worktree to dispatch from, is skipped. Failed dispatches back off (60s) and
+the daemon's journal records why — `dispatch_error` is in-memory only. The scheduler
+never dispatches ungated work — `--allow-ungated` is a human flag only.
+
+**Ordering is the `dependencies:` front matter.** Each `tasks/<name>/task.md` may
+declare the tasks that gate it, as slugs in the gray-matter block:
+`dependencies: [spec, auth-migrate]`. A `todo` task dispatches only when every listed
+dependency is **archived** (or was never declared — a slug that never existed cannot
+block); an open declared task always holds its dependents, even one reset back to
+`todo`. The frontier — everything dispatchable right now — is the all-dependencies-archived
+set, so the question "what can I grab?" is derived from the repo, never stored. A spec
+task (`hitl: true`, the anchor for a feature) is never auto-dispatched and is never
+"done"; it closes by convention when its slices archive. `orch doctor` fails on a
+dependency slug that is neither declared nor archived — a typo would block the task
+forever.
 
 On top of the per-project cap, a **machine-wide budget** (`orch daemon budget <n>`,
 stored in `~/.config/orch/daemon.json`) caps the total in-flight task agents the

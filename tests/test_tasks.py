@@ -50,11 +50,19 @@ def test_title_is_derived_from_the_slug() -> None:
 
 def test_template_carries_every_required_section() -> None:
     body = tasks.template("Fix Auth")
-    assert body.startswith("---\nhitl: true\n---\n\n# Task: Fix Auth\n")
+    assert body.startswith("---\nhitl: true\ndependencies: []\n---\n\n# Task: Fix Auth\n")
     for section in ("## Metadata", "## Context", "## Requirements",
                     "## Verification", "## Prohibited Patterns"):
         assert section in body, section
-    print("ok: the template carries the hitl front matter and every required section")
+    print("ok: the template carries the hitl and dependencies front matter and every required section")
+
+
+def test_template_carries_dependencies() -> None:
+    body = tasks.template("Fix Auth", dependencies=["spec", "auth-migrate"])
+    assert "dependencies: [spec, auth-migrate]" in body, body[:120]
+    empty = tasks.template("Fix Auth")
+    assert "dependencies: []" in empty, empty[:120]
+    print("ok: the template renders a dependencies list in the front matter")
 
 
 def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
@@ -62,12 +70,22 @@ def test_add_creates_the_spec_and_never_touches_tasks_md() -> None:
     r = tasks.add_many(root, ["fix-auth"])
     assert r.ok, r.notes
     body = (root / "tasks" / "fix-auth" / "task.md").read_text()
-    assert body.startswith("---\nhitl: true\n---\n\n# Task: Fix Auth")
+    assert body.startswith("---\nhitl: true\ndependencies: []\n---\n\n# Task: Fix Auth")
     assert not (root / "TASKS.md").exists(), \
         "no TASKS.md is written or generated any more"
     assert any("COMMIT" in n for n in r.notes), "must say the files need committing"
     tmp.cleanup()
     print("ok: add creates the spec and writes no TASKS.md")
+
+
+def test_add_with_depends_writes_the_edges() -> None:
+    root, tmp = _repo()
+    r = tasks.add_many(root, ["fix-auth"], depends=["feature", "auth-migrate"])
+    assert r.ok, r.notes
+    body = (root / "tasks" / "fix-auth" / "task.md").read_text()
+    assert "dependencies: [feature, auth-migrate]" in body, body[:120]
+    tmp.cleanup()
+    print("ok: --depends writes the blocking edges into the front matter")
 
 
 def test_task_add_auto_trusts_the_project() -> None:
@@ -162,11 +180,17 @@ def test_template_carries_the_hitl_front_matter() -> None:
 def test_draft_prompt_sets_hitl_and_embeds_the_text() -> None:
     p = tasks.draft_prompt("build a parser {with braces}", auto=True)
     assert "hitl: false" in p
+    assert "dependencies: []" in p
     assert "tasks/{slug}/task.md" in p
+    assert "The spec task" in p, "the prompt must teach spec tasks vs slice tasks"
+    assert "dependencies: [<slug>, ...]" in p, \
+        "the prompt must teach the blocking-edge front matter"
+    assert "expand-contract" in p, \
+        "the prompt must teach the wide-refactor exception"
     assert p.endswith("build a parser {with braces}"), "raw text is preserved"
     p2 = tasks.draft_prompt("x", auto=False)
     assert "hitl: true" in p2
-    print("ok: the draft prompt carries the hitl flag and the raw text verbatim")
+    print("ok: the draft prompt carries the hitl flag, deps discipline, and the raw text verbatim")
 
 
 def test_draft_specs_reports_the_files_the_agent_wrote() -> None:

@@ -629,6 +629,42 @@ def test_scheduler_skips_hitl_tasks() -> None:
     print("ok: the scheduler leaves hitl tasks for a human and picks the rest")
 
 
+def test_scheduler_holds_a_task_until_its_dependencies_are_archived() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=2,
+                                start=Path("/tmp/lab"))
+    dep_open = _task(name="feature", claimed=False, branch=None, worktree=None,
+                     hitl=False)
+    slice_ = _task(name="feature-slice", claimed=False, branch=None, worktree=None,
+                   hitl=False, dependencies=["feature"])
+    acts = daemon.decide(_snap(tasks=[dep_open, slice_], mem=mem,
+                               policies={dep_open.project: pol}))
+    dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
+    assert dispatched == ["feature"], \
+        "a slice whose dependency is still open must not dispatch"
+
+    archived = _task(name="feature", claimed=False, branch=None, worktree=None,
+                     archived=True)
+    acts = daemon.decide(_snap(tasks=[archived, slice_], mem=mem,
+                               policies={slice_.project: pol}))
+    dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
+    assert dispatched == ["feature-slice"], \
+        "once the dependency is archived, the slice dispatches"
+    print("ok: the scheduler gates dispatch on archived dependencies")
+
+
+def test_scheduler_treats_an_undeclared_dependency_as_satisfied() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=1,
+                                start=Path("/tmp/lab"))
+    slice_ = _task(name="slice-a", claimed=False, branch=None, worktree=None,
+                   hitl=False, dependencies=["never-written"])
+    acts = daemon.decide(_snap(tasks=[slice_], mem=mem, policies={slice_.project: pol}))
+    assert _kinds(acts) == [daemon.DISPATCH], \
+        "a slug that was never declared cannot block - only an open declared task does"
+    print("ok: a dependency slug that was never declared does not hold the task")
+
+
 def test_global_budget_caps_dispatches_across_projects() -> None:
     mem = daemon.LoopState()
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,

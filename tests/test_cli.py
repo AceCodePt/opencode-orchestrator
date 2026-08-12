@@ -37,7 +37,7 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
 
 
 def _args(**kw) -> argparse.Namespace:
-    a = argparse.Namespace(directory=None)
+    a = argparse.Namespace(directory=None, global_=False)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -127,6 +127,33 @@ def test_answer_unblocked_task_is_refused() -> None:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
     print("ok: answering a task that is not blocked is refused")
+
+
+def test_task_list_json_reports_dependencies() -> None:
+    import io
+    import json
+
+    _FakeProject._instance = _FakeProject([
+        state.TaskState(project="/tmp/lab/lab.git", name="slice-a", base="main",
+                        declared=True, hitl=False,
+                        dependencies=["feature", "auth-migrate"]),
+    ])
+    orig_status = cli.server_mod.status
+    orig_from = cli.state.Project.from_dir
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_args(json=True))
+        assert rc == 0, rc
+        payload = json.loads(buf.getvalue())
+        assert payload[0]["dependencies"] == ["feature", "auth-migrate"], payload
+    finally:
+        cli.state.Project.from_dir = orig_from
+        cli.server_mod.status = orig_status
+    print("ok: `task list --json` carries the dependency edges")
 
 
 class _GProject:

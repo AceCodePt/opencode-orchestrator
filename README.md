@@ -166,11 +166,19 @@ the worktree state by the daemon, after the session settles. Watch `orch task li
 
 **The daemon can dispatch `todo` tasks itself (opt-in).** Add a `scheduler` block to
 `.orchestration/config.json` and the daemon fills free slots with the next unclaimed
-declared task, in name order:
+declared task whose `dependencies:` are satisfied, in name order:
 
 ```json
 "scheduler": { "enabled": true, "maxConcurrent": 1 }
 ```
+
+**Ordering is the `dependencies:` front matter.** A `tasks/<name>/task.md` declares
+the tasks that gate it as slugs — `dependencies: [spec, auth-migrate]`. A `todo` task
+dispatches only when every listed dependency is archived (or was never declared); an
+open declared task always holds its dependents. The frontier — everything grabbable now —
+is the all-dependencies-archived set, derived from the repo, never stored. `orch doctor`
+fails on a dependency slug that is neither declared nor archived (a typo would block the
+task forever).
 
 The model is opencode's choice, not orch's — the scheduler just spawns the agent.
 Without it, dispatching stays a human act (`orch task start`). The scheduler never
@@ -290,8 +298,7 @@ a clean, committed, diffing branch passed the daemon's own gate and was merged. 
 with a dirty tree at settle time is `needs-review`, because a passing gate would have
 committed it.
 
-Not built yet: routing `needs-review` onwards or unblocking a parent agent, and a
-machine-wide concurrency budget (per-project `scheduler.maxConcurrent` exists today).
+Not built yet: routing `needs-review` onwards or unblocking a parent agent.
 
 The per-event hooks are live: the daemon's SSE consumer reads the server's
 `GET /event` stream and fires a copied, executable hook per event type in

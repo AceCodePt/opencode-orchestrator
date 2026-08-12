@@ -306,6 +306,41 @@ def check_trust(cwd: Path) -> list[Check]:
     )]
 
 
+def check_task_dependencies(cwd: Path) -> list[Check]:
+    """Every task's `dependencies:` front matter must point at a slug that is
+    either declared or archived. A typo'd dependency can never be archived, so
+    the scheduler would hold the task forever."""
+    out: list[Check] = []
+    _top, common, err = dispatch.project_of(cwd)
+    if err or common is None:
+        return out
+    proj = state.Project.from_common(common)
+    if proj is None:
+        return out
+    tasks = proj.scan()
+    declared = {t.name for t in tasks if t.declared}
+    archived = {t.name for t in tasks if t.archived}
+    known = declared | archived
+    broken: list[str] = []
+    for t in tasks:
+        if not t.declared:
+            continue
+        for dep in t.dependencies:
+            if dep not in known:
+                broken.append(f"{t.name} -> {dep}")
+    if broken:
+        out.append(Check(
+            FAIL, "task dependencies reference nothing",
+            "these edges can never be archived, so the scheduler holds them "
+            "forever. Fix the slug in the front matter (or declare/archive the "
+            "target): " + ", ".join(broken),
+        ))
+    else:
+        out.append(Check(OK, "task dependencies resolve",
+                         "every dependencies: slug is declared or archived"))
+    return out
+
+
 def check_harness() -> list[Check]:
     out: list[Check] = []
     exe = shutil.which("opencode")
@@ -364,6 +399,7 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_tooling()
     checks += check_project(cwd)
     checks += check_trust(cwd)
+    checks += check_task_dependencies(cwd)
     checks += check_global_hooks()
     worst = 0
     for c in checks:
