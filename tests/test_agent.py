@@ -368,6 +368,27 @@ def test_stream_event_maps_text_tool_shell_and_error() -> None:
     print("ok: the stream renderer maps text, tool, shell and error events")
 
 
+def test_stream_event_shows_thinking_and_tool_input() -> None:
+    assert agent._stream_event(
+        {"type": "reasoning", "part": {"type": "reasoning",
+                                       "text": "think aloud"}}) \
+        == ("thinking", "think aloud")
+    tool = agent._stream_event(
+        {"type": "text", "part": {"type": "tool", "tool": "create_task",
+                                  "state": {"status": "completed",
+                                            "input": {"name": "x",
+                                                      "context": "why"}}}})
+    assert tool is not None and tool[0] == "tool"
+    assert 'create_task({"context": "why", "name": "x"})' == tool[1]
+    huge = agent._stream_event(
+        {"type": "text", "part": {"type": "tool", "tool": "bash",
+                                  "state": {"input": {"command": "x" * 500}}}})
+    assert huge is not None and len(huge[1]) <= 250, \
+        "a giant tool payload must be capped so it cannot flood the terminal"
+    assert "..." in huge[1], "a truncated payload must say so"
+    print("ok: reasoning and tool args show up, capped; IDs stay hidden")
+
+
 def test_stream_reply_yields_parts_and_the_exit_code() -> None:
     lines = [
         '{"type": "text", "part": {"type": "text", "text": "first "}}',

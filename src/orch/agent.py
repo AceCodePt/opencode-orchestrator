@@ -154,8 +154,8 @@ def status(info: server.ServerInfo, base: Path) -> dict:
 
 
 def _stream_event(ev: dict) -> tuple[str, str] | None:
-    """Map one `opencode run --format json` event to ("text"|"tool"|"shell"|
-    "error", payload), or None when it carries nothing worth showing."""
+    """Map one `opencode run --format json` event to ("text"|"thinking"|"tool"|
+    "shell"|"error", payload), or None when it carries nothing worth showing."""
     kind = ev.get("type")
     part = ev.get("part") or {}
     ptype = part.get("type")
@@ -163,16 +163,37 @@ def _stream_event(ev: dict) -> tuple[str, str] | None:
         t = part.get("text")
         if t:
             return "text", str(t)
+    if ptype == "reasoning":
+        t = part.get("text")
+        if t:
+            return "thinking", str(t)
     if ptype == "tool":
         name = (part.get("tool") or part.get("name")
                 or part.get("title") or "tool")
-        return "tool", str(name)
+        return "tool", _tool_detail(name, part)
     if ptype == "shell":
-        return "shell", "shell"
+        cmd = ((part.get("state") or {}).get("input") or {}).get("command")
+        return "shell", str(cmd) if cmd else "shell"
     if kind == "error":
         detail = part.get("error") or ev.get("error") or "error"
         return "error", str(detail)
     return None
+
+
+def _tool_detail(name: str, part: dict) -> str:
+    """Render a tool call as `name(args)` so the stream shows what the agent is
+    doing, capped so huge payloads (a full spec JSON, a long command) cannot
+    flood the terminal. Session/message IDs are deliberately never surfaced."""
+    inp = (part.get("state") or {}).get("input")
+    if not inp:
+        return name
+    try:
+        detail = json.dumps(inp, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        detail = str(inp)
+    if len(detail) > 240:
+        detail = detail[:237] + "..."
+    return f"{name}({detail})"
 
 
 def stream_reply(info: server.ServerInfo, base: Path, text: str,
@@ -184,7 +205,7 @@ def stream_reply(info: server.ServerInfo, base: Path, text: str,
     ("exit", "<code>") so the caller can judge success. With session_id it
     continues that session; without, it creates the primary agent."""
     cmd = ["opencode", "run", "--attach", info.url, "--dir", str(base),
-           "--format", "json"]
+           "--format", "json", "--thinking"]
     if session_id:
         cmd += ["-s", session_id]
     else:

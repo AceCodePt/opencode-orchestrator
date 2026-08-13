@@ -685,10 +685,14 @@ def _stream_ask(args: argparse.Namespace, info, base, sid, text: str) -> int:
             if kind == "text":
                 print(payload, end="", flush=True)
                 got_text = True
+            elif kind == "thinking":
+                line = " ".join(str(payload).split())
+                if line:
+                    print(f"\n[thinking] {line}", file=sys.stderr, flush=True)
             elif kind == "tool":
                 print(f"\n[tool: {payload}]", file=sys.stderr, flush=True)
             elif kind == "shell":
-                print("\n[shell]", file=sys.stderr, flush=True)
+                print(f"\n[shell] {payload}", file=sys.stderr, flush=True)
             elif kind == "error":
                 print(f"\n[error: {payload}]", file=sys.stderr, flush=True)
             elif kind == "exit":
