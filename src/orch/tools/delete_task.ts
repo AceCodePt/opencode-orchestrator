@@ -5,9 +5,13 @@ const TASKTOOL = "{{ORCH_BIN}}"
 
 async function runTool(op: string, args: Record<string, unknown>, worktree: string): Promise<string> {
   const proc = Bun.spawn(
-    [TASKTOOL, "tasktool", op, "--json", JSON.stringify(args), "--dir", worktree],
-    { stdout: "pipe", stderr: "pipe" },
+    // The spec JSON rides stdin (--json -) so a rich task can never trip the
+    // command-line length limit; only the fixed parts stay in argv.
+    [TASKTOOL, "tasktool", op, "--json", "-", "--dir", worktree],
+    { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
   )
+  proc.stdin.write(JSON.stringify(args))
+  await proc.stdin.end()
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

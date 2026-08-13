@@ -331,6 +331,30 @@ def test_all_ops_report_json() -> None:
     print("ok: the tasktool CLI answers in JSON")
 
 
+def test_json_dash_reads_the_payload_from_stdin() -> None:
+    root, tmp = _repo()
+    import io
+    import sys
+    import contextlib
+    from orch.tasktool import main as tt_main
+    buf = io.StringIO()
+    spec = json.dumps({"name": "stdin-task", "requirements": ["fed via stdin"]})
+    saved_stdin = sys.stdin
+    sys.stdin = io.StringIO(spec)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = tt_main(["create", "--json", "-", "--dir", str(root)])
+    finally:
+        sys.stdin = saved_stdin
+    assert rc == 0, rc
+    payload = json.loads(buf.getvalue())
+    assert payload["ok"] is True and payload["path"] == "tasks/stdin-task/task.md"
+    body = _created(root, "stdin-task")
+    assert "- [ ] fed via stdin" in body
+    tmp.cleanup()
+    print("ok: --json - reads the spec from stdin, so a rich task is not limited by argv")
+
+
 def test_orch_tasktool_subcommand_routes_to_the_backend() -> None:
     root, tmp = _repo()
     import io

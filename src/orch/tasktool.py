@@ -423,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
             if not rest:
                 return _err("--json needs a value")
             raw = rest.pop(0)
+            if raw == "-":
+                raw = sys.stdin.read()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError as e:
