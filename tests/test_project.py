@@ -9,7 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import cli, project  # noqa: E402
+from orch import cli, project, state  # noqa: E402
+
+_REAL_RUN = project._run
+_REAL_INIT = project.init_mod.run
+_REAL_SCAFFOLD = project.init_mod.scaffold
 
 
 def _args(**kw) -> argparse.Namespace:
@@ -67,7 +71,12 @@ def _fake_init(calls: list) -> None:
     def run(_start, force=False, version="0"):
         calls.append(("init", str(_start)))
         return project.init_mod.InitResult(["config.json"], [], [])
+
+    def scaffold(_target, version="0", force=False):
+        calls.append(("scaffold", str(_target)))
+        return (["config.json"], [])
     project.init_mod.run = run
+    project.init_mod.scaffold = scaffold
 
 
 def test_gh_ready_missing_gh_is_an_error() -> None:
@@ -120,11 +129,22 @@ def test_create_no_gh_skips_gh_entirely() -> None:
         assert r.ok, r.problems
         gh = [a for a, _c in calls if isinstance(a, list) and a[:2] == ["gh", "repo"]]
         assert gh == [], f"no-gh must not call gh: {gh}"
-        target = Path(tmp) / "demo"
-        assert any(entry == ("init", str(target)) for entry in calls), \
-            "orch init must run inside the new project"
-        assert (target / "README.md").is_file()
-        assert (target / ".gitignore").is_file()
+        target = Path(tmp) / "demo" / "main"
+        args = [a for a, _c in calls]
+        assert any(a[:2] == ["git", "init"] and "--bare" in a for a in args), \
+            "a bare store is created"
+        assert not any("clone" in a for a in args), \
+            "no throwaway repo is cloned"
+        assert any("--work-tree" in a and a[-2:] == ["add", "-A"] for a in args), \
+            "the scaffold is staged into the store"
+        assert any("commit-tree" in a for a in args), \
+            "the scaffold is committed straight into the store"
+        assert any("worktree" in a and "add" in a and str(target) in a
+                   for a in args), \
+            "the base worktree is added from the store"
+        scaffolds = [e for e in calls if e[0] == "scaffold"]
+        assert len(scaffolds) == 2, \
+            "scaffolded into the staging dir and again into the born worktree"
     print("ok: --no-gh creates a local project with no GitHub call")
 
 
@@ -139,17 +159,20 @@ def test_create_gh_private_happy_path_order() -> None:
         kinds = [a[0] for a, _c in calls]
         assert any(a[:2] == ["git", "init"] for a, _ in calls)
         assert kinds[0] == "gh", "gh auth status is checked before anything runs"
-        assert any(a == ["git", "add", "-A"] for a, _ in calls)
+        assert any("--work-tree" in a and a[-2:] == ["add", "-A"] for a, _ in calls), \
+            "the scaffold is staged into the store"
         commit = next(a for a, _ in calls if a[:2] == ["git", "-c"])
         assert "user.name=orch" in commit and "user.email=orch@localhost" in commit
         gh = next(a for a, _ in calls if a[:2] == ["gh", "repo"])
         assert gh == ["gh", "repo", "create", "demo", "--private",
-                      "--source", str(Path(tmp) / "demo"),
+                      "--source", str(Path(tmp) / "demo" / "demo.git"),
                       "--remote", "origin", "--push", "--description", "a demo"]
-        init_idx = next(i for i, entry in enumerate(calls) if entry[0] == "init")
+        wt_idx = next(i for i, entry in enumerate(calls)
+                      if isinstance(entry[0], list) and "worktree" in entry[0]
+                      and "add" in entry[0])
         gh_idx = next(i for i, entry in enumerate(calls)
                       if isinstance(entry[0], list) and entry[0][:2] == ["gh", "repo"])
-        assert init_idx < gh_idx, "init must run before the gh push"
+        assert wt_idx < gh_idx, "the base worktree must exist before the gh push"
     print("ok: gh path runs git init -> orch init -> commit -> gh push")
 
 
@@ -235,6 +258,73 @@ def test_create_inside_a_root_succeeds() -> None:
                            roots=[root])
         assert r.ok, r.problems
     print("ok: create inside a supervised root proceeds normally")
+
+
+def test_create_produces_a_bare_store_and_base_worktree() -> None:
+    import os as _os
+    orig_run = project._run
+    orig_init = project.init_mod.run
+    orig_scaffold = project.init_mod.scaffold
+    project._run, project.init_mod.run = _REAL_RUN, _REAL_INIT
+    project.init_mod.scaffold = _REAL_SCAFFOLD
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = _os.environ.get("XDG_STATE_HOME")
+            old_cfg = _os.environ.get("XDG_CONFIG_HOME")
+            _os.environ["XDG_STATE_HOME"] = str(Path(tmp) / "state")
+            _os.environ["XDG_CONFIG_HOME"] = str(Path(tmp) / "config")
+            try:
+                r = project.create("demo", path=tmp, gh=False,
+                                   allow_unsupervised=True)
+                assert r.ok, r.problems
+                project_dir = Path(tmp) / "demo"
+                store = project_dir / "demo.git"
+                target = project_dir / "main"
+
+                assert sorted(p.name for p in project_dir.iterdir()) == \
+                    ["demo.git", "main"], \
+                    "the project folder holds the bare store and the main worktree"
+                rc, out = project._run(["git", "-C", str(store), "rev-parse",
+                                        "--is-bare-repository"])
+                assert rc == 0 and out == "true", f"store is not bare: {out!r}"
+                rc, common = project._run(["git", "-C", str(target), "rev-parse",
+                                           "--path-format=absolute",
+                                           "--git-common-dir"])
+                assert rc == 0 and Path(common) == store, common
+                rc, branch = project._run(["git", "-C", str(target), "branch",
+                                           "--show-current"])
+                assert rc == 0 and branch == "main", branch
+                rc, wt = project._run(["git", "-C", str(target), "worktree", "list"])
+                assert rc == 0 and f"{target} " in wt and "[main]" in wt, wt
+                rc, log = project._run(["git", "-C", str(target), "log",
+                                        "--oneline"])
+                assert rc == 0
+                lines = [l for l in log.splitlines() if l.strip()]
+                assert len(lines) == 1 and "scaffold" in lines[0], log
+                rc, st = project._run(["git", "-C", str(target), "status",
+                                       "--porcelain"])
+                assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
+                assert (target / ".orchestration" / "hooks"
+                        / "session-idle.sample").is_file(), \
+                    "the born worktree must hold the gitignored hook templates"
+                assert str(store) in state.discover_projects([tmp]), \
+                    "discovery must map the bare store to the base worktree"
+                assert state.is_trusted(store), \
+                    "the bare store must be trusted"
+            finally:
+                if old is None:
+                    _os.environ.pop("XDG_STATE_HOME", None)
+                else:
+                    _os.environ["XDG_STATE_HOME"] = old
+                if old_cfg is None:
+                    _os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    _os.environ["XDG_CONFIG_HOME"] = old_cfg
+    finally:
+        project._run = orig_run
+        project.init_mod.run = orig_init
+        project.init_mod.scaffold = orig_scaffold
+    print("ok: create makes a bare store with a base worktree on main")
 
 
 def test_cmd_project_create_prints_next_steps() -> None:

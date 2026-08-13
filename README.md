@@ -134,8 +134,12 @@ blocked on a permission/question.
 ## Creating a project from scratch
 
 `orch project create <name>` (or `--name <name>`, or neither: it asks) is the
-from-zero path: it `git init`s a repo on `main`, runs `orch init` inside it,
-commits the base, and (by default) creates a **private** GitHub repo and pushes —
+from-zero path: it creates a project folder (`<name>/`) holding the **bare**
+repo as the fully-tracked store (`<name>.git`) and, adjacent to it, the base
+worktree `main/` checked out from it on `main` — born already initialized: the
+project is scaffolded (`orch init`) and committed straight into the store before
+the worktree is checked out. Task worktrees land in the same project folder.
+By default it also creates a **private** GitHub repo and pushes —
 `gh` must be installed and authenticated or the command aborts (`--no-gh` creates
 locally only, `--public` flips visibility, `--dir <parent>` chooses the parent,
 prompting for it too when omitted). On a terminal every omitted flag is asked:

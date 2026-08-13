@@ -190,13 +190,18 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
     return Path(top), notes
 
 
-def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
-    target, notes = resolve_target(start)
-    if target is None:
-        return InitResult([], [], notes)
-
+def scaffold(target: Path, version: str = "0", force: bool = False
+             ) -> tuple[list[str], list[str]]:
+    """Write the .orchestration scaffolding (and machine-level global-hook
+    examples) into `target`, which need not be a git worktree. Returns
+    (created, skipped) relative paths. Does no repo resolution and no trust -
+    the caller decides what to do with the files (e.g. `project create` commits
+    them straight into a bare store)."""
     created: list[str] = []
     skipped: list[str] = []
+
+    from . import hooks
+    from . import opencode_events
 
     orch = target / ".orchestration"
     hooks_dir = orch / "hooks"
@@ -211,9 +216,6 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
         if executable:
             p.chmod(0o755)
         created.append(rel)
-
-    from . import hooks
-    from . import opencode_events
 
     write(orch / "README.md", TEMPLATE_README)
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
@@ -230,6 +232,24 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
               hooks.event_hook_template(name, "sample", event, props,
                                         commit=True))
     write(orch / ".version", version + "\n")
+
+    g_created, g_skipped = hooks.install_examples(force=force)
+    for name in g_created:
+        created.append(f"global-hooks/{name}")
+    for name in g_skipped:
+        skipped.append(f"global-hooks/{name}")
+
+    return created, skipped
+
+
+def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
+    target, notes = resolve_target(start)
+    if target is None:
+        return InitResult([], [], notes)
+
+    from . import hooks
+    from . import opencode_events
+    created, skipped = scaffold(target, version, force)
 
     project_hooks = "\n".join(
         f"    - {name} - {when}" for name, when in TASK_HOOKS.items()
@@ -249,11 +269,6 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
         "stdin; the vocabulary lives in src/orch/opencode_events.py."
     )
 
-    g_created, g_skipped = hooks.install_examples(force=force)
-    for name in g_created:
-        created.append(f"global-hooks/{name}")
-    for name in g_skipped:
-        skipped.append(f"global-hooks/{name}")
     global_hooks = "\n".join(
         f"    - {event} - {when}" for event, when in hooks.GLOBAL_HOOKS.items()
     )

@@ -23,8 +23,8 @@ NOOP = "noop"
 ARCHIVED = "archived"
 
 MAX_DEPTH = 6
-PRUNE = (".git", "node_modules", ".venv", ".local", ".cache", ".rustup",
-         ".nvm", "Library", "AppData", ".stack")
+PRUNE = (".git", "*.git", "node_modules", ".venv", ".local", ".cache",
+         ".rustup", ".nvm", "Library", "AppData", ".stack")
 
 ORCH_DIR = ".orchestration"
 TASKS_REL = "tasks"

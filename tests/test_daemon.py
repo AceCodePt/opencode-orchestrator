@@ -112,7 +112,7 @@ def test_alert_fires_the_global_hook_once() -> None:
         sup.apply(acts)
         sup.apply(acts)  # deduped: must not fire twice
         assert _wait_for(marker)
-        assert marker.read_text().strip() == "alert:alert:lab.git:task-a"
+        assert marker.read_text().strip() == "alert:alert:lab:task-a"
         assert marker.read_text().strip().count("\n") == 0, "one fire only"
     finally:
         tmp.cleanup()
@@ -135,7 +135,7 @@ def test_needs_review_fires_the_global_hook() -> None:
         assert daemon.NEEDS_REVIEW in _kinds(acts)
         sup.apply(acts)
         assert _wait_for(marker)
-        assert marker.read_text().strip() == "needs-review:needs-review:lab.git:task-a"
+        assert marker.read_text().strip() == "needs-review:needs-review:lab:task-a"
     finally:
         tmp.cleanup()
         _hook_env_restore(saved)

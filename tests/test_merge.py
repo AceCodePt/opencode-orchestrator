@@ -249,7 +249,7 @@ def test_cli_merge_fires_the_merged_global_hook() -> None:
         while not marker.exists() and time.time() < deadline:
             time.sleep(0.05)
         assert marker.exists(), "the CLI merge must fire the merged global hook"
-        assert marker.read_text().strip() == "merged:cli:lab.git:task-a"
+        assert marker.read_text().strip() == "merged:cli:lab:task-a"
     finally:
         tmp.cleanup()
         for k, v in saved.items():

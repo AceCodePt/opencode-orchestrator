@@ -83,7 +83,8 @@ class Snapshot:
 
 def project_label(project: str) -> str:
     p = Path(project)
-    return p.parent.name if p.name == ".git" else p.name
+    name = p.parent.name if p.name == ".git" else p.name
+    return name[:-4] if name.endswith(".git") else name
 
 
 def _commit_dirty(worktree: Path, message: str) -> None:

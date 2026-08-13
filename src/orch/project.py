@@ -38,7 +38,8 @@ def _run(args: list[str], cwd: Path | None = None,
          timeout: float = 120.0) -> tuple[int, str]:
     try:
         p = subprocess.run(args, cwd=str(cwd) if cwd else None,
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
     return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
@@ -115,10 +116,12 @@ def create(name: str, path: str | None = None, gh: bool = True,
     if not name or "/" in name or name in (".", ".."):
         return result.fail(f"{name!r} is not a usable project name")
 
-    parent = Path(path).expanduser() if path else Path.cwd()
-    target = parent / name
-    if target.exists():
-        return result.fail(f"{target} already exists; pick another name or --path")
+    parent = (Path(path).expanduser() if path else Path.cwd()).resolve()
+    project = parent / name
+    store = project / f"{name}.git"
+    target = project / "main"
+    if project.exists():
+        return result.fail(f"{project} already exists; pick another name or --path")
 
     if gh:
         ok, err = gh_ready()
@@ -131,28 +134,58 @@ def create(name: str, path: str | None = None, gh: bool = True,
         if supervised:
             return result.fail(supervised)
 
-    parent.mkdir(parents=True, exist_ok=True)
-    rc, out = _run(["git", "init", "-b", base, name], cwd=parent)
-    if rc != 0:
-        return result.fail(out or "git init failed")
-    result.step(f"git init -b {base} {target}")
-    target.mkdir(parents=True, exist_ok=True)
+    def fail(msg: str) -> CreateResult:
+        shutil.rmtree(project, ignore_errors=True)
+        shutil.rmtree(store, ignore_errors=True)
+        return result.fail(msg)
 
-    r = init_mod.run(target, force=False, version=version)
-    for c in r.created:
+    parent.mkdir(parents=True, exist_ok=True)
+    project.mkdir(parents=True, exist_ok=True)
+    rc, out = _run(["git", "init", "--bare", "-q", "-b", base, str(store)],
+                   cwd=parent)
+    if rc != 0:
+        return fail(out or "git init --bare failed")
+    result.step(f"git init --bare -b {base} {project.name}/{store.name}")
+
+    target.mkdir(parents=True, exist_ok=True)
+    created, _skipped = init_mod.scaffold(target, version)
+    for c in created:
         result.step(f"created {c}")
 
     (target / "README.md").write_text(f"# {name}\n")
     (target / ".gitignore").write_text(GITIGNORE)
 
-    rc, out = _run(["git", "add", "-A"], cwd=target)
+    rc, out = _run(["git", "--git-dir", str(store), "--work-tree", str(target),
+                    "add", "-A"], cwd=parent)
     if rc != 0:
-        return result.fail(out or "git add failed")
-    rc, out = _run(["git", "-c", "user.name=orch", "-c", "user.email=orch@localhost",
-                    "commit", "-q", "-m", "scaffold: orch init, base branch"], cwd=target)
+        return fail(out or "git add failed")
+    rc, out = _run(["git", "--git-dir", str(store), "write-tree"], cwd=parent)
     if rc != 0:
-        return result.fail(out or "initial commit failed")
+        return fail(out or "git write-tree failed")
+    tree = (out.strip().splitlines() or [""])[-1]
+    rc, out = _run([
+        "git", "-c", "user.name=orch", "-c", "user.email=orch@localhost",
+        "--git-dir", str(store), "commit-tree", tree, "-m",
+        "scaffold: orch init, base branch"], cwd=parent)
+    if rc != 0:
+        return fail(out or "git commit-tree failed")
+    commit = (out.strip().splitlines() or [""])[-1]
+    rc, out = _run(["git", "--git-dir", str(store), "update-ref",
+                    f"refs/heads/{base}", commit], cwd=parent)
+    if rc != 0:
+        return fail(out or "git update-ref failed")
     result.step("committed the base branch")
+
+    shutil.rmtree(target, ignore_errors=True)
+
+    rc, out = _run(["git", "--git-dir", str(store), "worktree", "add",
+                    str(target), base], cwd=parent)
+    if rc != 0:
+        return fail(out or "git worktree add failed")
+    result.step(f"git worktree add {target.relative_to(project)} on "
+                f"{base} (base worktree)")
+
+    init_mod.scaffold(target, version)
 
     rc, common = _run(["git", "rev-parse", "--path-format=absolute",
                        "--git-common-dir"], cwd=target)
@@ -162,13 +195,13 @@ def create(name: str, path: str | None = None, gh: bool = True,
 
     if gh:
         vis = "public" if public else "private"
-        cmd = ["gh", "repo", "create", name, f"--{vis}", "--source", str(target),
+        cmd = ["gh", "repo", "create", name, f"--{vis}", "--source", str(store),
                "--remote", "origin", "--push"]
         if description:
             cmd += ["--description", description]
         rc, out = _run(cmd)
         if rc != 0:
-            return result.fail(out or "gh repo create failed")
+            return fail(out or "gh repo create failed")
         result.step(f"created a {vis} GitHub repo and pushed origin")
 
     return result
