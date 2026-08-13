@@ -454,7 +454,9 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
             if reply not in ("allow", "deny"):
                 print("a permission takes `allow` or `deny`", file=sys.stderr)
                 return 2
-            harness.reply_permission(port, b.session_id, b.request_id, reply)
+            harness.reply_permission(port, b.request_id,
+                                     "once" if reply == "allow" else "reject",
+                                     directory=t.worktree)
             print(f"{reply}ed permission {b.request_id} for {args.name}")
     except Exception as e:  # noqa: BLE001
         print(f"could not answer {b.request_id}: {e}", file=sys.stderr)

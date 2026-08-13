@@ -58,9 +58,10 @@ def test_answer_allow_replies_to_a_permission() -> None:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="allow",
                                        request=None))
         assert rc == 0, rc
-        (port, sid, pid, reply), kw = replies[0]
-        assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "allow")
-        assert kw == {}, "an answer is one-time; nothing is persisted"
+        (port, pid, reply), kw = replies[0]
+        assert (port, pid, reply) == (4096, "per_1", "once")
+        assert kw == {"directory": None}, \
+            "an allow maps to the v2 once reply, scoped to the worktree"
     finally:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status

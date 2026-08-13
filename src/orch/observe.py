@@ -74,9 +74,9 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
     status = harness.session_status(port)
     busy = [sid for sid in watch if sid in status]
 
-    perms = [p for p in harness.permissions(port)
+    perms = [p for p in harness.permissions(port, worktree)
              if str(p.get("sessionID") or "") in set(ids)]
-    ques = [q for q in harness.questions(port)
+    ques = [q for q in harness.questions(port, worktree)
             if str(q.get("sessionID") or "") in set(ids)]
 
     if perms:

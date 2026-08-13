@@ -39,9 +39,10 @@ in one source file has one place to check.
   a freshly mounted disk or `orch init` is picked up within the next scan. `locate`
   was rejected precisely because it is a *snapshot* — the stale-cache pattern this
   design removes.
-- **`dispatch_pid` matches the exact cmdline** (`opencode run … --dir <worktree>`),
-  not `cwd`, so a hand-opened viewer (`opencode attach`) cannot masquerade as a
-  dispatch and hold a task open forever.
+- **Dispatch is a server session, not a subprocess.** Task agents are created with
+  `POST /session?directory=<worktree>` plus `prompt_async`, so there is no `opencode run`
+  process to scan for or kill. A hand-opened viewer (`opencode attach`) attaches to the
+  same shared server and cannot create a second claim — the branch is the claim.
 - **The base branch is excluded from the task set.** `main` is an integration branch,
   not a task; only branches other than base are claims.
 - **Archived tasks still scan.** The spec moves to `archive/`, so `task list` shows
@@ -87,18 +88,14 @@ in one source file has one place to check.
   re-derives the state from the worktree.
 - **Actions carry their project** (the common-dir), because one daemon supervises
   every project and task names are unique only within one.
-- **"Busy" is the orchestrated run process, not the session status.** `/session/status`
-  only lists sessions streaming tokens, so an agent inside a long-running tool looks
-  idle. `opencode run` stays alive for the whole agent loop and exits when done, so the
-  daemon treats a live **detached** `opencode run` process in the worktree as the agent
-  working and holds settling until it exits — no premature teardown of a slow agent.
-  Detached means `start_new_session` with stdin from `/dev/null`, read from
-  `/proc` (no controlling terminal) — a process property, not a title. A human-attached
-  client (one running in a terminal) is not the agent working and is ignored for
-  settling (the session is the truth). A run client stuck alive past
-  `MAX_ORCHESTRATED_S` is escaped, so it can never stall a task forever. This restores
-  the original dispatch-process signal that the earlier "session idle is always the
-  truth" fix removed after misreading a 5-second SIGTERM grace as a lingering client.
+- **"Busy" is the session status, and it is enough.** opencode's `/session/status`
+  reports `busy` for the whole agent loop (LLM turns and long-running tool calls) and
+  `idle` when the agent is done; a pending `/permission` or `/question` ask for the
+  worktree is `blocked`. Dispatch no longer spawns an `opencode run` process, so there
+  is no process-based signal to hold settling on — the session state plus the worktree
+  state and the verification hook are the truth. Blocked asks stay pending until a human
+  answers them: the headless `opencode run` loop used to auto-reject (or auto-approve
+  with `--auto`) every ask before a human could see it.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
@@ -142,10 +139,11 @@ in one source file has one place to check.
   that is neither declared nor archived can never satisfy the dependency check, so
   `check_task_dependencies` fails loudly on it.
 - **The human answers a block through the CLI, not through orch's memory.**
-  `orch task answer <name> allow|deny` (or a question's text) posts to the shared
-  server's permission/question endpoint for the pending request the scan already
-  surfaced. It is a human act against the live server, not stored state; the daemon
-  notices the unblock on its next scan.
+  `orch task answer <name> allow|deny` (or a question's text) posts the reply to the
+  shared server's permission endpoint for the pending request the scan already surfaced:
+  `POST /permission/{requestID}/reply?directory=<worktree>` with `once`/`reject` (allow
+  maps to `once`, deny to `reject`). It is a human act against the live server, not
+  stored state; the daemon notices the unblock on its next scan.
 
 ## `dispatch.py`
 
@@ -154,15 +152,15 @@ in one source file has one place to check.
 - **Order is the design.** Refuse an existing claim → `pre-task-create` from the
   dispatcher's worktree → create the worktree → `post-task-create` from the new one →
   note whether a verification hook is committed → dispatch.
-- **Dispatch is detached** (`start_new_session`, stdin from `/dev/null`): it must
-  survive the shell that started it and must not die from a Ctrl-C meant for the CLI —
-  and the detachment doubles as the orchestration marker.
-- **`--format json` makes the first leg of a run machine-readable**, but the dispatch
-  exit code is never task completion — completion is derived from the worktree.
-- **"Orchestrated" is a process property, not a title.** `dispatch_pid` counts a run
-  process as the agent working only if it also has no controlling terminal (read from
-  `/proc`) — exactly how orch starts it. A human-attached run in a terminal is never
-  matched. `_kill_dispatch` finds the same process by worktree alone at teardown.
+- **Dispatch is a server-side session, not a spawned process.** `POST /session?directory=<worktree>`
+  binds the session to the task worktree (the workspace-routing middleware honours the
+  query), then `POST /session/{id}/prompt_async` sends the task prompt. Nothing is
+  forked, so a Ctrl-C meant for the CLI cannot touch the agent, and there is nothing to
+  detach or kill at teardown. The trade that buys the permission gate: the headless
+  `opencode run` loop that used to auto-answer every ask is gone, so asks stay pending
+  until a human answers them.
+- **Completion is never the dispatch call's return.** Completion is derived from the
+  worktree (clean + committed + diffing) once the session idles.
 
 ## `verify.py`
 
@@ -315,10 +313,11 @@ in one source file has one place to check.
   loop, hitting the same `SessionCompaction.process` path automatic context-overflow
   uses; it is the only working route — the v2 `POST /api/session/{id}/compact` is a
   stub that returns 503 on 1.18.x.
-- **First use is `opencode run`, not `POST /session`.** The shared server starts in a
-  neutral cwd, so a session created via `POST /session` would bind to the wrong
-  directory. The run binds the session to the base worktree and answers the first
-  message in one step.
+- **First use is still `opencode run --attach` for `orch ask` only.** The primary agent
+  keeps the streaming attach path so `orch ask` renders the conversation; task agents,
+  by contrast, are created directly via `POST /session?directory=<worktree>` — the
+  workspace-routing middleware binds the session to the worktree, so a neutral server
+  cwd is no obstacle.
 - **Reply rendering skips synthetic parts.** Only non-synthetic `text` parts are the
   agent's actual answer; tool traces and "Called the Read tool" fillers are noise.
 
@@ -330,6 +329,12 @@ in one source file has one place to check.
 - **Use `/permission`, `/question`, `/session?directory=`, not the `/api/*`
   equivalents** — the latter two returned empty against a session that was demonstrably
   busy and blocked.
+- **`/permission` and `/question` are workspace-scoped.** The list endpoints only
+  return asks for the workspace named in the `?directory=` query, so every call must
+  pass the worktree — an unscoped call silently reads as "nobody is blocked". The
+  reply endpoint is `POST /permission/{requestID}/reply?directory=<worktree>` with
+  `once`/`always`/`reject`; the dead v1 path was `POST /session/{id}/permissions/{id}`
+  with `{response: allow|deny}`.
 - **`GET /session` is global, not per-server** — the `?directory=` filter is the only
   usable join from a task to its state.
 - **`server.heartbeat` separates "stream alive, agent quiet" from "stream dead"** —

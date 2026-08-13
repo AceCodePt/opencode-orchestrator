@@ -204,8 +204,8 @@ def test_status_reports_busy() -> None:
     agent.harness.sessions = lambda _p, **kw: [
         {"id": "ses_1", "title": agent.AGENT_TITLE}]
     agent.harness.session_status = lambda _p: {"ses_1": {}}
-    agent.harness.permissions = lambda _p: []
-    agent.harness.questions = lambda _p: []
+    agent.harness.permissions = lambda _p, _d=None: []
+    agent.harness.questions = lambda _p, _d=None: []
     try:
         st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st == {"session": "ses_1", "state": "busy", "blocked": []}
@@ -225,10 +225,10 @@ def test_status_reports_blocked_and_none_when_absent() -> None:
     agent.harness.sessions = lambda _p, **kw: [
         {"id": "ses_1", "title": agent.AGENT_TITLE}]
     agent.harness.session_status = lambda _p: {}
-    agent.harness.permissions = lambda _p: [{
+    agent.harness.permissions = lambda _p, _d=None: [{
         "id": "per_1", "sessionID": "ses_1", "permission": "bash",
         "patterns": ["/etc/*"]}]
-    agent.harness.questions = lambda _p: []
+    agent.harness.questions = lambda _p, _d=None: []
     try:
         st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st["state"] == "blocked" and st["blocked"] == ["/etc/*"]

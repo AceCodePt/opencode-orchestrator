@@ -135,9 +135,9 @@ def status(info: server.ServerInfo, base: Path) -> dict:
     if sid is None:
         return {"session": None, "state": "none", "blocked": []}
     busy = sid in (harness.session_status(info.port) or {})
-    perms = [p for p in harness.permissions(info.port)
+    perms = [p for p in harness.permissions(info.port, str(base))
              if str(p.get("sessionID") or "") == sid]
-    ques = [q for q in harness.questions(info.port)
+    ques = [q for q in harness.questions(info.port, str(base))
             if str(q.get("sessionID") or "") == sid]
     if perms or ques:
         state_ = "blocked"

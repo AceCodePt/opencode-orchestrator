@@ -23,8 +23,8 @@ backlog file. Nothing can drift because there is nothing to drift from.
 | worktree / branch | `git worktree list` |
 | dirty / diff | `git status --porcelain` in the worktree; `rev-list --count base..branch` |
 | session state | the shared server: `/session?directory=<worktree>` |
-| dispatch alive | `/proc` — the process whose cmdline is `opencode run … --dir <worktree>` |
-| dispatch orchestrated | `/proc` — such a process **with no controlling terminal**: one the daemon or CLI started detached |
+| dispatch alive | a session bound to the worktree that is busy or blocked — task agents are server sessions, not subprocesses |
+| dispatch orchestrated | the task has a session on the shared server (every task session is created by `orch task start` or the scheduler via `POST /session`) |
 | which projects exist | a live scan of `$HOME`, `/mnt`, and orch's dev root `/tmp/opencode` (env `ORCH_ROOTS` overrides) for `.orchestration/` dirs |
 | retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
 
@@ -74,15 +74,20 @@ function of a snapshot, so every branch above is testable.
 
 ### When is an agent "still working"?
 
-`/session/status` only reports sessions that are streaming tokens, so an agent that is
-sitting inside a long-running tool shows up idle. The reliable signal for **orchestrated**
-agents — the ones `orch task start` or the scheduler spawned — is the run process
-itself: `opencode run` stays alive for the whole agent loop and exits when it is done.
-Orch spawns those **detached** (`start_new_session`, stdin from `/dev/null`), so a run
-process is orchestrated when it matches the worktree **and** has no controlling
-terminal — a process property read from `/proc`, not a title. A human-attached client
-(one running in a terminal) is not the agent working, so the daemon settles on session
-state alone; the process's tty is the human-switch for what "busy" means.
+Every task agent is a session on the shared server bound to its worktree — created via
+`POST /session?directory=<worktree>`, prompted via `prompt_async` — so there is no
+dispatch subprocess to inspect. The daemon reads three signals from the server:
+
+- **busy** — the session appears in `/session/status` (opencode reports `busy` for the
+  whole agent loop, including long-running tool calls); the agent is working.
+- **blocked** — a pending ask for that worktree in `/permission` or `/question`; the
+  agent is waiting on a human.
+- **idle** — neither; the work is settled, and the verification hook plus the worktree
+  state decide the outcome.
+
+A human-attached client (`opencode attach`) shares the same sessions and is simply
+another viewer; nothing about a controlling terminal distinguishes an orchestrated
+agent anymore.
 
 Per claimed task, each cycle:
 

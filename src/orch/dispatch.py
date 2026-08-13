@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import envfilter, server, state, verify
+from . import harness, server, state, verify
 
 HOOK_PRE = "pre-task-create"
 HOOK_POST = "post-task-create"
@@ -48,6 +47,7 @@ class Result:
     problems: list[str] = field(default_factory=list)
     pid: int | None = None
     url: str | None = None
+    session_id: str | None = None
     worktree: Path | None = None
 
     def step(self, msg: str) -> None:
@@ -222,28 +222,6 @@ def create_worktree(p: Plan, result: Result) -> bool:
     return True
 
 
-def dispatch_command(p: Plan, url: str, json_stream: bool = True) -> list[str]:
-    cmd = ["opencode", "run", "--attach", url, "--dir", str(p.worktree)]
-    if json_stream:
-        cmd += ["--format", "json"]
-    if p.model:
-        cmd += ["-m", p.model]
-    if p.agent:
-        cmd += ["--agent", p.agent]
-    cmd += ["--title", p.task, p.prompt]
-    return cmd
-
-
-def log_path(p: Plan) -> Path:
-    d = server.state_dir() / "tasks"
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        d.chmod(0o700)
-    except OSError:
-        pass
-    return d / f"{p.task}.jsonl"
-
-
 RESOLVE_PROMPT = (
     "A merge into the base branch is in progress and conflicts. Resolve every "
     "conflict marker in this worktree so the tree is coherent, then commit the "
@@ -252,32 +230,8 @@ RESOLVE_PROMPT = (
 )
 
 
-def resolve_command(base_wt: Path, task: str, url: str) -> list[str]:
-    return [
-        "opencode", "run", "--attach", url, "--dir", str(base_wt),
-        "--format", "json", "--title", f"{slug(task)}-merge-conflict",
-        RESOLVE_PROMPT,
-    ]
-
-
-def resolve_log_path(task: str) -> Path:
-    d = server.state_dir() / "tasks"
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        d.chmod(0o700)
-    except OSError:
-        pass
-    return d / f"{slug(task)}.merge.jsonl"
-
-
-def _open_private(path: Path):
-    """Open a log for the agent's stdout with owner-only permissions."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    return os.fdopen(fd, "wb", buffering=0)
-
-
 def start_resolve(base_wt: Path, task: str) -> Result:
-    """Spawn an agent to resolve <task>'s merge conflict in the base worktree,
+    """Start an agent to resolve <task>'s merge conflict in the base worktree,
     which is mid-merge (MERGE_HEAD set). The agent must resolve and commit."""
     result = Result(ok=True)
     try:
@@ -287,26 +241,20 @@ def start_resolve(base_wt: Path, task: str) -> Result:
     if srv is None:
         return result.fail("no shared server is running, so nothing to attach to")
 
-    cmd = resolve_command(base_wt, task, srv.url)
-    out = resolve_log_path(task)
-    handle = _open_private(out)
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(base_wt), stdout=handle,
-            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=envfilter.filtered_env(os.environ,
-                                       repo_drop=envfilter.repo_drops(base_wt)),
-        )
-    except OSError as e:
-        handle.close()
-        return result.fail(f"could not spawn the resolution agent: {e}")
-    finally:
-        handle.close()
-
-    result.pid = proc.pid
-    result.step(f"resolution agent pid={proc.pid} resolving {slug(task)} in {base_wt}")
-    result.step(f"events -> {out}")
+        sess = harness.create_session(srv.port, str(base_wt),
+                                      title=f"{slug(task)}-merge-conflict")
+    except harness.HarnessError as e:
+        return result.fail(f"could not create the resolution session: {e}")
+    sid = (sess or {}).get("id")
+    if not sid:
+        return result.fail("the server did not return a session id")
+    try:
+        harness.prompt_async(srv.port, sid, RESOLVE_PROMPT)
+    except harness.HarnessError as e:
+        return result.fail(f"could not prompt the resolution session: {e}")
+    result.session_id = sid
+    result.step(f"resolution session {sid} resolving {slug(task)} in {base_wt}")
     return result
 
 
@@ -350,10 +298,9 @@ def start(
         )
 
     if dry_run:
-        srv = server.current()
-        url = srv.url if srv else "<no server running>"
         result.step("dry run, nothing executed")
-        result.step("would run: " + " ".join(dispatch_command(p, url)))
+        result.step(f"would run a task session for {p.task} on the shared "
+                    f"server, bound to {p.worktree}")
         return result
 
     env = {
@@ -384,27 +331,22 @@ def start(
     result.step(f"shared server pid={srv.pid} {srv.url}")
     result.url = srv.url
 
-    cmd = dispatch_command(p, srv.url)
-    out = log_path(p)
-    handle = _open_private(out)
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(p.worktree), stdout=handle,
-            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=envfilter.filtered_env(os.environ,
-                                       repo_drop=envfilter.repo_drops(p.dispatcher)),
-        )
-    except OSError as e:
-        handle.close()
-        return result.fail(f"could not spawn opencode run: {e}")
-    finally:
-        handle.close()
-
-    result.pid = proc.pid
-    result.step(f"dispatched pid={proc.pid}, events -> {out}")
+        sess = harness.create_session(srv.port, str(p.worktree), title=p.task)
+    except harness.HarnessError as e:
+        return result.fail(f"could not create the task session: {e}")
+    sid = (sess or {}).get("id")
+    if not sid:
+        return result.fail("the server did not return a session id")
+    try:
+        harness.prompt_async(srv.port, sid, p.prompt,
+                             agent=p.agent, model=p.model)
+    except harness.HarnessError as e:
+        return result.fail(f"could not prompt the task session: {e}")
+    result.session_id = sid
+    result.step(f"task session {sid} for {p.task} in {p.worktree}")
     result.step(
-        "completion is NOT this process exiting: the daemon settles on a clean, "
+        "completion is NOT a process exiting: the daemon settles on a clean, "
         "committed, diffing branch. Watch `orch task list`."
     )
     return result

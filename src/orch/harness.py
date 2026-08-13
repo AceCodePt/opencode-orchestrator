@@ -110,12 +110,23 @@ def event_stream(port: int, timeout: float = 30.0):
                 yield ev
 
 
-def permissions(port: int) -> list[dict]:
-    return _as_list(get(port, "/permission"))
+def permissions(port: int, directory: str | None = None) -> list[dict]:
+    """Pending permission asks, scoped to `directory` (a workspace). The server
+    only lists asks for the workspace named in the query, so callers must pass
+    the worktree to see a task's pending permissions."""
+    path = "/permission"
+    if directory:
+        from urllib.parse import quote
+        path += f"?directory={quote(directory, safe='/')}"
+    return _as_list(get(port, path))
 
 
-def questions(port: int) -> list[dict]:
-    return _as_list(get(port, "/question"))
+def questions(port: int, directory: str | None = None) -> list[dict]:
+    path = "/question"
+    if directory:
+        from urllib.parse import quote
+        path += f"?directory={quote(directory, safe='/')}"
+    return _as_list(get(port, path))
 
 
 def sessions(port: int, directory: str | None = None) -> list[dict]:
@@ -124,6 +135,28 @@ def sessions(port: int, directory: str | None = None) -> list[dict]:
         from urllib.parse import quote
         path += f"?directory={quote(directory, safe='/')}"
     return _as_list(get(port, path))
+
+
+def create_session(port: int, directory: str | None = None,
+                   title: str | None = None) -> dict:
+    """Create a session bound to `directory` (the worktree). Returns the
+    session dict. No run loop is attached, so permission asks stay pending
+    until a human answers them - the headless `opencode run` loop would
+    auto-reject them instead."""
+    from urllib.parse import quote
+    path = "/session"
+    if directory:
+        path += f"?directory={quote(directory, safe='/')}"
+    body: dict = {}
+    if title:
+        body["title"] = title
+    raw = post(port, path, body)
+    if isinstance(raw, dict):
+        data = raw.get("data")
+        if isinstance(data, dict):
+            return data
+        return raw
+    return {}
 
 
 def _as_list(value: Any) -> list[dict]:
@@ -143,20 +176,30 @@ def abort(port: int, session_id: str) -> Any:
     return post(port, f"/session/{session_id}/abort")
 
 
-def reply_permission(port: int, session_id: str, permission_id: str,
-                     response: str) -> Any:
-    """Approve once. Nothing is persisted to the runtime."""
-    return post(port, f"/session/{session_id}/permissions/{permission_id}",
-                {"response": response})
+def reply_permission(port: int, permission_id: str, reply: str,
+                     directory: str | None = None) -> Any:
+    """Answer a pending permission ask. `reply` is once|always|reject (the v2
+    vocabulary). `directory` is the worktree the ask lives in - asks are
+    workspace-scoped on the server, so it is required to reach the right one."""
+    path = f"/permission/{permission_id}/reply"
+    if directory:
+        from urllib.parse import quote
+        path += f"?directory={quote(directory, safe='/')}"
+    return post(port, path, {"reply": reply})
 
 
 def reply_question(port: int, request_id: str, answers: Any) -> Any:
     return post(port, f"/question/{request_id}/reply", {"answers": answers})
 
 
-def prompt_async(port: int, session_id: str, text: str) -> Any:
-    return post(port, f"/session/{session_id}/prompt_async",
-                {"parts": [{"type": "text", "text": text}]})
+def prompt_async(port: int, session_id: str, text: str,
+                 agent: str | None = None, model: str | None = None) -> Any:
+    body: dict = {"parts": [{"type": "text", "text": text}]}
+    if agent:
+        body["agent"] = agent
+    if model:
+        body["model"] = model
+    return post(port, f"/session/{session_id}/prompt_async", body)
 
 
 def message(port: int, session_id: str, text: str,

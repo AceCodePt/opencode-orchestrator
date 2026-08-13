@@ -82,21 +82,49 @@ def test_missing_task_file_needs_an_explicit_prompt() -> None:
     print("ok: ad-hoc dispatch requires an explicit prompt")
 
 
-def test_dispatch_command_shape() -> None:
+def test_start_creates_a_session_via_the_server_api() -> None:
     root, tmp = _repo()
     _task_file(root, "probe")
     _commit(root)
-    p, _ = dispatch.plan(root, "probe", model="m/x", agent="builder")
-    assert p is not None
-    cmd = dispatch.dispatch_command(p, "http://127.0.0.1:4096")
-    assert cmd[:3] == ["opencode", "run", "--attach"]
-    assert "--dir" in cmd and str(p.worktree) in cmd
-    assert cmd[cmd.index("--format") + 1] == "json"
-    assert cmd[cmd.index("-m") + 1] == "m/x"
-    assert cmd[cmd.index("--agent") + 1] == "builder"
-    assert cmd[-1] == p.prompt, "the prompt must be the final positional"
+
+    orig_start = dispatch.server.start
+    orig_create = dispatch.harness.create_session
+    orig_prompt = dispatch.harness.prompt_async
+    calls: list = []
+
+    class _Srv:
+        pid = 1234
+        port = 4099
+        url = "http://127.0.0.1:4099"
+
+    dispatch.server.start = lambda: _Srv()
+
+    def create_session(port, directory, title=None):
+        calls.append(("create", port, directory, title))
+        return {"id": "ses_abc"}
+
+    def prompt_async(port, sid, text, agent=None, model=None):
+        calls.append(("prompt", port, sid, text, agent, model))
+
+    dispatch.harness.create_session = create_session
+    dispatch.harness.prompt_async = prompt_async
+    try:
+        r = dispatch.start(root, "probe", model="m/x", agent="builder")
+        assert r.ok, r.problems
+        assert r.session_id == "ses_abc"
+        assert calls[0] == ("create", 4099, str(r.worktree), "probe"), calls
+        assert calls[1][0] == "prompt" and calls[1][2] == "ses_abc", calls
+        assert calls[1][4] == "builder" and calls[1][5] == "m/x", calls
+        assert "tasks/probe/task.md" in calls[1][3], \
+            "the prompt must carry the task instructions"
+        assert not any("opencode" in s and "run" in s for s in r.steps), \
+            "dispatch must not spawn an `opencode run` process"
+    finally:
+        dispatch.server.start = orig_start
+        dispatch.harness.create_session = orig_create
+        dispatch.harness.prompt_async = orig_prompt
     tmp.cleanup()
-    print("ok: the dispatch command is well formed")
+    print("ok: start creates a task session via the server API, no run loop")
 
 
 def test_branch_exists_detects_a_claim() -> None:

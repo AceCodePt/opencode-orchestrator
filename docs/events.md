@@ -106,7 +106,7 @@ so v1 is what 1.18.13 emitted in practice.
 | `/global/health` | Returns `{"healthy":true,"version":"1.18.13"}` — use this for version negotiation |
 | `/api/permission/request` | Returned empty against a demonstrably blocked session |
 | `/api/session/active` | Returned empty against a demonstrably busy session |
-| `/permission`, `/question`, `/session/status` | Correct. Use these. |
+| `/permission`, `/question`, `/session/status` | Correct. Use these — but `/permission` and `/question` are **workspace-scoped**: pass `?directory=<worktree>`, or a pending ask for a task reads as "nobody is blocked" |
 | `/api/location` | `{"directory": …, "project": {"id": …, "directory": …}}` — maps a port to a worktree |
 | `--port` | `--help` claims `[default: 0]`, but omitting it starts **no server** |
 
