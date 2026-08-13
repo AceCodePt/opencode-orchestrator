@@ -598,6 +598,26 @@ def test_unit_text_keeps_the_expected_shape() -> None:
     print("ok: the systemd unit restarts always and keeps the server alive")
 
 
+def test_unit_text_bakes_the_install_time_environment() -> None:
+    import os
+    saved = dict(os.environ)
+    try:
+        os.environ["HOME"] = "/home/tester"
+        os.environ["PATH"] = "/home/tester/.opencode/bin:/usr/bin:/bin"
+        os.environ["ORCH_ROOTS"] = "/home/tester,/srv/lab"
+        text = daemon.unit_text(interval=10)
+        assert "Environment=HOME=/home/tester" in text
+        assert "Environment=PATH=/home/tester/.opencode/bin:/usr/bin:/bin" in text
+        assert "Environment=ORCH_ROOTS=/home/tester,/srv/lab" in text
+        os.environ.pop("ORCH_ROOTS")
+        assert "Environment=ORCH_ROOTS=" not in daemon.unit_text(interval=10), \
+            "an unset ORCH_ROOTS must fall back to the daemon's own defaults"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    print("ok: the unit carries the daemon's opencode PATH and supervised roots")
+
+
 def test_scheduler_dispatches_a_declared_todo() -> None:
     mem = daemon.LoopState()
     todo = _task(claimed=False, branch=None, worktree=None)

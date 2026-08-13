@@ -719,6 +719,12 @@ After=network-online.target
 
 [Service]
 Type=simple
+# The daemon must be able to (re)start the shared server, which spawns
+# `opencode`. systemd's default PATH does not include the user's shell PATH
+# (e.g. ~/.opencode/bin), so the install-time environment is baked in. This
+# also carries ORCH_ROOTS when the owner set it, so supervised roots survive
+# an install.
+{env}
 ExecStart={orch} daemon run --interval {interval:g}
 # Restart always, not on-failure: a supervisor that has exited cleanly is still a
 # supervisor that is not supervising, and nothing else notices its absence.
@@ -741,8 +747,25 @@ def unit_path() -> Path:
     return Path(base) / "systemd" / "user" / UNIT_NAME
 
 
+def _dedup_path(path: str) -> str:
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in path.split(":"):
+        if entry and entry not in seen:
+            seen.add(entry)
+            out.append(entry)
+    return ":".join(out)
+
+
 def unit_text(interval: float = 10.0) -> str:
-    return UNIT.format(orch=server.orch_bin(), interval=interval)
+    env = {"HOME": os.environ.get("HOME") or str(Path.home()),
+           "PATH": _dedup_path(os.environ.get("PATH")
+                               or "/usr/local/bin:/usr/bin:/bin")}
+    roots = os.environ.get("ORCH_ROOTS")
+    if roots:
+        env["ORCH_ROOTS"] = roots
+    lines = "\n".join(f"Environment={k}={v}" for k, v in env.items())
+    return UNIT.format(orch=server.orch_bin(), interval=interval, env=lines)
 
 
 def _run_config_cmd(cmd: list[str], out: list[str]) -> None:
