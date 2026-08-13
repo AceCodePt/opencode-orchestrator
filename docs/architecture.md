@@ -140,7 +140,9 @@ therefore unambiguous: the hook never passed.
 There is no external issue tracker. The project's own `tasks/` *is* the tracker:
 - a spec file declares work, a branch claims it, the daemon verifies and merges it, `archive/` closes it
 - ordering is `dependencies:` front matter — a slice dispatches when its dependencies archive, which is exactly the frontier query
-- intake is `orch task draft` (free text → spec task + slice tasks) and `orch ask` (the persistent project agent)
+- intake is a conversation in opencode: the `create_task` custom tool turns free text
+  (with the human deciding the wait flags) into a spec task + slice tasks; `orch ask` is
+  the headless path, the TUI the interactive one
 - triage is a human reviewing uncommitted drafted specs — approve (commit), ask-for-info (leave uncommitted), or drop
 
 GitHub is **hosting only**: `orch project create` pushes a private repo; nothing reads
@@ -209,7 +211,7 @@ string cannot do this job.
 | `orch project scheduler [<n>\|off]` | show or set the project's auto-dispatch cap (`scheduler.maxConcurrent`). Writes into the base worktree's `.orchestration/config.json` for review and commit; the committed copy is the only one in force |
 | `orch daemon budget [<n>\|off]` | show or set the machine-wide auto-dispatch cap in `~/.config/orch/daemon.json`; `0` disables scheduling machine-wide, `off`/absent means per-project caps only |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
-| `orch task draft "<text>"` | a one-shot agent converts free text into `tasks/` specs (review and commit). The project is trusted for the daemon |
+| `create_task`/`update_task`/`archive_task`/`delete_task` | machine-global opencode custom tools (installed by orch into `~/.config/opencode/tools/`) — intake is a conversation, not a command: any opencode session can create/amend/move/remove `tasks/` specs from params. None ever commits or trusts |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project; `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take |
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted |
@@ -284,7 +286,7 @@ Distinct from task agents, a project can have **one persistent primary agent**
 (`orch ask`). It is a session on the shared server attached to the project's
 base worktree, found live by its `orch:agent` session title — no stored state,
 matching the "the repo is the state" rule. First use creates it with the
-`opencode run --attach` pattern (same one `task draft` uses); later asks continue the
+`opencode run --attach` pattern; later asks continue the
 same session via `POST /session/{id}/message`. `--compact` calls
 `POST /session/{id}/summarize`, which enqueues a `compaction` step and runs
 opencode's own `SessionCompaction` loop (the same path automatic context
@@ -312,11 +314,14 @@ torn down, and its work is never a task.
 The dispatch process exiting is not the task finishing. Completion is derived later
 from the worktree state, by the daemon.
 
-`orch task draft "<text>"` turns a free-text description into one or more
-`tasks/<name>/task.md` specs with a one-shot opencode agent (attached to the shared
-server, writing into the base worktree). It never claims or dispatches the task — the
-human reviews and commits the draft. It is spec-writing help, not automation: model
-and wording stay opencode's and the human's.
+Intake has no CLI one-shot. It is a conversation: an opencode session in the base
+worktree (the TUI, or `orch ask` headlessly) turns a free-text description into one
+or more `tasks/<name>/task.md` specs by calling the machine-global `create_task`
+custom tool — writing into the base worktree, leaving the specs uncommitted for the
+human to review and commit. The tool takes the wait flags (`wait_human_start` /
+`wait_human_merge`) as optional booleans the agent passes as the conversation
+decided (default `false`); it
+never claims, dispatches, commits, or trusts.
 
 ## Flow A′ — the scheduler
 

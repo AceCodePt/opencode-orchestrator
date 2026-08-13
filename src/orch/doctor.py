@@ -389,6 +389,7 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     checks += check_trust(cwd)
     checks += check_task_dependencies(cwd)
     checks += check_global_hooks()
+    checks += check_custom_tools()
     worst = 0
     for c in checks:
         if c.status == FAIL:
@@ -398,9 +399,32 @@ def run(cwd: Path | None = None) -> tuple[list[Check], int]:
     return checks, worst
 
 
+def check_custom_tools() -> list[Check]:
+    from . import custom_tools
+
+    problems = custom_tools.check()
+    if problems:
+        out = []
+        for msg in problems:
+            out.append(Check(FAIL, "custom tools", msg))
+        return out
+    out = [Check(OK, "custom tools",
+                 "create_task/update_task/archive_task/delete_task installed and current")]
+    info = server.current()
+    newest = 0
+    try:
+        for p in custom_tools.TOOLS_DIR.glob("*.ts"):
+            newest = max(newest, int(p.stat().st_mtime))
+    except OSError:
+        pass
+    if info is not None and newest and info.started_at < newest:
+        out.append(Check(
+            WARN, "custom tools", "the shared server predates the installed tool "
+            "files - restart it (`orch server restart`) so sessions can call them"))
+    return out
+
+
 _MARK = {OK: "[ok]  ", WARN: "[warn]", FAIL: "[FAIL]"}
-
-
 def render(checks: list[Check]) -> str:
     lines = []
     for c in checks:

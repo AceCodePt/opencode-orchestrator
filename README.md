@@ -49,7 +49,6 @@ bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart
 bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md) and trust the project
-bin/orch task draft "<text>"     # an agent converts free text into tasks/ specs and trusts the project (--file - for stdin)
 bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 bin/orch task start <name> --dry-run
 bin/orch task list               # render the backlog + status from the scan
@@ -60,6 +59,7 @@ bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
 
 bin/orch ask "<message>"         # converse with the project's primary agent (created on first use)
+bin/orch ask --stream "<message>"# stream the reply as it is produced (tool calls shown); without it, a thinking indicator runs while you wait
 bin/orch ask --async "<message>" # fire-and-forget: send and return immediately
 bin/orch ask --compact [msg]     # run opencode's own compaction, then optionally ask
 bin/orch ask --status            # is the primary agent idle, busy, or blocked
@@ -83,7 +83,7 @@ trust-bound: a project the machine owner has not approved (`orch project trust`)
 verified, merged, scheduled or resolved — it only raises an `alert` saying so. The marker
 lives in `~/.local/state/orch/trusted.json`, outside the repo, so a project cannot
 approve itself. A repo you merely clone can never auto-run its verification hook. `orch init`,
-`orch project create`, `orch task add`, and `orch task draft` all trust the project
+`orch project create`, and `orch task add` all trust the project
 they scaffold work into (each is the owner acting); `doctor` fails on an untrusted
 project.
 
@@ -120,8 +120,11 @@ conversation attached to the project's base worktree on the shared server, found
 live by its `orch:agent` session title. `orch ask` creates it on first use and
 keeps talking to the same session, so it remembers the conversation. You can ask
 it questions, have it change files, fire a message and check later (`--async`),
-and compact the conversation when context grows — `--compact` runs **opencode's
-own compaction** (`POST /session/{id}/summarize`), not a stand-in.
+compact the conversation when context grows — `--compact` runs **opencode's
+own compaction** (`POST /session/{id}/summarize`), not a stand-in — and stream
+the reply as it is produced (`--stream`): text parts print live and tool calls
+show as `[tool: …]` markers. Without `--stream`, a *thinking* indicator spins on
+the terminal while the reply is awaited, so a long answer is never silent.
 
 The primary agent works in the base worktree: its edits stay uncommitted for you
 to review and commit, and the daemon never verifies, merges, or tears it down — it
@@ -142,13 +145,45 @@ The parent must otherwise be inside a supervised root
 (`$HOME`, `/mnt`, or `ORCH_ROOTS`) — a project the daemon cannot discover would
 never settle, so create refuses and says so; `--allow-unsupervised` creates one
 anyway, and `ORCH_ROOTS=/` supervises the whole filesystem. Then
-`orch task draft "<free text>"` has a
-one-shot agent convert an idea — or a whole pasted spec — into `tasks/<name>/task.md`
-specs for you to review and commit. Both commands leave the project on the
+intake is a conversation: `orch ask "<free text>"` (or any opencode session in the
+base worktree) turns an idea — or a whole pasted spec — into `tasks/<name>/task.md`
+specs via the machine's `create_task` custom tool, for you to review and commit. Both
+commands leave the project on the
 base worktree with the fail-closed verification hook; copy `.orchestration/hooks/session-idle.sample`
 to `hooks/session-idle` and edit it to real checks before dispatching, and keep the
 project under `$HOME`/`/mnt`
 (`ORCH_ROOTS`) so the daemon supervises it.
+
+## Task intake: opencode custom tools
+
+Intake is not a CLI command — it is four opencode **custom tools** installed once per
+machine by orch (`orch install`, or ensured by `orch server start`) into
+`~/.config/opencode/tools/`, so every opencode session — the shared server's headless
+sessions and any local TUI in any project — can call them. There is no `task draft`;
+you draft in the conversation itself.
+
+| Tool | What it does |
+| --- | --- |
+| `create_task` | Write `tasks/<name>/task.md` from params. `wait_human_start`/`wait_human_merge` are passed as the conversation decided (default `false` — scheduler-eligible, auto-merge). Refuses to overwrite an existing task. |
+| `update_task` | Amend an **uncommitted** draft; only the fields you pass change. Refuses committed tasks. |
+| `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. |
+| `delete_task` | Remove a task. Refuses claimed tasks and tasks other open tasks depend on. |
+
+The tools are thin bridges to a Python backend (`bin/orch tasktool` — a hidden
+dispatcher subcommand), so slugs, front matter, dependencies, and refusals are
+validated by the same code the rest of orch uses. **No tool ever commits** — every
+action leaves a working-tree change for you to review and commit, because committing
+stays a human act. A tool also never
+trusts a project; trust comes only from `orch init`/`project create`/`task add`/
+`project trust`. Because the tools are machine-global, they are callable from any
+opencode session — the safety rails (refuse off-base, refuse claimed, refuse a
+delete that would strand an open dependent) are enforced by the tool itself, not by
+per-project config.
+
+`create_task`'s own description carries the decomposition contract, so no skill is
+needed: decide one task or several, anchor a multi-part effort with a spec task and
+one vertical slice task per deliverable, wire the slices with `dependencies:` edges
+the scheduler honors, and give every task a runnable Verification.
 
 ## Two things worth knowing before dispatching
 
@@ -266,12 +301,15 @@ an OS-level sandbox — orch does not provide one.
 ## What works, and what does not
 
 Working and exercised against live agents: `init`, `verify`, `doctor`, `server`,
-`project create`/`trust`/`untrust`/`list`, `ask`, and `task add`/`draft`/`start`/`list`/
+`project create`/`trust`/`untrust`/`list`, `ask`, and `task add`/`start`/`list`/
 `answer`/`reset`/`archive`/`merge`,
 and the daemon — including the full loop of settle → verify → commit-on-pass → merge →
 archive, the failure loop of verify-fail → inject → bounded retry → `needs-review`, the
 no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
-of `todo` tasks, opt-in per project and trust-bound). A slow agent that spends minutes
+of `todo` tasks, opt-in per project and trust-bound). Task intake via the machine's
+`create_task`/`update_task`/`archive_task`/`delete_task` custom tools is exercised
+against live agents (an agent calling the tools writes, amends, moves, and removes
+`tasks/` specs through them). A slow agent that spends minutes
 inside a tool is
 held, not torn down: the daemon treats a live detached `opencode run` process in the
 worktree as the agent working and only settles once it exits.
@@ -326,8 +364,10 @@ session-idle verification hook never firing from the stream.
 
 ## Layout
 
-- `bin/` — dispatcher
+- `bin/` — dispatcher (`orch`; `orch tasktool` is a hidden backend subcommand)
 - `src/orch/` — state (scan), dispatch, daemon, verify, merge, server, doctor, CLI,
+  `tasktool.py` (the custom-tool backend), `custom_tools.py` (installs the global
+  tools), `tools/` (the `.ts` tool bridges),
   `opencode_events.py` (the server-event catalog), and `sse.py` (the daemon's
   `/event` stream consumer that fires per-event hooks)
 - `docs/` — architecture and decisions

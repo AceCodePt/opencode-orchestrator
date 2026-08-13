@@ -4,6 +4,7 @@ import argparse
 import json
 import shlex
 import sys
+import threading
 from pathlib import Path
 
 from . import agent as agent_mod
@@ -464,27 +465,6 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_task_draft(args: argparse.Namespace) -> int:
-    start = Path(args.directory) if args.directory else Path.cwd()
-    text = args.text
-    if args.file:
-        if args.file == "-":
-            text = sys.stdin.read()
-        else:
-            try:
-                text = Path(args.file).read_text()
-            except OSError as e:
-                print(f"could not read {args.file}: {e}", file=sys.stderr)
-                return 2
-    if not text or not text.strip():
-        print("no description given (pass text, or --file - for stdin)",
-              file=sys.stderr)
-        return 2
-    r = tasks_mod.draft_specs(start, text, timeout=args.timeout)
-    print(tasks_mod.render(r))
-    return 0 if r.ok else 1
-
-
 def cmd_verify(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
     top, _, err = dispatch_mod.project_of(start)
@@ -524,6 +504,14 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
+    from . import custom_tools
+
+    if custom_tools.ensure():
+        server_mod.restart()
+        print("custom tools installed to "
+              f"{custom_tools.TOOLS_DIR}; shared server restarted")
+    else:
+        print(f"custom tools current in {custom_tools.TOOLS_DIR}")
     for line in daemon_mod.install(interval=args.interval,
                                    enable=not args.no_enable):
         print(line)
@@ -637,20 +625,23 @@ def cmd_ask(args: argparse.Namespace) -> int:
         if args.message is None:
             return 0
 
+    if args.stream and args.async_:
+        print("--stream cannot be combined with --async", file=sys.stderr)
+        return 2
+
     if args.message is None:
         return _ask_interactive(args, info, base, sid)
 
-    if sid is None:
-        sid, notes = agent_mod.create(info, base, args.message,
-                                      timeout=args.timeout)
-        for n in notes:
-            print(f"  ! {n}", file=sys.stderr)
-        if sid is None:
-            return 1
-        print(agent_mod.last_reply(info.port, sid) or "(no text reply)")
-        return 0
-
     if args.async_:
+        if sid is None:
+            sid, notes = agent_mod.create(info, base, args.message,
+                                          timeout=args.timeout)
+            for n in notes:
+                print(f"  ! {n}", file=sys.stderr)
+            if sid is None:
+                return 1
+            print(f"sent to new session {sid}")
+            return 0
         err = agent_mod.fire(info, sid, args.message)
         if err:
             print(err, file=sys.stderr)
@@ -658,12 +649,87 @@ def cmd_ask(args: argparse.Namespace) -> int:
         print(f"sent to session {sid}")
         return 0
 
-    reply, err = agent_mod.ask(info, sid, args.message, timeout=args.timeout)
+    if args.stream:
+        return _stream_ask(args, info, base, sid, args.message)
+
+    stop = _thinking()
+    reply = None
+    err = None
+    try:
+        if sid is None:
+            sid, notes = agent_mod.create(info, base, args.message,
+                                          timeout=args.timeout)
+            for n in notes:
+                print(f"  ! {n}", file=sys.stderr)
+            if sid is None:
+                return 1
+            reply = agent_mod.last_reply(info.port, sid)
+        else:
+            reply, err = agent_mod.ask(info, sid, args.message,
+                                       timeout=args.timeout)
+    finally:
+        if stop is not None:
+            stop.set()
     if err:
         print(err, file=sys.stderr)
         return 1
     print(reply or "(no text reply)")
     return 0
+
+
+def _stream_ask(args: argparse.Namespace, info, base, sid, text: str) -> int:
+    got_text = False
+    try:
+        for kind, payload in agent_mod.stream_reply(
+                info, base, text, session_id=sid, timeout=args.timeout):
+            if kind == "text":
+                print(payload, end="", flush=True)
+                got_text = True
+            elif kind == "tool":
+                print(f"\n[tool: {payload}]", file=sys.stderr, flush=True)
+            elif kind == "shell":
+                print("\n[shell]", file=sys.stderr, flush=True)
+            elif kind == "error":
+                print(f"\n[error: {payload}]", file=sys.stderr, flush=True)
+            elif kind == "exit":
+                if payload != "0":
+                    if not got_text:
+                        return 1
+                    print("\n[agent exited non-zero after partial output]",
+                          file=sys.stderr)
+    except harness.HarnessError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print()
+    return 0
+
+
+def _thinking() -> threading.Event | None:
+    """A small 'agent is thinking' spinner on stderr while the blocking ask
+    waits. Returns a stop event, or None when there is no terminal to draw on."""
+    try:
+        if not sys.stderr.isatty():
+            return None
+    except (AttributeError, OSError):
+        return None
+    stop = threading.Event()
+    frames = "|/-\\"
+
+    def spin() -> None:
+        i = 0
+        while not stop.is_set():
+            sys.stderr.write(
+                f"\r  agent is thinking {frames[i % len(frames)]}"
+                "    (--stream for live output)"
+            )
+            sys.stderr.flush()
+            i += 1
+            stop.wait(0.15)
+        sys.stderr.write("\r" + " " * 64 + "\r")
+        sys.stderr.flush()
+
+    threading.Thread(target=spin, daemon=True).start()
+    return stop
 
 
 def _ask_interactive(args: argparse.Namespace, info, base, sid) -> int:
@@ -676,16 +742,28 @@ def _ask_interactive(args: argparse.Namespace, info, base, sid) -> int:
             return 0
         if not line.strip():
             continue
-        if sid is None:
-            sid, notes = agent_mod.create(info, base, line,
-                                          timeout=args.timeout)
-            for n in notes:
-                print(f"  ! {n}", file=sys.stderr)
-            if sid is None:
-                return 1
-            print(agent_mod.last_reply(info.port, sid) or "(no text reply)")
+        if args.stream:
+            rc = _stream_ask(args, info, base, sid, line)
+            if rc != 0:
+                return rc
             continue
-        reply, err = agent_mod.ask(info, sid, line, timeout=args.timeout)
+        stop = _thinking()
+        reply = None
+        err = None
+        try:
+            if sid is None:
+                sid, notes = agent_mod.create(info, base, line,
+                                              timeout=args.timeout)
+                for n in notes:
+                    print(f"  ! {n}", file=sys.stderr)
+                if sid is None:
+                    return 1
+                reply = agent_mod.last_reply(info.port, sid)
+            else:
+                reply, err = agent_mod.ask(info, sid, line, timeout=args.timeout)
+        finally:
+            if stop is not None:
+                stop.set()
         if err:
             print(err, file=sys.stderr)
             return 1
@@ -779,7 +857,7 @@ def cmd_project_create(args: argparse.Namespace) -> int:
         return 1
     print("\nnext:")
     print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit")
-    print('  bin/orch task draft "<free text>"   # an agent turns an idea into tasks/ specs')
+    print('  bin/orch ask "<message>"             # converse with the project\'s primary agent')
     print("  bin/orch server start && bin/orch install && bin/orch doctor")
     print("  bin/orch task list && bin/orch task start <name>")
     return 0
@@ -856,11 +934,21 @@ def cmd_version(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tasktool(args: argparse.Namespace) -> int:
+    """Internal backend for the machine's create/update/archive/delete custom
+    tools. Hidden from help; called as `bin/orch tasktool <op> ...`."""
+    from . import tasktool as tasktool_mod
+
+    return tasktool_mod.main(list(args.rest))
+
+
 class _SubcommandHelpFormatter(argparse.HelpFormatter):
     def _format_action(self, action: argparse.Action) -> str:
         if action.nargs == argparse.PARSER:
             parts: list[str] = []
             for subaction in self._iter_indented_subactions(action):
+                if getattr(subaction, "help", None) == argparse.SUPPRESS:
+                    continue
                 r = self._format_action(subaction) or ""
                 parts.append("".join(
                     l[2:] if l.startswith("  ") else l
@@ -971,20 +1059,6 @@ def build_parser() -> argparse.ArgumentParser:
     ta2.add_argument("--request", help="answer a specific pending request id")
     ta2.set_defaults(func=cmd_task_answer)
 
-    td = tsub.add_parser(
-        "draft",
-        help="convert free text into one or more task specs with an agent",
-    )
-    td.add_argument("text", nargs="?",
-                    help="the description (omit to use --file)")
-    td.add_argument("--file",
-                    help="read the description from a file, or - for stdin")
-    td.add_argument("-C", "--directory",
-                    help="write into this worktree instead of the current one")
-    td.add_argument("--timeout", type=float, default=600.0,
-                    help="max seconds for the drafting agent (default: %(default)s)")
-    td.set_defaults(func=cmd_task_draft)
-
     pj = sub.add_parser("project", help="create and inspect projects")
     pj.set_defaults(func=cmd_project_help, _pparser=pj)
     pjsub = pj.add_subparsers(dest="project_cmd", metavar="<command>",
@@ -1062,6 +1136,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="message to send; omit for an interactive conversation")
     a.add_argument("--async", dest="async_", action="store_true",
                    help="fire-and-forget: send the message and return immediately")
+    a.add_argument("--stream", action="store_true",
+                   help="stream the reply as it is produced instead of waiting "
+                        "for the whole block")
     a.add_argument("--compact", action="store_true",
                    help="compact the conversation first (opencode's own compaction)")
     a.add_argument("--status", action="store_true",
@@ -1134,6 +1211,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("version", help="show the orch version")
     v.set_defaults(func=cmd_version)
+
+    tt = sub.add_parser("tasktool", help=argparse.SUPPRESS)
+    tt.add_argument("rest", nargs=argparse.REMAINDER,
+                    help=argparse.SUPPRESS)
+    tt.set_defaults(func=cmd_tasktool)
     return p
 
 

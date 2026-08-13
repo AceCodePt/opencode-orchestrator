@@ -262,31 +262,43 @@ in one source file has one place to check.
   feature branch is not dispatchable, and hiding that would be a silent surprise.
 - **Names go through `slug`** so the directory and the branch cannot disagree about
   what the task is called.
-- **`task draft` writes specs from free text, it never claims.** A one-shot opencode
-  agent (the same `opencode run --attach` pattern the primary agent uses) turns a
-  description into one or more `tasks/<name>/task.md` specs and reports what it
-  created (`tasks/` diff before/after — never a git-status guess). It prefers one
-  task unless the text clearly decomposes into independent work, never touches files
-  outside `tasks/`, and never claims or dispatches — the human reviews and commits,
-  so drafting lowers the cost of a good spec without removing the human from the
-  loop. The raw text is appended to the prompt after formatting, so the description's
-  own `{}` cannot break the template.
-- **`task draft` is the spec-and-slices step.** The spec-and-tickets workflow that
-  used to live in two separate skills is folded into the draft prompt: one agent
-  writes the **spec task** (`tasks/<feature>/task.md`, the anchor that is never
-  dispatched) plus **slice tasks** (`tasks/<feature>-<slice>/task.md`), each a
-  vertical tracer bullet sized to one context window, with its blocking edges as
-  `dependencies:` front matter pointing at the spec task and earlier slices. A wide
-  mechanical refactor is an expand-contract sequence, not a vertical slice. The
-  prompt teaches behavior-over-procedure and runnable Verifications; nothing is
-  claimed until a human reviews and commits.
+- **`task draft` is gone; intake is an opencode conversation over custom tools.**
+  The one-shot CLI draft (`opencode run --attach` writing specs from a hardcoded
+  prompt) is replaced by four machine-global opencode custom tools —
+  `create_task`, `update_task`, `archive_task`, `delete_task` — installed by orch
+  into `~/.config/opencode/tools/` (the same config dir the shared server loads, so
+  headless sessions and any local TUI get them). The tools are thin zod-validated
+  bridges to a Python backend (`bin/orch tasktool` — a hidden dispatcher
+  subcommand), so slugs, front matter, dependencies and refusals share orch's code.
+  None of them commits, dispatches, claims, or trusts; every action is a
+  working-tree change the human reviews and commits, because the commit stays a
+  human act.
+- **The wait flags are decided in the conversation, never hardcoded.** The old
+  prompt baked in `wait_human_start: true` for the spec task and `false` for the
+  slices. `create_task` takes `wait_human_start`/`wait_human_merge` as optional
+  booleans that the agent passes as the human's preferences surfaced in the
+  conversation — they default to `false` (scheduler-eligible, auto-merge) when
+  not passed. The tool validates their type, but the decision is the
+  conversation's, not the tool's.
+- **The decomposition teaching lives in the tool description, not a skill.** The
+  spec-and-slices workflow (a spec task anchoring one or more vertical slice tasks,
+  `dependencies:` blocking edges, expand-contract for wide refactors,
+  behavior-over-procedure, runnable Verifications) is carried by `create_task`'s
+  own description. A skill was considered and dropped: it only fires if a model
+  decides to load it, and it would be a second source of truth that can drift from
+  the tools. The tool is always present, so its description is the single contract.
+- **Agent control is bounded by the tool, not by config.** Because the tools are
+  machine-global, they are callable from any opencode session, so a per-project
+  config gate would be theater. The safety invariants live in the tool itself:
+  refuse outside a project, refuse off the base branch, refuse a claimed task,
+  refuse `delete_task` while any open declared task depends on it.
 
 ## `agent.py`
 
 - **One primary agent per project, found live, never stored.** It is the session
   titled `orch:agent` in the project's base worktree on the shared server; the first
-  `orch ask` creates it via the `opencode run --attach` pattern (the same one
-  `task draft` uses), later asks continue the same session through
+  `orch ask` creates it via the `opencode run --attach` pattern, later asks continue
+  the same session through
   `POST /session/{id}/message`. No registry, no file — the "repo is the state" rule
   holds for a conversation too.
 - **The primary agent is outside the daemon's loop.** It works in the base worktree

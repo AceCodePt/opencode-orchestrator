@@ -22,7 +22,7 @@ class _FakeProject:
 
 def _args(**kw) -> argparse.Namespace:
     a = argparse.Namespace(directory=None, timeout=60.0, status=False,
-                           compact=False, async_=False)
+                           compact=False, async_=False, stream=False)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -349,6 +349,95 @@ def test_cmd_ask_compact_then_send() -> None:
     finally:
         _restore(saved)
     print("ok: `ask --compact <msg>` compacts then sends")
+
+
+def test_stream_event_maps_text_tool_shell_and_error() -> None:
+    assert agent._stream_event(
+        {"type": "text", "part": {"type": "text", "text": "hello"}}) \
+        == ("text", "hello")
+    assert agent._stream_event(
+        {"type": "text", "part": {"type": "tool", "tool": "create_task"}}) \
+        == ("tool", "create_task")
+    assert agent._stream_event(
+        {"type": "text", "part": {"type": "shell"}}) == ("shell", "shell")
+    assert agent._stream_event(
+        {"type": "error", "part": {"type": "error", "error": "boom"}}) \
+        == ("error", "boom")
+    assert agent._stream_event(
+        {"type": "step_finish", "part": {"type": "step-finish"}}) is None
+    print("ok: the stream renderer maps text, tool, shell and error events")
+
+
+def test_stream_reply_yields_parts_and_the_exit_code() -> None:
+    lines = [
+        '{"type": "text", "part": {"type": "text", "text": "first "}}',
+        '{"type": "text", "part": {"type": "tool", "tool": "create_task"}}',
+        '{"type": "text", "part": {"type": "text", "text": "reply"}}',
+    ]
+
+    class _Stream:
+        def __init__(self, items) -> None:
+            self._it = iter(items)
+
+        def __iter__(self):
+            return self._it
+
+        def close(self) -> None:
+            pass
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.stdout = _Stream(l + "\n" for l in lines)
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    captured = []
+    orig_popen = agent.subprocess.Popen
+    agent.subprocess.Popen = lambda *a, **k: captured.append(a) or _FakeProc()
+    try:
+        events = list(agent.stream_reply(_INFO, _FakeProject.base_worktree,
+                                         "hi", session_id="ses_1",
+                                         timeout=30.0))
+        text = "".join(p for k, p in events if k == "text")
+        assert text == "first reply"
+        assert ("tool", "create_task") in events
+        assert ("exit", "0") in events
+        cmd = captured[0][0]
+        assert "-s" in cmd and "ses_1" in cmd
+        assert cmd[0] == "opencode" and "--format" in cmd
+    finally:
+        agent.subprocess.Popen = orig_popen
+    print("ok: stream_reply yields text, tool markers, and the exit code")
+
+
+def test_cmd_ask_stream_uses_stream_reply_on_the_found_session() -> None:
+    streamed = []
+    saved = _patch_cli(find=lambda p, b: "ses_1")
+    orig_stream = cli.agent_mod.stream_reply
+
+    def fake_stream(info, base, text, session_id=None, timeout=60.0):
+        streamed.append((session_id, text))
+        yield "text", "live answer"
+
+    cli.agent_mod.stream_reply = fake_stream
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_ask(_args(stream=True, message="go"))
+        assert rc == 0, rc
+        assert "live answer" in buf.getvalue()
+        assert streamed == [("ses_1", "go")]
+    finally:
+        _restore(saved)
+        cli.agent_mod.stream_reply = orig_stream
+    print("ok: `ask --stream` streams the reply on the found session")
 
 
 def main() -> int:

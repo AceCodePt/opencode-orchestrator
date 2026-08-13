@@ -164,6 +164,14 @@ def orch_bin() -> str:
 
 
 def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
+    from . import custom_tools
+
+    if custom_tools.ensure():
+        existing = current()
+        if existing:
+            stop()
+        reuse = False
+
     if reuse:
         existing = current()
         if existing and existing.healthy():
