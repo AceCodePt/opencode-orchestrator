@@ -71,7 +71,7 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
                if s.get("id") and not s.get("parentID")]
     watch = primary or ids
 
-    status = harness.session_status(port)
+    status = harness.session_status(port, worktree)
     busy = [sid for sid in watch if sid in status]
 
     perms = [p for p in harness.permissions(port, worktree)

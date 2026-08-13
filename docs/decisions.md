@@ -300,8 +300,8 @@ in one source file has one place to check.
 
 - **One primary agent per project, found live, never stored.** It is the session
   titled `orch:agent` in the project's base worktree on the shared server; the first
-  `orch ask` creates it via the `opencode run --attach` pattern, later asks continue
-  the same session through
+  `orch ask` creates it via `POST /session?directory=<base>` plus `prompt_async`,
+  later asks continue the same session through
   `POST /session/{id}/message`. No registry, no file — the "repo is the state" rule
   holds for a conversation too.
 - **The primary agent is outside the daemon's loop.** It works in the base worktree
@@ -313,11 +313,14 @@ in one source file has one place to check.
   loop, hitting the same `SessionCompaction.process` path automatic context-overflow
   uses; it is the only working route — the v2 `POST /api/session/{id}/compact` is a
   stub that returns 503 on 1.18.x.
-- **First use is still `opencode run --attach` for `orch ask` only.** The primary agent
-  keeps the streaming attach path so `orch ask` renders the conversation; task agents,
-  by contrast, are created directly via `POST /session?directory=<worktree>` — the
-  workspace-routing middleware binds the session to the worktree, so a neutral server
-  cwd is no obstacle.
+- **The primary agent is a server session like any task agent — no run loop.**
+  `create` and `--stream` are `POST /session?directory=<base>` + `prompt_async` with
+  the reply read back through the messages API, so `orch ask` renders the
+  conversation without ever spawning `opencode run`. That means the primary agent is
+  held to the same permission gate as task agents: an ask stays pending (surfaced as
+  `[blocked]` in the stream and in `orch ask --status`) instead of being auto-rejected
+  by the headless run loop. The workspace-routing middleware binds the session to the
+  base worktree, so a neutral server cwd is no obstacle.
 - **Reply rendering skips synthetic parts.** Only non-synthetic `text` parts are the
   agent's actual answer; tool traces and "Called the Read tool" fillers are noise.
 

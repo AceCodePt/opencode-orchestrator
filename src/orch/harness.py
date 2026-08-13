@@ -72,8 +72,16 @@ def location(port: int) -> dict | None:
     return get(port, "/api/location")
 
 
-def session_status(port: int) -> dict:
-    return get(port, "/session/status") or {}
+def session_status(port: int, directory: str | None = None) -> dict:
+    """Status of the sessions in `directory` (a workspace). The server only
+    reports sessions for the workspace named in the query - without it the map
+    is empty even while sessions are streaming - so callers must pass the
+    worktree/base to see whether a session is busy."""
+    path = "/session/status"
+    if directory:
+        from urllib.parse import quote
+        path += f"?directory={quote(directory, safe='/')}"
+    return get(port, path) or {}
 
 
 def _parse_sse_data(line: str) -> dict | None:

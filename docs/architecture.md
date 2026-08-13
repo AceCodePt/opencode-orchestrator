@@ -169,7 +169,7 @@ or writes issues, labels, or PRs.
                                   │ HTTP         │
    ┌────────────────────────────▼──────────────▼────────────────────┐
    │  ONE `opencode serve` per machine (headless, always a port)    │
-   │  sessions per worktree; agents run with `opencode run --attach`│
+   │  sessions per worktree; agents are server sessions, never runs │
    └───────────────────────────────┬────────────────────────────────┘
                                     │ the verification hook
                           ┌──────────▼───────────┐
@@ -290,9 +290,12 @@ for blocked alerts). Existing dedup carries over — alerts fire once per reques
 Distinct from task agents, a project can have **one persistent primary agent**
 (`orch ask`). It is a session on the shared server attached to the project's
 base worktree, found live by its `orch:agent` session title — no stored state,
-matching the "the repo is the state" rule. First use creates it with the
-`opencode run --attach` pattern; later asks continue the
-same session via `POST /session/{id}/message`. `--compact` calls
+matching the "the repo is the state" rule. First use creates it with
+`POST /session?directory=<base>` plus `prompt_async`; later asks continue the
+same session via `POST /session/{id}/message`. Like task agents it is a plain
+server session with **no `opencode run` loop**, so a permission ask stays pending
+and is surfaced in the stream as `[blocked]` instead of being auto-rejected.
+`--compact` calls
 `POST /session/{id}/summarize`, which enqueues a `compaction` step and runs
 opencode's own `SessionCompaction` loop (the same path automatic context
 overflow uses), never a stand-in. The primary agent edits the base worktree
@@ -308,16 +311,18 @@ torn down, and its work is never a task.
 4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
 5. CLI runs `hooks/post-task-create` (the committed base copy) from the new worktree.
 6. CLI notes whether a committed verification hook exists; absence is fine — verification is opt-in by committing the hook.
-7. CLI dispatches into the shared server, **detached** (its own session, stdin from
-   `/dev/null`) — that detached start is what marks the process as an orchestrated
-   agent, so the daemon can find it by "matching the worktree, no controlling tty":
+7. CLI creates a task session on the shared server, bound to the new worktree, and
+   sends the task prompt — no subprocess is spawned, so nothing is detached and
+   nothing can auto-answer a permission ask:
 
    ```
-   opencode run --attach $URL --dir <worktree> --format json --title <name> "<prompt>"
+   POST /session?directory=<worktree>            (title: <name>)
+   POST /session/{id}/prompt_async               (parts: the task prompt)
    ```
 
-The dispatch process exiting is not the task finishing. Completion is derived later
-from the worktree state, by the daemon.
+The dispatch call returning is not the task finishing. Completion is derived later
+from the worktree state, by the daemon; a permission ask stays pending until a
+human answers it with `orch task answer`.
 
 Intake has no CLI one-shot. It is a conversation: an opencode session in the base
 worktree (the TUI, or `orch ask` headlessly) turns a free-text description into one

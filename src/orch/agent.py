@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import time
 from pathlib import Path
 
-from . import envfilter, harness, observe, server, state
+from . import harness, observe, server, state
 
 AGENT_TITLE = "orch:agent"
 
@@ -44,24 +42,62 @@ def find(port: int, base: Path) -> str | None:
 
 def create(info: server.ServerInfo, base: Path, text: str,
            timeout: float = DEFAULT_CREATE_TIMEOUT) -> tuple[str | None, list[str]]:
-    """Create the primary agent by sending the first message through a
-    one-shot `opencode run` bound to the base worktree."""
-    cmd = ["opencode", "run", "--attach", info.url, "--dir", str(base),
-           "--format", "json", "--title", AGENT_TITLE, text]
+    """Create the primary agent as a server session bound to the base worktree
+    and send the first message, waiting for the agent to finish or block. No
+    headless `opencode run` loop is attached, so permission asks stay pending
+    until a human answers them - the run loop would auto-reject them instead."""
+    sess = harness.create_session(info.port, str(base), title=AGENT_TITLE)
+    sid = (sess or {}).get("id")
+    if not sid:
+        return None, ["the server did not return a session id"]
     try:
-        p = subprocess.run(cmd, cwd=str(base), capture_output=True, text=True,
-                           timeout=timeout,
-                           env=envfilter.filtered_env(
-                               os.environ, repo_drop=envfilter.repo_drops(base)))
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return None, [f"could not start the primary agent: {e}"]
-    if p.returncode != 0:
-        return None, [f"primary agent exited {p.returncode}: "
-                      f"{(p.stderr or p.stdout)[-500:]}"]
-    sid = find(info.port, base)
-    if sid is None:
-        return None, ["the agent ran but its session was not found; try again"]
-    return sid, []
+        harness.prompt_async(info.port, sid, text)
+    except harness.HarnessError as e:
+        return None, [f"could not prompt the primary agent: {e}"]
+    deadline = time.monotonic() + timeout
+    seen_busy = False
+    seen_reply = False
+    while True:
+        if time.monotonic() > deadline:
+            return None, [f"agent did not finish within {timeout:.0f}s"]
+        blocked = _pending_blocks(info.port, str(base), sid)
+        if blocked:
+            return sid, [f"blocked: {detail}" for _, detail in blocked]
+        if _assistant_parts(info.port, sid):
+            seen_reply = True
+        busy = sid in (harness.session_status(info.port, str(base)) or {})
+        if busy:
+            seen_busy = True
+        elif seen_busy or seen_reply:
+            return sid, []
+        time.sleep(0.5)
+
+
+def _assistant_parts(port: int, sid: str) -> list[dict]:
+    """All parts of assistant messages in <sid> - what the agent has produced."""
+    out: list[dict] = []
+    for m in harness.messages(port, sid) or []:
+        info = (m or {}).get("info") if isinstance(m, dict) else None
+        if not info or info.get("role") != "assistant":
+            continue
+        out.extend((m or {}).get("parts") or [])
+    return out
+
+
+def _pending_blocks(port: int, directory: str, sid: str) -> list[tuple[str, str]]:
+    """(request_id, detail) for every permission/question ask pending on <sid>."""
+    out: list[tuple[str, str]] = []
+    for p in harness.permissions(port, directory):
+        if str(p.get("sessionID") or "") != sid:
+            continue
+        rid = str(p.get("id") or p.get("requestID") or "?")
+        out.append((rid, observe._describe_permission(p).detail))
+    for q in harness.questions(port, directory):
+        if str(q.get("sessionID") or "") != sid:
+            continue
+        rid = str(q.get("id") or q.get("requestID") or "?")
+        out.append((rid, observe._describe_question(q).detail))
+    return out
 
 
 def _text_parts(parts) -> list[str]:
@@ -134,7 +170,7 @@ def status(info: server.ServerInfo, base: Path) -> dict:
     sid = find(info.port, base)
     if sid is None:
         return {"session": None, "state": "none", "blocked": []}
-    busy = sid in (harness.session_status(info.port) or {})
+    busy = sid in (harness.session_status(info.port, str(base)) or {})
     perms = [p for p in harness.permissions(info.port, str(base))
              if str(p.get("sessionID") or "") == sid]
     ques = [q for q in harness.questions(info.port, str(base))
@@ -153,30 +189,26 @@ def status(info: server.ServerInfo, base: Path) -> dict:
     return {"session": sid, "state": state_, "blocked": blocked}
 
 
-def _stream_event(ev: dict) -> tuple[str, str] | None:
-    """Map one `opencode run --format json` event to ("text"|"thinking"|"tool"|
-    "shell"|"error", payload), or None when it carries nothing worth showing."""
-    kind = ev.get("type")
-    part = ev.get("part") or {}
+def _stream_part(part: dict) -> tuple[str, str] | None:
+    """Map one message part from the messages API to ("text"|"thinking"|"tool"|
+    "shell", payload), or None when it carries nothing worth showing."""
     ptype = part.get("type")
-    if kind == "text" or ptype == "text":
+    if ptype == "text":
+        if part.get("synthetic"):
+            return None
         t = part.get("text")
-        if t:
-            return "text", str(t)
+        return ("text", str(t)) if t else None
     if ptype == "reasoning":
         t = part.get("text")
-        if t:
-            return "thinking", str(t)
+        return ("thinking", str(t)) if t else None
     if ptype == "tool":
         name = (part.get("tool") or part.get("name")
                 or part.get("title") or "tool")
+        inp = (part.get("state") or {}).get("input") or {}
+        cmd = inp.get("command")
+        if name in ("bash", "sh") and cmd:
+            return "shell", str(cmd)
         return "tool", _tool_detail(name, part)
-    if ptype == "shell":
-        cmd = ((part.get("state") or {}).get("input") or {}).get("command")
-        return "shell", str(cmd) if cmd else "shell"
-    if kind == "error":
-        detail = part.get("error") or ev.get("error") or "error"
-        return "error", str(detail)
     return None
 
 
@@ -199,51 +231,50 @@ def _tool_detail(name: str, part: dict) -> str:
 def stream_reply(info: server.ServerInfo, base: Path, text: str,
                  session_id: str | None = None,
                  timeout: float = DEFAULT_ASK_TIMEOUT):
-    """Run the message through a one-shot `opencode run --attach` and yield
+    """Send the message through the server session API and yield
     ("kind", "payload") tuples as the reply streams: "text" parts as they are
-    produced, "[tool]/[shell]" markers, "error" on a hard failure, and a final
-    ("exit", "<code>") so the caller can judge success. With session_id it
-    continues that session; without, it creates the primary agent."""
-    cmd = ["opencode", "run", "--attach", info.url, "--dir", str(base),
-           "--format", "json", "--thinking"]
-    if session_id:
-        cmd += ["-s", session_id]
-    else:
-        cmd += ["--title", AGENT_TITLE]
-    cmd.append(text)
+    produced, "[thinking]/[tool]/[shell]" markers, "blocked" when a permission
+    or question is pending for this session (it stays pending - never
+    auto-answered), and a final ("exit", "0"). With session_id it continues
+    that session; without, it creates the primary agent. No headless
+    `opencode run` loop is attached, so asks are never auto-rejected."""
+    port = info.port
+    if session_id is None:
+        sess = harness.create_session(port, str(base), title=AGENT_TITLE)
+        session_id = (sess or {}).get("id")
+        if not session_id:
+            raise harness.HarnessError("the server did not return a session id")
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(base), stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
-            env=envfilter.filtered_env(
-                os.environ, repo_drop=envfilter.repo_drops(base)),
-        )
-    except OSError as e:
-        raise harness.HarnessError(f"could not start the streaming agent: {e}") from e
+        harness.prompt_async(port, session_id, text)
+    except harness.HarnessError as e:
+        raise harness.HarnessError(f"could not prompt the primary agent: {e}") from e
 
     deadline = time.monotonic() + timeout
-    rc: int | None = None
+    n = 0
+    seen_busy = False
+    blocked_seen: set[str] = set()
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
+        while True:
             if time.monotonic() > deadline:
-                proc.kill()
                 raise harness.HarnessError(
                     f"agent did not finish within {timeout:.0f}s")
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            rendered = _stream_event(ev)
-            if rendered is not None:
-                yield rendered
-        rc = proc.wait()
+            parts = _assistant_parts(port, session_id)
+            for part in parts[n:]:
+                n += 1
+                rendered = _stream_part(part)
+                if rendered is not None:
+                    yield rendered
+            blocks = _pending_blocks(port, str(base), session_id)
+            for rid, detail in blocks:
+                if rid not in blocked_seen:
+                    blocked_seen.add(rid)
+                    yield "blocked", detail
+            busy = session_id in (harness.session_status(port, str(base)) or {})
+            if busy:
+                seen_busy = True
+            if not busy and not blocks and (seen_busy or n > 0):
+                break
+            time.sleep(0.5)
     finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
-        if proc.poll() is None:
-            proc.kill()
-    yield "exit", str(rc or 0)
+        pass
+    yield "exit", "0"

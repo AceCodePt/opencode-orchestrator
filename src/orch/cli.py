@@ -695,6 +695,10 @@ def _stream_ask(args: argparse.Namespace, info, base, sid, text: str) -> int:
                 print(f"\n[tool: {payload}]", file=sys.stderr, flush=True)
             elif kind == "shell":
                 print(f"\n[shell] {payload}", file=sys.stderr, flush=True)
+            elif kind == "blocked":
+                print(f"\n[blocked: {payload} - answer with "
+                      "`opencode attach`]",
+                      file=sys.stderr, flush=True)
             elif kind == "error":
                 print(f"\n[error: {payload}]", file=sys.stderr, flush=True)
             elif kind == "exit":
