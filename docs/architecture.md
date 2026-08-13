@@ -317,11 +317,14 @@ from the worktree state, by the daemon.
 Intake has no CLI one-shot. It is a conversation: an opencode session in the base
 worktree (the TUI, or `orch ask` headlessly) turns a free-text description into one
 or more `tasks/<name>/task.md` specs by calling the machine-global `create_task`
-custom tool — writing into the base worktree, leaving the specs uncommitted for the
-human to review and commit. The tool takes the wait flags (`wait_human_start` /
+custom tool — writing into the base worktree and **committing the spec to base when
+`wait_human_start` is false**, so the daemon sees it and the loop runs on its own.
+With `wait_human_start: true` the spec stays an uncommitted draft the human reviews
+before it is committed. The tool takes the wait flags (`wait_human_start` /
 `wait_human_merge`) as optional booleans the agent passes as the conversation
-decided (default `false`); it
-never claims, dispatches, commits, or trusts.
+decided (default `false`); `commit` overrides the default. The tools
+never claim or dispatch a task — but they do commit, because the human-in-the-loop
+gates are the wait flags, not the commit.
 
 ## Flow A′ — the scheduler
 

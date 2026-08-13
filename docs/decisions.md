@@ -270,9 +270,14 @@ in one source file has one place to check.
   headless sessions and any local TUI get them). The tools are thin zod-validated
   bridges to a Python backend (`bin/orch tasktool` — a hidden dispatcher
   subcommand), so slugs, front matter, dependencies and refusals share orch's code.
-  None of them commits, dispatches, claims, or trusts; every action is a
-  working-tree change the human reviews and commits, because the commit stays a
-  human act.
+  **The tools commit their change to the base branch by default.** The
+  human-in-the-loop gates are the wait flags — `wait_human_start` (a human starts
+  the task) and `wait_human_merge` (a human merges verified work) — exactly like
+  the daemon's automatic merge. A task with `wait_human_start: true` stays an
+  uncommitted draft the human reviews before it is committed; a task with no human
+  gate is committed on the spot so the daemon can dispatch it and the loop runs on
+  its own. `commit: false` (or `commit: true` to override a wait gate) opts out.
+  The tools never claim or dispatch a task, and they never trust a project.
 - **The wait flags are decided in the conversation, never hardcoded.** The old
   prompt baked in `wait_human_start: true` for the spec task and `false` for the
   slices. `create_task` takes `wait_human_start`/`wait_human_merge` as optional

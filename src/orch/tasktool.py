@@ -89,6 +89,38 @@ def _open_dependents(common: Path, name: str) -> list[str]:
     return out
 
 
+def _commit_flag(args: dict, default: bool = True) -> bool:
+    """The `commit` param. A task commits to base by default unless a human is
+    in the loop (wait_human_start: true leaves a draft for review), so the
+    daemon can see it and run the loop itself. Pass `commit` to override."""
+    if "commit" in args and not isinstance(args["commit"], bool):
+        raise ToolError("commit must be a boolean - it defaults to 'not "
+                        "wait_human_start'; pass false to leave the change "
+                        "uncommitted")
+    return bool(args.get("commit", default))
+
+
+def _commit(top: Path, rels: list[str], message: str) -> tuple[str | None, str | None]:
+    """Commit exactly the given paths to the current branch as the orch machine
+    user. Returns (sha, None) when committed, (None, None) when there was nothing
+    to commit, or (None, error) on failure."""
+    code, out = _git(top, "add", "-A", "--", *rels)
+    if code != 0 and "did not match any files" not in (out or ""):
+        return None, out[:300]
+    code, out = _git(
+        top, "-c", "user.name=orch", "-c", "user.email=orch@localhost",
+        "commit", "-q", "-m", message, "--", *rels,
+    )
+    if code != 0:
+        low = (out or "").lower()
+        if "nothing to commit" in low or "no changes added" in low \
+                or "did not match any file" in low:
+            return None, None
+        return None, out[:300]
+    _rc, sha = _git(top, "rev-parse", "--short", "HEAD")
+    return (sha.strip() or "HEAD"), None
+
+
 # --- spec parse / render ----------------------------------------------------
 
 def _parse_sections(lines: list[str], start: int) -> tuple[dict, int]:
@@ -225,6 +257,7 @@ def create(top: Path, common: Path, base: str, args: dict) -> dict:
         if flag in args and not isinstance(args[flag], bool):
             raise ToolError(f"{flag} must be a boolean when passed - decide it "
                             f"in the conversation; it defaults to false")
+    commit = _commit_flag(args, default=not bool(args.get("wait_human_start", False)))
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
     path = top / rel
@@ -260,10 +293,22 @@ def create(top: Path, common: Path, base: str, args: dict) -> dict:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_spec(spec))
+    committed: str | None = None
+    if commit:
+        committed, err = _commit(top, [rel], f"task: {name} (spec)")
+        if err:
+            raise ToolError(f"could not commit {rel}: {err}")
+    if committed:
+        message = (f"created and committed {rel} to {base} (sha {committed}). "
+                   f"The daemon can now see it.")
+    else:
+        message = (f"created {rel} - uncommitted. Commit it on {base} (or pass "
+                   f"commit: true) before the daemon can see it.")
     return {
         "path": rel,
-        "message": f"created {rel} - uncommitted. Review it and commit on {base} "
-                   f"before the daemon can see it.",
+        "message": message,
+        "committed": bool(committed),
+        "commitSha": committed if isinstance(committed, str) else None,
         "frontMatter": _front_matter(spec),
     }
 
@@ -272,15 +317,17 @@ def update(top: Path, common: Path, base: str, args: dict) -> dict:
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
     path = top / rel
+    arch_rel = f"{ARCHIVE_REL}/{name}/task.md"
 
-    if _committed(top, base, rel):
+    if (top / arch_rel).exists() or _committed(top, base, arch_rel):
+        raise ToolError(f"{name} is already archived at {arch_rel} - it is done")
+    if _claimed(common, name):
         raise ToolError(
-            f"{rel} is committed on {base} - update_task only amends an "
-            f"uncommitted draft. Commit is a human act; delete_task/archive_task "
-            f"handle committed tasks."
+            f"{name} is claimed (branch {name} exists) - the daemon owns the "
+            f"running work; amend its spec only after it settles."
         )
     if not path.exists():
-        raise ToolError(f"no draft at {rel}; create_task writes the draft first")
+        raise ToolError(f"no spec at {rel}; create_task writes it first")
 
     known = {"title", "wait_human_start", "wait_human_merge", "dependencies",
              "complexity", "priority", "context", "requirements", "verification",
@@ -305,16 +352,31 @@ def update(top: Path, common: Path, base: str, args: dict) -> dict:
         else:
             value = str(value).strip()
         spec[key] = value
+    commit = _commit_flag(args, default=not bool(spec.get("wait_human_start", False)))
 
     path.write_text(render_spec(spec))
+    committed: str | None = None
+    if commit:
+        committed, err = _commit(top, [rel], f"task: {name} (update)")
+        if err:
+            raise ToolError(f"could not commit {rel}: {err}")
+    if committed:
+        message = (f"updated and committed {rel} on {base} (sha {committed}, "
+                   f"fields: {', '.join(passed)})")
+    else:
+        message = (f"updated {rel} (fields: {', '.join(passed)}) - uncommitted; "
+                   f"pass commit: true or commit on {base} to make it visible")
     return {
         "path": rel,
-        "message": f"updated {rel} (fields: {', '.join(passed)}) - still uncommitted",
+        "message": message,
+        "committed": bool(committed),
+        "commitSha": committed if isinstance(committed, str) else None,
         "frontMatter": _front_matter(spec),
     }
 
 
 def archive(top: Path, common: Path, base: str, args: dict) -> dict:
+    commit = _commit_flag(args)
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
     dest = f"{ARCHIVE_REL}/{name}/task.md"
@@ -336,16 +398,30 @@ def archive(top: Path, common: Path, base: str, args: dict) -> dict:
     code, out = _git(top, "mv", rel, dest)
     if code != 0:
         raise ToolError(f"git mv {rel} -> {dest} failed: {out[:300]}")
+    committed: str | None = None
+    if commit:
+        committed, err = _commit(top, [rel, dest], f"task: archive {name}")
+        if err:
+            raise ToolError(f"could not commit the archive move: {err}")
+    if committed:
+        message = (f"moved and committed {rel} -> {dest} on {base} (sha "
+                   f"{committed}). Archiving unblocks anything that depends on "
+                   f"{name}.")
+    else:
+        message = (f"moved {rel} -> {dest} (staged, uncommitted). Archiving "
+                   f"unblocks anything that depends on {name}; commit on {base} "
+                   f"or pass commit: true to make it real.")
     return {
         "path": dest,
-        "message": f"moved {rel} -> {dest} (staged, uncommitted). Archiving "
-                   f"unblocks anything that depends on {name}. Commit on {base} "
-                   f"to make it real.",
+        "message": message,
+        "committed": bool(committed),
+        "commitSha": committed if isinstance(committed, str) else None,
         "frontMatter": {},
     }
 
 
 def delete(top: Path, common: Path, base: str, args: dict) -> dict:
+    commit = _commit_flag(args)
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
     arch_rel = f"{ARCHIVE_REL}/{name}/task.md"
@@ -367,15 +443,23 @@ def delete(top: Path, common: Path, base: str, args: dict) -> dict:
         code, out = _git(top, "rm", "-q", arch_rel)
         if code != 0:
             raise ToolError(f"git rm {arch_rel} failed: {out[:300]}")
+        committed: str | None = None
+        if commit:
+            committed, err = _commit(top, [arch_rel], f"task: delete {name} (archived)")
+            if err:
+                raise ToolError(f"could not commit the removal: {err}")
         return {
             "path": arch_rel,
-            "message": f"removed archived task {arch_rel} (staged, uncommitted). "
-                       f"Commit on {base} to make it real.",
+            "message": _delete_message("removed archived task", arch_rel,
+                                       committed, base, commit),
+            "committed": bool(committed),
+            "commitSha": committed if isinstance(committed, str) else None,
             "frontMatter": {},
         }
 
     if path.exists():
-        if _committed(top, base, rel):
+        was_committed = _committed(top, base, rel)
+        if was_committed:
             code, out = _git(top, "rm", "-q", rel)
             if code != 0:
                 raise ToolError(f"git rm {rel} failed: {out[:300]}")
@@ -385,14 +469,31 @@ def delete(top: Path, common: Path, base: str, args: dict) -> dict:
                 path.parent.rmdir()
             except OSError:
                 pass
+        committed: str | None = None
+        if commit:
+            committed, err = _commit(top, [rel], f"task: delete {name}")
+            if err:
+                raise ToolError(f"could not commit the removal: {err}")
         return {
             "path": rel,
-            "message": f"deleted {rel} (uncommitted draft removed). "
-                       f"Commit on {base} to make it real.",
+            "message": _delete_message(
+                "deleted" if was_committed else "deleted uncommitted draft",
+                rel, committed, base, commit),
+            "committed": bool(committed),
+            "commitSha": committed if isinstance(committed, str) else None,
             "frontMatter": {},
         }
 
     raise ToolError(f"no task named {name} (neither {rel} nor {arch_rel} exists)")
+
+
+def _delete_message(what: str, rel: str, committed, base: str,
+                    commit: bool) -> str:
+    if committed:
+        return f"{what} {rel} and committed on {base} (sha {committed})"
+    if commit:
+        return f"{what} {rel} on {base} (nothing to commit)"
+    return f"{what} {rel}; commit on {base} or pass commit: true to make it real"
 
 
 OPS = {"create": create, "update": update, "archive": archive, "delete": delete}

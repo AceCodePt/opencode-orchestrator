@@ -28,10 +28,15 @@ export default tool({
   description:
     "Archive a declared, unclaimed task: git mv tasks/<name>/task.md to " +
     "archive/<name>/task.md in the base worktree, which unblocks anything that " +
-    "depends on it. Staged, never committed - the human commits. Refuses claimed " +
-    "tasks (the daemon owns claimed work) and uncommitted drafts.",
+    "depends on it. Commits the move to base by default; pass commit: false to " +
+    "leave it staged for review. Refuses claimed tasks (the daemon owns claimed " +
+    "work) and uncommitted drafts.",
   args: {
     name: tool.schema.string().describe("the task slug to archive (tasks/<name>/task.md)"),
+    commit: tool.schema
+      .boolean()
+      .optional()
+      .describe("commit the archive move to base (default true); false leaves it staged"),
   },
   async execute(args, context) {
     return runTool("archive", args, context.worktree)

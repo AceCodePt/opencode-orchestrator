@@ -27,7 +27,9 @@ async function runTool(op: string, args: Record<string, unknown>, worktree: stri
 export default tool({
   description:
     "Create a task spec at tasks/<name>/task.md in the project's base worktree. " +
-    "Never commits: the file is left uncommitted for the human to review and commit. " +
+    "Commits it to the base branch when wait_human_start is false, so the daemon sees " +
+    "it and the loop can run on its own; with wait_human_start: true it stays an " +
+    "uncommitted draft for the human to review. Pass commit to override. " +
     "Pass wait_human_start and wait_human_merge as you and the human decided in the " +
     "conversation; they default to false (scheduler-eligible, auto-merge) when not " +
     "passed. Refuses to overwrite an existing task.\n\n" +
@@ -76,6 +78,10 @@ export default tool({
       .array(tool.schema.string())
       .optional()
       .describe("what not to do, and why"),
+    commit: tool.schema
+      .boolean()
+      .optional()
+      .describe("commit the spec to base (default: not wait_human_start); false leaves it uncommitted for review"),
   },
   async execute(args, context) {
     return runTool("create", args, context.worktree)

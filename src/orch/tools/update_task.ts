@@ -26,10 +26,11 @@ async function runTool(op: string, args: Record<string, unknown>, worktree: stri
 
 export default tool({
   description:
-    "Amend an uncommitted task draft in the project's base worktree. PARTIAL: " +
+    "Amend a task spec in the project's base worktree (committed or draft). PARTIAL: " +
     "only pass the fields that change - absent fields are left untouched. " +
-    "Refuses committed tasks (commit is a human act) and refuses when nothing is passed. " +
-    "Never commits: the draft stays uncommitted for the human to review.",
+    "Commits the amendment to base unless the spec's wait_human_start is true (a human " +
+    "gate keeps it a draft for review); pass commit to override. " +
+    "Refuses a claimed task (branch exists) and refuses when nothing is passed.",
   args: {
     name: tool.schema.string().describe("the task slug to amend (tasks/<name>/task.md)"),
     title: tool.schema.string().optional(),
@@ -45,6 +46,10 @@ export default tool({
     requirements: tool.schema.array(tool.schema.string()).optional().describe("replace the full requirement list"),
     verification: tool.schema.string().optional(),
     prohibited_patterns: tool.schema.array(tool.schema.string()).optional().describe("replace the full list"),
+    commit: tool.schema
+      .boolean()
+      .optional()
+      .describe("commit the amendment to base (default: not wait_human_start); false leaves it uncommitted"),
   },
   async execute(args, context) {
     return runTool("update", args, context.worktree)

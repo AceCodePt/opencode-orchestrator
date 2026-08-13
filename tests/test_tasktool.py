@@ -93,28 +93,68 @@ def test_refuses_off_base() -> None:
 
 # --- create ---------------------------------------------------------------
 
-def test_create_writes_a_spec_and_never_commits() -> None:
+def test_create_writes_a_spec_and_commits_by_default() -> None:
     root, tmp = _repo()
     before = _head(root)
     r = tasktool.create(root, root, "main", {
         "name": "auth-login",
         "title": "Add Login",
-        "wait_human_start": True,
-        "wait_human_merge": False,
         "requirements": ["user can log in", "passwords are hashed"],
         "verification": "run the auth tests",
     })
     assert r["path"] is not None
     assert r["path"] == "tasks/auth-login/task.md"
     body = _created(root, "auth-login")
-    assert "wait_human_start: true" in body
+    assert "wait_human_start: false" in body
     assert "wait_human_merge: false" in body
     assert "dependencies: []" in body
     assert "- [ ] user can log in" in body
     assert "# Task: Add Login" in body
-    assert _head(root) == before, "a tool must never commit"
+    assert _head(root) != before, "no human gate means the spec must auto-commit"
+    assert r["committed"] is True and r["commitSha"]
+    committed = _git(root, "show", "HEAD:tasks/auth-login/task.md")
+    assert "user can log in" in committed, "the commit must carry the spec"
     tmp.cleanup()
-    print("ok: create_task writes a spec with the required flags and never commits")
+    print("ok: create_task commits by default when no human is in the loop")
+
+
+def test_create_with_wait_human_start_true_stays_a_draft() -> None:
+    root, tmp = _repo()
+    before = _head(root)
+    r = tasktool.create(root, root, "main", {
+        "name": "review-me", "wait_human_start": True,
+    })
+    assert r["committed"] is False and r["commitSha"] is None
+    assert _created(root, "review-me") and _head(root) == before, \
+        "wait_human_start: true must leave a draft for the human to review"
+    tmp.cleanup()
+    print("ok: create_task leaves a draft when wait_human_start is true")
+
+
+def test_create_explicit_commit_true_overrides_wait_human_start() -> None:
+    root, tmp = _repo()
+    before = _head(root)
+    r = tasktool.create(root, root, "main", {
+        "name": "forced", "wait_human_start": True, "commit": True,
+    })
+    assert r["committed"] is True and r["commitSha"]
+    assert _head(root) != before, "an explicit commit: true must override the wait flag"
+    tmp.cleanup()
+    print("ok: an explicit commit flag overrides the wait_human_start default")
+
+
+def test_create_commit_false_leaves_an_uncommitted_draft() -> None:
+    root, tmp = _repo()
+    before = _head(root)
+    r = tasktool.create(root, root, "main", {
+        "name": "drafty", "wait_human_start": False, "wait_human_merge": False,
+        "commit": False,
+    })
+    assert r["committed"] is False and r["commitSha"] is None
+    assert _created(root, "drafty") and _head(root) == before, \
+        "commit: false must leave the working-tree draft uncommitted"
+    tmp.cleanup()
+    print("ok: create_task with commit: false stays uncommitted")
 
 
 def test_create_defaults_the_wait_flags_to_false() -> None:
@@ -143,10 +183,22 @@ def test_create_rejects_a_non_boolean_wait_flag() -> None:
     print("ok: create_task still validates a wait flag's type when passed")
 
 
+def test_create_rejects_a_non_boolean_commit_flag() -> None:
+    root, tmp = _repo()
+    try:
+        tasktool.create(root, root, "main", {"name": "x", "commit": "yes"})
+        assert False, "expected ToolError"
+    except ToolError as e:
+        assert "boolean" in str(e)
+    tmp.cleanup()
+    print("ok: create_task validates the commit flag's type")
+
+
 def test_create_refuses_an_existing_draft() -> None:
     root, tmp = _repo()
     tasktool.create(root, root, "main", {
-        "name": "x", "wait_human_start": False, "wait_human_merge": False})
+        "name": "x", "wait_human_start": False, "wait_human_merge": False,
+        "commit": False})
     try:
         tasktool.create(root, root, "main", {
             "name": "x", "wait_human_start": False, "wait_human_merge": False})
@@ -192,16 +244,32 @@ def test_update_is_partial_and_keeps_other_fields() -> None:
     print("ok: update_task changes only the fields that were passed")
 
 
-def test_update_refuses_a_committed_task() -> None:
+def test_update_refuses_a_claimed_task() -> None:
     root, tmp = _repo()
     _commit_task(root, "auth-login")
+    _git(root, "branch", "auth-login")
     try:
         tasktool.update(root, root, "main", {"name": "auth-login", "title": "X"})
         assert False, "expected ToolError"
     except ToolError as e:
-        assert "committed" in str(e)
+        assert "claimed" in str(e)
     tmp.cleanup()
-    print("ok: update_task refuses a committed spec - commit is a human act")
+    print("ok: update_task refuses to amend the spec of a claimed task")
+
+
+def test_update_amends_a_committed_spec_and_commits() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "auth-login")
+    before = _head(root)
+    r = tasktool.update(root, root, "main",
+                        {"name": "auth-login", "priority": "high"})
+    assert r["committed"] is True and r["commitSha"]
+    assert _head(root) != before, "an update must commit by default"
+    body = _created(root, "auth-login")
+    assert "- **Priority:** High" in body
+    assert "wait_human_start: false" in body, "untouched fields must survive"
+    tmp.cleanup()
+    print("ok: update_task amends a committed spec and commits by default")
 
 
 def test_update_requires_at_least_one_field() -> None:
@@ -219,7 +287,7 @@ def test_update_requires_at_least_one_field() -> None:
 
 # --- archive --------------------------------------------------------------
 
-def test_archive_moves_declared_task_to_archive_uncommitted() -> None:
+def test_archive_moves_declared_task_and_commits_by_default() -> None:
     root, tmp = _repo()
     _commit_task(root, "dark-mode")
     before = _head(root)
@@ -228,9 +296,26 @@ def test_archive_moves_declared_task_to_archive_uncommitted() -> None:
     assert r["path"] == "archive/dark-mode/task.md"
     assert not (root / "tasks" / "dark-mode" / "task.md").exists()
     assert (root / "archive" / "dark-mode" / "task.md").exists()
-    assert _head(root) == before, "archive must not commit"
+    assert r["committed"] is True and r["commitSha"]
+    assert _head(root) != before, "archive must commit the move by default"
+    assert _git(root, "show", "HEAD:archive/dark-mode/task.md"), \
+        "the committed archive must carry the spec"
     tmp.cleanup()
-    print("ok: archive_task moves a declared task and stays uncommitted")
+    print("ok: archive_task moves a declared task and commits the move by default")
+
+
+def test_archive_commit_false_stays_uncommitted() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "dark-mode")
+    before = _head(root)
+    r = tasktool.archive(root, root, "main", {"name": "dark-mode", "commit": False})
+    assert r["committed"] is False and r["commitSha"] is None
+    assert (root / "archive" / "dark-mode" / "task.md").exists()
+    staged = _git(root, "diff", "--cached", "--name-only")
+    assert "archive/dark-mode/task.md" in staged
+    assert _head(root) == before, "commit: false must leave the move staged"
+    tmp.cleanup()
+    print("ok: archive_task with commit: false stays staged and uncommitted")
 
 
 def test_archive_refuses_a_claimed_task() -> None:
@@ -249,7 +334,8 @@ def test_archive_refuses_a_claimed_task() -> None:
 def test_archive_refuses_an_uncommitted_draft() -> None:
     root, tmp = _repo()
     tasktool.create(root, root, "main", {
-        "name": "x", "wait_human_start": False, "wait_human_merge": False})
+        "name": "x", "wait_human_start": False, "wait_human_merge": False,
+        "commit": False})
     try:
         tasktool.archive(root, root, "main", {"name": "x"})
         assert False, "expected ToolError"
@@ -263,11 +349,15 @@ def test_archive_refuses_an_uncommitted_draft() -> None:
 
 def test_delete_removes_an_uncommitted_draft() -> None:
     root, tmp = _repo()
+    before = _head(root)
     tasktool.create(root, root, "main", {
-        "name": "drafty", "wait_human_start": False, "wait_human_merge": False})
+        "name": "drafty", "wait_human_start": False, "wait_human_merge": False,
+        "commit": False})
     r = tasktool.delete(root, root, "main", {"name": "drafty"})
     assert r["path"] is not None
     assert not (root / "tasks" / "drafty" / "task.md").exists()
+    assert r["committed"] is False, "a never-tracked draft has nothing to commit"
+    assert _head(root) == before
     tmp.cleanup()
     print("ok: delete_task removes an uncommitted draft outright")
 
@@ -285,18 +375,33 @@ def test_delete_refuses_while_an_open_task_depends_on_it() -> None:
     print("ok: delete_task refuses while an open task depends on it")
 
 
-def test_delete_of_a_committed_leaf_is_a_staged_rm() -> None:
+def test_delete_of_a_committed_leaf_commits_by_default() -> None:
     root, tmp = _repo()
     _commit_task(root, "obsolete")
     before = _head(root)
     r = tasktool.delete(root, root, "main", {"name": "obsolete"})
     assert r["path"] is not None
     assert not (root / "tasks" / "obsolete" / "task.md").exists()
+    assert r["committed"] is True and r["commitSha"]
+    assert _head(root) != before, "deleting a committed task must commit by default"
+    assert _git(root, "show", "HEAD:tasks/obsolete/task.md", ok=False) == "", \
+        "the committed deletion must remove the spec from base"
+    tmp.cleanup()
+    print("ok: delete_task commits the removal of a committed task by default")
+
+
+def test_delete_commit_false_stays_staged() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "obsolete")
+    before = _head(root)
+    r = tasktool.delete(root, root, "main", {"name": "obsolete", "commit": False})
+    assert r["committed"] is False and r["commitSha"] is None
+    assert not (root / "tasks" / "obsolete" / "task.md").exists()
     staged = _git(root, "diff", "--cached", "--name-only")
     assert "tasks/obsolete/task.md" in staged
-    assert _head(root) == before, "delete must not commit"
+    assert _head(root) == before, "commit: false must leave the rm staged"
     tmp.cleanup()
-    print("ok: delete_task stages the removal of a committed task, never commits")
+    print("ok: delete_task with commit: false stages the removal, never commits")
 
 
 def test_delete_refuses_a_claimed_task() -> None:

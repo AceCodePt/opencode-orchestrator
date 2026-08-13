@@ -28,10 +28,15 @@ export default tool({
   description:
     "Delete a task. Removes tasks/<name>/task.md (a committed task is git-rm'd, " +
     "an uncommitted draft is deleted) or an archived copy if the task was already " +
-    "archived. Staged, never committed - the human commits. Refuses claimed tasks " +
-    "(the daemon owns claimed work) and refuses while any open task depends on it.",
+    "archived. Commits the removal to base by default; pass commit: false to leave " +
+    "it staged for review. Refuses claimed tasks (the daemon owns claimed work) and " +
+    "refuses while any open task depends on it.",
   args: {
     name: tool.schema.string().describe("the task slug to delete"),
+    commit: tool.schema
+      .boolean()
+      .optional()
+      .describe("commit the removal to base (default true); false leaves it staged"),
   },
   async execute(args, context) {
     return runTool("delete", args, context.worktree)

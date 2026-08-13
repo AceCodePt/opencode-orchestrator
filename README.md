@@ -164,16 +164,18 @@ you draft in the conversation itself.
 
 | Tool | What it does |
 | --- | --- |
-| `create_task` | Write `tasks/<name>/task.md` from params. `wait_human_start`/`wait_human_merge` are passed as the conversation decided (default `false` — scheduler-eligible, auto-merge). Refuses to overwrite an existing task. |
-| `update_task` | Amend an **uncommitted** draft; only the fields you pass change. Refuses committed tasks. |
-| `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. |
-| `delete_task` | Remove a task. Refuses claimed tasks and tasks other open tasks depend on. |
+| `create_task` | Write `tasks/<name>/task.md` from params. `wait_human_start`/`wait_human_merge` are passed as the conversation decided (default `false` — scheduler-eligible, auto-merge). **Commits to base when `wait_human_start` is `false`, so the daemon sees it and the loop runs on its own; with `wait_human_start: true` it stays an uncommitted draft for your review.** Pass `commit` to override. Refuses to overwrite an existing task. |
+| `update_task` | Amend a spec (committed or draft); only the fields you pass change. Commits the amendment unless the spec's `wait_human_start` is `true`. Refuses a **claimed** task and archived tasks. |
+| `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. Commits the move by default (`commit: false` leaves it staged). |
+| `delete_task` | Remove a task. Commits the removal by default (`commit: false` leaves it staged). Refuses claimed tasks and tasks other open tasks depend on. |
 
 The tools are thin bridges to a Python backend (`bin/orch tasktool` — a hidden
 dispatcher subcommand), so slugs, front matter, dependencies, and refusals are
-validated by the same code the rest of orch uses. **No tool ever commits** — every
-action leaves a working-tree change for you to review and commit, because committing
-stays a human act. A tool also never
+validated by the same code the rest of orch uses. **The tools commit their changes
+to the base branch by default** — the human-in-the-loop gates are the wait flags
+(`wait_human_start` starts a task, `wait_human_merge` gates the merge), and a task
+whose human gate is on stays a draft you review before it is committed. A tool also
+never
 trusts a project; trust comes only from `orch init`/`project create`/`task add`/
 `project trust`. Because the tools are machine-global, they are callable from any
 opencode session — the safety rails (refuse off-base, refuse claimed, refuse a
@@ -187,12 +189,12 @@ the scheduler honors, and give every task a runnable Verification.
 
 ## Two things worth knowing before dispatching
 
-**Commit the verification hook and the task file — on the base branch.** A worktree is created
-*from* the base branch, so anything uncommitted, or committed on some other branch, is
-invisible to the agent — and the daemon judges by the *committed* hook, never the
-working-tree copy. An uncommitted task file gives the agent no instructions; an
-uncommitted hook counts as no verification (absence of a hook is the implicit
-unverified state — tasks run without checks). The task-lifecycle hooks (`pre-task-create` and friends)
+**Commit the verification hook — on the base branch.** A worktree is created
+*from* the base branch, and the daemon judges by the *committed* hook, never the
+working-tree copy. An uncommitted hook counts as no verification (absence of a hook is the implicit
+unverified state — tasks run without checks). The task spec itself is committed by
+`create_task` by default (or left a draft for you when a human gate is on), so the
+agent always has its instructions. The task-lifecycle hooks (`pre-task-create` and friends)
 follow the same rule: only the copy committed on the base branch runs, so commit them
 before dispatching.
 
