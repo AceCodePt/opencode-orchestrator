@@ -50,11 +50,16 @@ def _cmd(args: list[str], timeout: int = 30) -> tuple[int, str]:
     return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
 
 
+# Where orch's own dev/e2e projects live; supervised by default so the daemon
+# settles them (verifies, merges, archives) without needing ORCH_ROOTS.
+DEV_ROOT = "/tmp/opencode"
+
+
 def default_roots() -> list[str]:
     env = os.environ.get("ORCH_ROOTS")
     if env:
         return [r.strip() for r in env.split(",") if r.strip()]
-    return [str(Path.home()), "/mnt"]
+    return [str(Path.home()), "/mnt", DEV_ROOT]
 
 
 # --- project trust ----------------------------------------------------------

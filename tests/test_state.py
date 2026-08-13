@@ -314,12 +314,14 @@ def test_default_roots_include_home_and_mnt() -> None:
     try:
         roots = state.default_roots()
         assert str(Path.home()) in roots and "/mnt" in roots
+        assert state.DEV_ROOT in roots, \
+            "orch's own dev/e2e root must be supervised by default"
     finally:
         if saved:
             os.environ["ORCH_ROOTS"] = saved
         else:
             os.environ.pop("ORCH_ROOTS", None)
-    print("ok: default roots are $HOME and /mnt")
+    print("ok: default roots are $HOME, /mnt and the dev root")
 
 
 def test_detached_detects_orch_spawned_processes() -> None:

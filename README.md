@@ -73,7 +73,7 @@ bin/orch version                  # show the orch version
 ```
 
 `orch daemon` is one supervisor per machine covering every discovered project. It scans
- `$HOME` and `/mnt` (env `ORCH_ROOTS`) for `.orchestration/` dirs, settles tasks, runs
+ `$HOME`, `/mnt`, and orch's dev root `/tmp/opencode` (env `ORCH_ROOTS` overrides) for `.orchestration/` dirs, settles tasks, runs
  verification hooks, retriggers failing agents, merges verified branches, and archives done work.
 Without it, nothing is ever settled or verified, so nothing reaches done — and
 everything else still looks healthy, which is why `doctor` fails when it is missing.
@@ -142,7 +142,7 @@ prompting for it too when omitted). On a terminal every omitted flag is asked:
 name, parent directory, whether to create a GitHub repo, visibility, description,
 and — if the parent is outside a supervised root — whether to create it anyway.
 The parent must otherwise be inside a supervised root
-(`$HOME`, `/mnt`, or `ORCH_ROOTS`) — a project the daemon cannot discover would
+(`$HOME`, `/mnt`, `/tmp/opencode`, or `ORCH_ROOTS`) — a project the daemon cannot discover would
 never settle, so create refuses and says so; `--allow-unsupervised` creates one
 anyway, and `ORCH_ROOTS=/` supervises the whole filesystem. Then
 intake is a conversation: `orch ask "<free text>"` (or any opencode session in the
@@ -271,7 +271,7 @@ not a hostile one, but the blast radius is bounded:
 
 - **Authority is trust-bound.** The daemon only verifies/merges/dispatches/resolves in
   projects you approved (`orch project trust`); anything else only alerts. Discovery
-  (`$HOME`, `/mnt`, `ORCH_ROOTS`) stays wide so you can see everything, but nothing
+  (`$HOME`, `/mnt`, `/tmp/opencode`, `ORCH_ROOTS`) stays wide so you can see everything, but nothing
   auto-runs on a repo you merely cloned. `doctor` flags an untrusted project and warns
   when `ORCH_ROOTS` includes `/`.
 - **The verification hook is the committed base copy, and agents cannot edit it.** The daemon runs

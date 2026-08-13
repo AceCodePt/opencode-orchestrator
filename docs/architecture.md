@@ -25,7 +25,7 @@ backlog file. Nothing can drift because there is nothing to drift from.
 | session state | the shared server: `/session?directory=<worktree>` |
 | dispatch alive | `/proc` — the process whose cmdline is `opencode run … --dir <worktree>` |
 | dispatch orchestrated | `/proc` — such a process **with no controlling terminal**: one the daemon or CLI started detached |
-| which projects exist | a live scan of `$HOME` and `/mnt` (env `ORCH_ROOTS`) for `.orchestration/` dirs |
+| which projects exist | a live scan of `$HOME`, `/mnt`, and orch's dev root `/tmp/opencode` (env `ORCH_ROOTS` overrides) for `.orchestration/` dirs |
 | retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
 
 ## The task lifecycle
@@ -204,7 +204,7 @@ string cannot do this job.
 | Command | Does |
 | --- | --- |
 | `orch init` | scaffold `.orchestration/` (config + the `session-idle` verification hook template). The project is trusted for the daemon as it scaffolds |
-| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides. Created projects are trusted automatically |
+| `orch project create <name>` | new project from scratch: `git init` + `orch init` + a private gh repo pushed (`gh` must exist and be authenticated, else abort; `--no-gh` skips; `--name`/`--dir` can replace the args; on a terminal every omitted flag — name, parent, gh, visibility, description, unsupervised-override — is asked). The parent must be inside a supervised root (`$HOME`, `/mnt`, `/tmp/opencode`, or `ORCH_ROOTS`) or create refuses — `--allow-unsupervised` overrides. Created projects are trusted automatically |
 | `orch project trust [--dir]` | machine-level approval that lets the daemon verify, merge, dispatch and resolve in this project. The marker lives in `~/.local/state/orch/trusted.json`, keyed by the repo's git common dir — outside the repo, so a project cannot approve itself |
 | `orch project untrust [--dir]` | revoke that approval; running agents and worktrees are left alone, the daemon just stops settling them |
 | `orch project list` | every discovered project and its trust status (`--json`) |
