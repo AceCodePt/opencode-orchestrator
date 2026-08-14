@@ -25,6 +25,10 @@ class _FakeProject(state.Project):
 
     _instance: "_FakeProject | None" = None
 
+    @property
+    def base_worktree(self) -> Path | None:
+        return Path("/tmp/lab")
+
     def scan(self, port: int | None = None) -> list[state.TaskState]:
         return self._tasks
 
@@ -37,7 +41,7 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
 
 
 def _args(**kw) -> argparse.Namespace:
-    a = argparse.Namespace(directory=None, global_=False)
+    a = argparse.Namespace(directory=None, global_=False, json=False)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -155,6 +159,55 @@ def test_task_list_json_reports_dependencies() -> None:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
     print("ok: `task list --json` carries the dependency edges")
+
+
+def test_task_list_local_shows_needs_you_for_a_blocked_task() -> None:
+    b = observe.Blocked(kind="external_directory", request_id="per_1",
+                        session_id="ses_1",
+                        detail="/tmp/lab/base/*")
+    t = state.TaskState(project="/tmp/lab/lab.git", name="task-a", base="main",
+                        claimed=True, branch="task-a",
+                        worktree="/tmp/lab/task-a",
+                        session=state.SESSION_BLOCKED, blocked=[b])
+    _FakeProject._instance = _FakeProject([t])
+    orig_status = cli.server_mod.status
+    orig_from = cli.state.Project.from_dir
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_args())
+        out = buf.getvalue()
+        assert rc == 0, rc
+        assert "NEEDS-YOU" in out
+        assert "task answer" in out
+        assert "allow|deny" in out
+    finally:
+        cli.state.Project.from_dir = orig_from
+        cli.server_mod.status = orig_status
+    print("ok: the local `task list` flags a blocked task as needs-you with the answer command")
+
+
+def test_task_list_local_does_not_flag_unclaimed_tasks() -> None:
+    t = state.TaskState(project="/tmp/lab/lab.git", name="todo-a", base="main")
+    _FakeProject._instance = _FakeProject([t])
+    orig_status = cli.server_mod.status
+    orig_from = cli.state.Project.from_dir
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_task_list(_args())
+        assert rc == 0, rc
+        assert "NEEDS-YOU" not in buf.getvalue()
+    finally:
+        cli.state.Project.from_dir = orig_from
+        cli.server_mod.status = orig_status
+    print("ok: unclaimed todo tasks are not mislabelled as needs-you")
 
 
 class _GProject:

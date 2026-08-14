@@ -159,6 +159,7 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     if not tasks:
         print("no tasks recorded for this project")
         return 0
+    base_wt = proj.base_worktree
     for t in tasks:
         branch = t.branch or "-"
         where = (t.worktree or "-").split("/")[-1]
@@ -180,6 +181,11 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             print(f"    ! {n}")
         for b in t.blocked:
             print(f"    ↳ {b.kind}: {b.detail}  [{b.request_id}]")
+        sec, action, detail = _classify_wait(t, base_wt)
+        if sec == "needs-you" and t.claimed:
+            print(f"    NEEDS-YOU: {detail}")
+            if action:
+                print(f"    -> {action}")
     return 0
 
 
