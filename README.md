@@ -65,7 +65,7 @@ bin/orch ask --compact [msg]     # run opencode's own compaction, then optionall
 bin/orch ask --status            # is the primary agent idle, busy, or blocked
 
 bin/orch permissions             # approve/deny pending permission asks interactively (auto-picks the project you're in; --global picks a project first, then a task)
-bin/orch permissions --task <name> allow|deny   # scriptable one-shot for one task
+bin/orch permissions --task <name> allow|deny [--reason "..."]   # scriptable one-shot for one task (a deny explains itself to the agent)
 bin/orch permissions -C <dir>    # non-interactive: list the project's pending asks (a flag makes it non-interactive)
 bin/orch permissions --json      # list every pending permission ask, machine-readable
 

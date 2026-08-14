@@ -324,6 +324,37 @@ in one source file has one place to check.
 - **Reply rendering skips synthetic parts.** Only non-synthetic `text` parts are the
   agent's actual answer; tool traces and "Called the Read tool" fillers are noise.
 
+## `cli.py`
+
+- **`orch permissions` is coverage, not policy.** An approval is still a one-time
+  reply to one pending request — the interactive walk, the one-shot, and the list
+  all hit the same `reply_permission`/`reply_question` endpoints and persist nothing.
+  Persistent tiers of allow/deny rules (global / project / task) were considered and
+  rejected: they would be a new state store the design has none of, and they would
+  quietly make approval not-one-time. The "three levels" the walk offers are scopes —
+  task, project, machine — not layers of policy.
+- **Interactive by default; a flag is the non-interactive switch.** The TTY gate
+  guards only the flagless default. `--task <name> allow|deny [--reason]` (one-shot),
+  `-C <dir>` (list this project's asks), and `--json` all skip it, so the command
+  never hangs in a script or a notification flow. `-C` alone means "list, don't
+  prompt", which is why an interactive walk for a specific project must be run from
+  inside that project.
+- **A permission ask is described by what the agent is trying to run, not the
+  permission glob.** The server's ask carries tool-specific `metadata`
+  (`filepath`, `command`, `url`, …); rendering the glob made a denial unjudgeable
+  ("external_directory: /tmp/*" vs "read /tmp/x.sh"). `observe._describe_permission`
+  prefers the metadata target and falls back to the resource glob only when metadata
+  carries nothing. The same text feeds the walk, the `--json`/`-C` lists, and the
+  daemon's alert lines, so a human never decides on a glob.
+- **A deny explains itself and keeps the agent working.** Rejecting a tool call ends
+  the agent's turn; without a reason the model stops, the session idles, and the
+  daemon sweeps the clean, unchanged task as a no-op. So a deny sends its reason both
+  in the reply's `message` field (the rejected tool result tells the agent why) and
+  as a `prompt_async` nudge to adjust and continue. A denial becomes a conversation —
+  the agent responds, tries a different approach, and may raise a fresh ask for the
+  human to decide again — instead of a dead end. The empty reason falls back to a
+  generic denial so the flow never blocks on the human's typing.
+
 ## `harness.py`
 
 - **All harness knowledge lives on the Python side.** `prompt_async`
@@ -338,6 +369,10 @@ in one source file has one place to check.
   reply endpoint is `POST /permission/{requestID}/reply?directory=<worktree>` with
   `once`/`always`/`reject`; the dead v1 path was `POST /session/{id}/permissions/{id}`
   with `{response: allow|deny}`.
+- **The permission reply takes an optional `message`.** It is the rejection text the
+  agent sees in its tool result, so a deny can explain itself in the agent's own
+  context rather than only in the human's terminal. The explainable-denial flow in
+  `cli.py` relies on it (alongside a `prompt_async` nudge to keep the session busy).
 - **`GET /session` is global, not per-server** — the `?directory=` filter is the only
   usable join from a task to its state.
 - **`server.heartbeat` separates "stream alive, agent quiet" from "stream dead"** —
