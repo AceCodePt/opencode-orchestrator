@@ -32,15 +32,28 @@ class TaskFact:
         return self.state in (BLOCKED_PERMISSION, BLOCKED_QUESTION)
 
 
+_PERM_TARGET_KEYS = ("filepath", "filePath", "path", "command", "url",
+                     "script", "target")
+
+
 def _describe_permission(p: dict) -> Blocked:
     rid = str(p.get("id") or p.get("requestID") or "?")
     sid = str(p.get("sessionID") or "?")
     kind = p.get("permission") or p.get("action") or "?"
-    target = p.get("patterns") or p.get("resources") or []
-    if isinstance(target, (list, tuple)):
-        detail = ", ".join(str(t) for t in target) or str(kind)
-    else:
-        detail = str(target)
+    meta = p.get("metadata") or {}
+    detail = None
+    if isinstance(meta, dict):
+        for key in _PERM_TARGET_KEYS:
+            val = meta.get(key)
+            if val:
+                detail = str(val)
+                break
+    if detail is None:
+        target = p.get("patterns") or p.get("resources") or []
+        if isinstance(target, (list, tuple)):
+            detail = ", ".join(str(t) for t in target) or str(kind)
+        else:
+            detail = str(target)
     return Blocked(
         kind=str(kind),
         request_id=rid,

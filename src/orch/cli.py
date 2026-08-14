@@ -5,6 +5,7 @@ import json
 import shlex
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import agent as agent_mod
@@ -15,6 +16,7 @@ from . import verify as verify_mod
 from . import harness
 from . import hooks as hooks_mod
 from . import init as init_mod
+from . import observe
 from . import project as project_mod
 from . import server as server_mod
 from . import state
@@ -471,6 +473,309 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
         print(f"{len(t.blocked) - 1} more pending request(s); pass --request <id> "
               "to answer a specific one", file=sys.stderr)
     return 0
+
+
+@dataclass
+class _PermAsk:
+    owner: str
+    worktree: str
+    kind: str
+    detail: str
+    request_id: str
+    session_id: str
+
+
+def _perm_asks(port: int, proj: state.Project) -> list[_PermAsk]:
+    asks: list[_PermAsk] = []
+    for t in proj.scan(port):
+        if not t.claimed or not t.worktree:
+            continue
+        for b in t.blocked:
+            if b.kind == "question":
+                continue
+            asks.append(_PermAsk(owner=t.name, worktree=t.worktree,
+                                 kind=b.kind, detail=b.detail,
+                                 request_id=b.request_id, session_id=b.session_id))
+    base_wt = proj.base_worktree
+    if base_wt is not None:
+        sid = agent_mod.find(port, base_wt)
+        if sid is not None:
+            for p in harness.permissions(port, str(base_wt)):
+                if str(p.get("sessionID") or "") != sid:
+                    continue
+                d = observe._describe_permission(p)
+                asks.append(_PermAsk(owner=f"primary-agent@{proj.base}",
+                                     worktree=str(base_wt), kind=d.kind,
+                                     detail=d.detail, request_id=d.request_id,
+                                     session_id=d.session_id))
+    return asks
+
+
+def _pick_project(args: argparse.Namespace, port: int,
+                  start: Path) -> tuple[state.Project | None, int]:
+    projects = state.discover_projects(_roots_from(args))
+    if not projects:
+        print("no supervised projects discovered under "
+              + ", ".join(state.default_roots()), file=sys.stderr)
+        return None, 2
+    current = state.Project.from_dir(start)
+    cur_common = str(current.common) if current else None
+    items: list[tuple[state.Project, str, int]] = []
+    for common, orch in sorted(projects.items()):
+        p = state.Project(Path(common), orch, state.base_from_config(orch))
+        n = len(_perm_asks(port, p))
+        if n:
+            items.append((p, daemon_mod.project_label(common), n))
+    if not items:
+        print("nothing pending - no permission asks in any supervised project")
+        return None, 0
+    if len(items) == 1:
+        return items[0][0], 0
+    print("pick a project:")
+    for i, (_p, label, n) in enumerate(items, 1):
+        mark = " *" if str(_p.common) == cur_common else ""
+        print(f"  {i:>2}. {label}{mark}  {n} pending")
+    print("  q. quit")
+    while True:
+        line = _prompt("pick a project: ")
+        if line is None:
+            print()
+            return None, 0
+        c = line.strip().lower()
+        if c in ("q", "quit"):
+            return None, 0
+        try:
+            idx = int(c)
+        except ValueError:
+            print("  a number or q", file=sys.stderr)
+            continue
+        if 1 <= idx <= len(items):
+            return items[idx - 1][0], 0
+        print(f"  pick 1..{len(items)} or q", file=sys.stderr)
+
+
+def _pick_owner(proj: state.Project, port: int) -> str | None:
+    asks = _perm_asks(port, proj)
+    if not asks:
+        print("nothing pending - no permission asks in this project")
+        return None
+    owners: list[str] = []
+    for a in asks:
+        if a.owner not in owners:
+            owners.append(a.owner)
+    if len(owners) == 1:
+        return owners[0]
+    print("pick a task:")
+    for i, owner in enumerate(owners, 1):
+        own = [a for a in asks if a.owner == owner]
+        kinds = " · ".join(a.kind for a in own)
+        print(f"  {i:>2}. {owner}  {len(own)} pending: {kinds}")
+    print("  q. quit")
+    while True:
+        line = _prompt("pick a task: ")
+        if line is None:
+            print()
+            return None
+        c = line.strip().lower()
+        if c in ("q", "quit"):
+            return None
+        try:
+            idx = int(c)
+        except ValueError:
+            print("  a number or q", file=sys.stderr)
+            continue
+        if 1 <= idx <= len(owners):
+            return owners[idx - 1]
+        print(f"  pick 1..{len(owners)} or q", file=sys.stderr)
+
+
+def _explain_denied(port: int, session_id: str, reason: str) -> None:
+    """Tell the agent why its ask was denied and keep it working, so the
+    session stays busy instead of settling idle and being swept up as a
+    no-op by the daemon. Best effort - a session that vanished is fine."""
+    text = (f"The permission request was denied. Reason: {reason}. "
+            "Adjust your approach and continue the task; if you need to ask "
+            "something, ask it.")
+    try:
+        harness.prompt_async(port, session_id, text)
+    except harness.HarnessError:
+        pass
+
+
+_DENY_DEFAULT = "denied by the operator; adjust your approach and continue"
+
+
+def _walk_permissions(proj: state.Project, port: int, owner: str) -> int:
+    print(f"\npermissions for {owner}")
+    asks = [a for a in _perm_asks(port, proj) if a.owner == owner]
+    left = 0
+    for ask in asks:
+        print(f"\n  {ask.kind}: {ask.detail}")
+        while True:
+            line = _prompt("  [a]llow  [d]eny  [s]kip  [q]uit: ")
+            if line is None:
+                left += 1
+                break
+            c = line.strip().lower()
+            if c in ("a", "allow"):
+                try:
+                    harness.reply_permission(port, ask.request_id, "once",
+                                             directory=ask.worktree)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  ! could not allow {ask.request_id}: {e}",
+                          file=sys.stderr)
+                    left += 1
+                else:
+                    print(f"  allowed {ask.request_id}")
+                break
+            if c in ("d", "deny"):
+                reason = _prompt("  reason (sent to the agent): ") or ""
+                reason = reason.strip() or _DENY_DEFAULT
+                try:
+                    harness.reply_permission(port, ask.request_id, "reject",
+                                             directory=ask.worktree,
+                                             message=reason)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  ! could not deny {ask.request_id}: {e}",
+                          file=sys.stderr)
+                    left += 1
+                else:
+                    _explain_denied(port, ask.session_id, reason)
+                    print(f"  denied {ask.request_id}: {reason}")
+                break
+            if c in ("s", "skip"):
+                left += 1
+                break
+            if c in ("q", "quit"):
+                left += 1
+                return 1
+            print("  allow, deny, skip or quit", file=sys.stderr)
+    still = [a for a in _perm_asks(port, proj) if a.owner == owner]
+    if still:
+        print(f"\n{len(still)} still pending for {owner}:")
+        for a in still:
+            print(f"  {a.kind}: {a.detail}")
+        return 1
+    if left:
+        print(f"\n{left} left unanswered for {owner}")
+        return 1
+    print(f"\nall permissions for {owner} answered")
+    return 0
+
+
+def _perm_one_shot(proj: state.Project, port: int, name: str,
+                   reply: str, reason: str | None = None) -> int:
+    asks = [a for a in _perm_asks(port, proj) if a.owner == name]
+    if not asks:
+        print(f"{name} has no pending permission asks", file=sys.stderr)
+        return 1
+    ask = asks[0]
+    reason_text = None
+    if reply == "deny":
+        reason_text = (reason or "").strip() or _DENY_DEFAULT
+    try:
+        if reply == "deny":
+            harness.reply_permission(port, ask.request_id, "reject",
+                                     directory=ask.worktree,
+                                     message=reason_text)
+        else:
+            harness.reply_permission(port, ask.request_id, "once",
+                                     directory=ask.worktree)
+    except Exception as e:  # noqa: BLE001
+        print(f"could not answer {ask.request_id}: {e}", file=sys.stderr)
+        return 1
+    if reply == "deny":
+        assert reason_text is not None
+        _explain_denied(port, ask.session_id, reason_text)
+        print(f"denied permission {ask.request_id} for {name}: {reason_text}")
+    else:
+        print(f"allowed permission {ask.request_id} for {name}")
+    if len(asks) > 1:
+        print(f"{len(asks) - 1} more pending request(s) for {name}",
+              file=sys.stderr)
+    return 0
+
+
+def _perm_list(proj: state.Project, port: int) -> int:
+    asks = _perm_asks(port, proj)
+    if not asks:
+        print("nothing pending - no permission asks in this project")
+        return 0
+    for a in asks:
+        print(f"{a.owner}  {a.kind}: {a.detail}  [{a.request_id}]")
+    return 0
+
+
+def _perm_json(args: argparse.Namespace, port: int, proj: state.Project | None,
+               global_mode: bool) -> int:
+    items: list[dict] = []
+    projects: list[state.Project] = []
+    if global_mode:
+        for common, orch in sorted(state.discover_projects(_roots_from(args)).items()):
+            projects.append(state.Project(Path(common), orch,
+                                          state.base_from_config(orch)))
+    else:
+        if proj is None:
+            print("not in a project; pass -C <directory>", file=sys.stderr)
+            return 2
+        projects = [proj]
+    for p in projects:
+        label = daemon_mod.project_label(str(p.common))
+        for a in _perm_asks(port, p):
+            items.append({"project": label, "owner": a.owner, "kind": a.kind,
+                          "detail": a.detail, "request_id": a.request_id})
+    print(json.dumps(items, indent=2))
+    return 0
+
+
+def cmd_permissions(args: argparse.Namespace) -> int:
+    start = Path(args.directory) if args.directory else Path.cwd()
+    st = server_mod.status()
+    port = (st.get("port") if st.get("running")
+            and not st.get("unresponsive") else None)
+    if not port:
+        print("no shared server; `orch server start` first", file=sys.stderr)
+        return 2
+
+    proj = state.Project.from_dir(start)
+    global_mode = args.global_ or proj is None
+
+    if args.task:
+        if proj is None:
+            print("not in a project; pass -C <directory>", file=sys.stderr)
+            return 2
+        reply = (args.reply or "").strip().lower()
+        if reply not in ("allow", "deny"):
+            print("the --task one-shot takes allow|deny", file=sys.stderr)
+            return 2
+        return _perm_one_shot(proj, port, args.task, reply, reason=args.reason)
+    if args.reply:
+        print("a reply needs --task <name>", file=sys.stderr)
+        return 2
+    if args.json:
+        return _perm_json(args, port, proj, global_mode)
+    if args.directory is not None and not args.global_:
+        if proj is None:
+            print("not in a project; pass -C <directory>", file=sys.stderr)
+            return 2
+        return _perm_list(proj, port)
+    if not _interactive():
+        print("interactive approval needs a terminal; pass --task <name> "
+              "allow|deny for a one-shot, or -C <dir> to list", file=sys.stderr)
+        return 2
+
+    if global_mode:
+        proj, rc = _pick_project(args, port, start)
+        if proj is None:
+            return rc
+    else:
+        assert proj is not None
+        print(f"project {daemon_mod.project_label(str(proj.common))}")
+
+    owner = _pick_owner(proj, port)
+    if owner is None:
+        return 0
+    return _walk_permissions(proj, port, owner)
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -1164,6 +1469,29 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--timeout", type=float, default=agent_mod.DEFAULT_ASK_TIMEOUT,
                    help="max seconds to wait for a reply (default: %(default)s)")
     a.set_defaults(func=cmd_ask)
+
+    pm = sub.add_parser(
+        "permissions",
+        help="approve or deny pending permission asks interactively",
+    )
+    pm.add_argument("--task",
+                    help="answer one task by name (one-shot; takes allow|deny)")
+    pm.add_argument("reply", nargs="?", default=None,
+                    help="allow|deny for the --task one-shot")
+    pm.add_argument("--reason",
+                    help="why the ask is denied; sent to the agent so it can "
+                         "adjust and keep working (default: a generic denial)")
+    pm.add_argument("--global", dest="global_", action="store_true",
+                    help="pick a project across every supervised project first")
+    pm.add_argument("--roots",
+                    help="comma-separated roots to scan (--global only)")
+    pm.add_argument("--json", action="store_true",
+                    help="list pending permission asks without interacting")
+    pm.add_argument("-C", "--directory",
+                    help="the project to use; passing it makes the command "
+                         "non-interactive (lists the project's pending asks, "
+                         "or answers --task <name> allow|deny)")
+    pm.set_defaults(func=cmd_permissions)
 
     dm = sub.add_parser("daemon", help="supervise tasks, verification and the server")
     da = dm.add_subparsers(dest="action", metavar="<action>", title="daemon actions")

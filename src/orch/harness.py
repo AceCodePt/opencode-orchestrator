@@ -185,15 +185,21 @@ def abort(port: int, session_id: str) -> Any:
 
 
 def reply_permission(port: int, permission_id: str, reply: str,
-                     directory: str | None = None) -> Any:
+                     directory: str | None = None,
+                     message: str | None = None) -> Any:
     """Answer a pending permission ask. `reply` is once|always|reject (the v2
     vocabulary). `directory` is the worktree the ask lives in - asks are
-    workspace-scoped on the server, so it is required to reach the right one."""
+    workspace-scoped on the server, so it is required to reach the right one.
+    `message` is shown to the agent alongside the decision, so a rejection can
+    say why."""
     path = f"/permission/{permission_id}/reply"
     if directory:
         from urllib.parse import quote
         path += f"?directory={quote(directory, safe='/')}"
-    return post(port, path, {"reply": reply})
+    body: dict = {"reply": reply}
+    if message:
+        body["message"] = message
+    return post(port, path, body)
 
 
 def reply_question(port: int, request_id: str, answers: Any) -> Any:

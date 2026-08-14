@@ -227,6 +227,7 @@ string cannot do this job.
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify-run` | run the committed verification hook here and say why |
 | `orch ask "<message>"` | converse with the project's primary agent (create on first use; `--async`, `--compact`, `--status`) |
+| `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a daemon no-op), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
 
 The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
 when the branch already exists (the claim), and refuses an uncommitted spec or an

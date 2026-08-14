@@ -18,6 +18,7 @@ from orch import cli, observe, state  # noqa: E402
 class _FakeProject(state.Project):
     def __init__(self, tasks: list[state.TaskState]):
         self._tasks = tasks
+        self.common = Path("/tmp/lab/lab.git")
 
     @classmethod
     def from_dir(cls, start: Path) -> "_FakeProject | None":
@@ -533,6 +534,387 @@ def test_task_list_global_no_waiting_exits_0() -> None:
     finally:
         _global_teardown(saved)
     print("ok: nothing waiting prints clean and exits 0")
+
+
+def _pargs(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(directory=None, global_=False, json=False, task=None,
+                           reply=None, roots=None, reason=None)
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def _perm_blocked(name: str = "task-a", kind: str = "bash",
+                  worktree: str = "/tmp/wt") -> state.TaskState:
+    t = _blocked(name=name, kind=kind)
+    t.claimed = True
+    t.worktree = worktree
+    return t
+
+
+def _perm_saved() -> tuple:
+    return (cli.state.Project.from_dir, cli.server_mod.status,
+            cli.harness.reply_permission, cli._interactive, cli._prompt)
+
+
+def _perm_restore(saved: tuple) -> None:
+    (cli.state.Project.from_dir, cli.server_mod.status,
+     cli.harness.reply_permission, cli._interactive, cli._prompt) = saved
+
+
+def _perm_env(proj: "_FakeProject | None", prompts: list | None = None,
+              interactive: bool = True) -> None:
+    _FakeProject._instance = proj
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    cli._interactive = lambda: interactive
+    it = iter(prompts or [])
+    cli._prompt = lambda _m: next(it)
+
+
+def test_permissions_oneshot_allow_routes_once() -> None:
+    t = _perm_blocked()
+    replied: list[tuple] = []
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    cli.harness.reply_permission = lambda *a, **k: replied.append((a, k))
+    try:
+        rc = cli.cmd_permissions(_pargs(task="task-a", reply="allow"))
+        assert rc == 0, rc
+        (port, pid, reply), kw = replied[0]
+        assert (port, pid, reply) == (4096, "per_1", "once")
+        assert kw == {"directory": "/tmp/wt"}, \
+            "an allow maps to the v2 once reply, scoped to the worktree"
+    finally:
+        _perm_restore(saved)
+    print("ok: `permissions --task <name> allow` replies once to the task")
+
+
+def test_permissions_oneshot_deny_routes_reject_with_reason() -> None:
+    t = _perm_blocked()
+    replied: list[tuple] = []
+    nudges: list[tuple] = []
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    cli.harness.reply_permission = lambda *a, **k: replied.append((a, k))
+    cli.harness.prompt_async = lambda *a, **k: nudges.append((a, k))
+    try:
+        rc = cli.cmd_permissions(_pargs(task="task-a", reply="deny",
+                                        reason="never touch /etc"))
+        assert rc == 0, rc
+        (port, pid, reply), kw = replied[0]
+        assert (port, pid, reply) == (4096, "per_1", "reject")
+        assert kw == {"directory": "/tmp/wt",
+                      "message": "never touch /etc"}, \
+            "a deny carries the reason to the agent"
+        (nport, nsid, ntext), nkw = nudges[0]
+        assert nport == 4096 and nsid == "ses_1"
+        assert "never touch /etc" in ntext, \
+            "the agent is told the reason and nudged to continue"
+    finally:
+        _perm_restore(saved)
+    print("ok: `permissions --task <name> deny --reason` explains the denial "
+          "to the agent and keeps it working")
+
+
+def test_permissions_oneshot_deny_defaults_reason() -> None:
+    t = _perm_blocked()
+    replied: list[tuple] = []
+    nudges: list[tuple] = []
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    cli.harness.reply_permission = lambda *a, **k: replied.append((a, k))
+    cli.harness.prompt_async = lambda *a, **k: nudges.append((a, k))
+    try:
+        rc = cli.cmd_permissions(_pargs(task="task-a", reply="deny"))
+        assert rc == 0, rc
+        (port, pid, reply), kw = replied[0]
+        assert kw["message"] == cli._DENY_DEFAULT, \
+            "an empty reason falls back to the generic denial"
+        assert cli._DENY_DEFAULT in nudges[0][0][2]
+    finally:
+        _perm_restore(saved)
+    print("ok: a deny without --reason still explains itself to the agent")
+
+
+def test_permissions_oneshot_rejects_bad_reply() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        rc = cli.cmd_permissions(_pargs(task="task-a", reply="maybe"))
+        assert rc == 2, rc
+    finally:
+        _perm_restore(saved)
+    print("ok: the --task one-shot only takes allow or deny")
+
+
+def test_permissions_reply_without_task_is_an_error() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        rc = cli.cmd_permissions(_pargs(reply="allow"))
+        assert rc == 2, rc
+    finally:
+        _perm_restore(saved)
+    print("ok: a bare reply without --task is a usage error")
+
+
+def test_permissions_oneshot_no_pending_is_an_error() -> None:
+    t = state.TaskState(project="/tmp/lab/lab.git", name="task-a", base="main",
+                        claimed=True, worktree="/tmp/wt")
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        rc = cli.cmd_permissions(_pargs(task="task-a", reply="allow"))
+        assert rc == 1, rc
+    finally:
+        _perm_restore(saved)
+    print("ok: answering a task with no pending permission exits 1")
+
+
+def test_permissions_non_interactive_refused_without_oneshot() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]), interactive=False)
+    try:
+        buf = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = cli.cmd_permissions(_pargs())
+        assert rc == 2, rc
+        assert "terminal" in err.getvalue()
+    finally:
+        _perm_restore(saved)
+    print("ok: the interactive walk refuses a non-terminal without --task")
+
+
+def test_permissions_json_lists_pending() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs(json=True))
+        assert rc == 0, rc
+        data = json.loads(buf.getvalue())
+        assert data == [{"project": "lab", "owner": "task-a", "kind": "bash",
+                         "detail": "/etc/*", "request_id": "per_1"}]
+    finally:
+        _perm_restore(saved)
+    print("ok: `permissions --json` lists every pending ask machine-readably")
+
+
+def test_permissions_interactive_walks_allow_and_deny() -> None:
+    t = _perm_blocked()
+    t.blocked.append(observe.Blocked(kind="write", request_id="per_2",
+                                     session_id="ses_1", detail="/tmp/*"))
+    replied: list[tuple] = []
+    nudges: list[tuple] = []
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]), prompts=["a", "d", "no writes to /tmp"])
+
+    def fake_reply(port, rid, reply, **kw) -> None:
+        replied.append((rid, reply, kw))
+        t.blocked = [b for b in t.blocked if b.request_id != rid]
+    cli.harness.reply_permission = fake_reply
+    cli.harness.prompt_async = lambda *a, **k: nudges.append((a, k))
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs())
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert replied == [("per_1", "once", {"directory": "/tmp/wt"}),
+                           ("per_2", "reject",
+                            {"directory": "/tmp/wt",
+                             "message": "no writes to /tmp"})], \
+            "a deny in the walk explains itself"
+        assert nudges and "no writes to /tmp" in nudges[0][0][2], \
+            "the denied session is told why and nudged to keep working"
+        assert "no writes to /tmp" in out
+        assert "all permissions for task-a answered" in out
+    finally:
+        _perm_restore(saved)
+    print("ok: the walk allows, and denies with a reason sent to the agent")
+
+
+def test_permissions_interactive_skip_reports_pending() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]), prompts=["s"])
+    replied: list[tuple] = []
+    cli.harness.reply_permission = lambda *a, **k: replied.append(a)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs())
+        assert rc == 1, rc
+        assert replied == [], "a skip never replies"
+        assert "still pending" in buf.getvalue()
+    finally:
+        _perm_restore(saved)
+    print("ok: skipping an ask leaves it pending and exits 1")
+
+
+def test_permissions_interactive_quit_leaves_pending() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]), prompts=["q"])
+    replied: list[tuple] = []
+    cli.harness.reply_permission = lambda *a, **k: replied.append(a)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs())
+        assert rc == 1, rc
+        assert replied == []
+    finally:
+        _perm_restore(saved)
+    print("ok: quitting the walk leaves the rest pending and exits 1")
+
+
+def test_permissions_interactive_primary_agent_owner() -> None:
+    t = _perm_blocked()
+    perm_response: list[dict] = [{"id": "per_9", "sessionID": "ses_pa",
+                                  "permission": "external_directory",
+                                  "patterns": ["/tmp/opencode/*"],
+                                  "metadata": {"filepath": "/tmp/opencode/a.sh",
+                                               "parentDir": "/tmp/opencode"}}]
+    replied: list[tuple] = []
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]), prompts=["2", "a"])
+    orig_find = cli.agent_mod.find
+    orig_perms = cli.harness.permissions
+    cli.agent_mod.find = lambda port, base: "ses_pa"
+    cli.harness.permissions = lambda port, directory: (
+        [] if directory == "/tmp/wt" else perm_response)
+
+    def fake_reply(port, rid, reply, **kw) -> None:
+        replied.append((rid, reply, kw))
+        perm_response.clear()
+    cli.harness.reply_permission = fake_reply
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs())
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "primary-agent@main" in out, "the primary agent is a picker row"
+        assert "/tmp/opencode/a.sh" in out, \
+            "the walk shows the actual file the agent wants to touch, not the glob"
+        assert replied == [("per_9", "once", {"directory": "/tmp/lab"})], \
+            "the primary agent's ask is answered scoped to the base worktree"
+    finally:
+        _perm_restore(saved)
+        cli.agent_mod.find = orig_find
+        cli.harness.permissions = orig_perms
+    print("ok: the walk answers the primary agent's pending permission")
+
+
+def test_permissions_dir_flag_lists_non_interactively() -> None:
+    t = _perm_blocked()
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs(directory="/tmp/lab"))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "task-a" in out and "bash" in out and "/etc/*" in out
+        assert "interactive" not in out
+    finally:
+        _perm_restore(saved)
+    print("ok: -C alone lists the project's pending asks without prompting")
+
+
+def test_permissions_dir_flag_no_pending_exits_0() -> None:
+    t = state.TaskState(project="/tmp/lab/lab.git", name="task-a", base="main",
+                        claimed=True, worktree="/tmp/wt")
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs(directory="/tmp/lab"))
+        assert rc == 0, rc
+        assert "nothing pending" in buf.getvalue()
+    finally:
+        _perm_restore(saved)
+    print("ok: -C with nothing pending prints clean and exits 0")
+
+
+def test_permissions_global_picker_selects_project() -> None:
+    asks = {
+        "/p1/p1.git": [cli._PermAsk(owner="task-a", worktree="/p1/wt",
+                                    kind="bash", detail="/etc/*",
+                                    request_id="per_1", session_id="ses_1")],
+        "/p2/p2.git": [cli._PermAsk(owner="task-b", worktree="/p2/wt",
+                                    kind="write", detail="/tmp/*",
+                                    request_id="per_2", session_id="ses_2")],
+    }
+    replied: list[tuple] = []
+    saved = _perm_saved()
+    orig_disc = cli.state.discover_projects
+    orig_base = cli.state.base_from_config
+    orig_from = cli.state.Project.from_dir
+    orig_label = cli.daemon_mod.project_label
+    orig_asks = cli._perm_asks
+    _perm_env(None, prompts=["2", "a"])
+    cli.state.discover_projects = lambda _r: {
+        "/p1/p1.git": Path("/p1/.orchestration"),
+        "/p2/p2.git": Path("/p2/.orchestration")}
+    cli.state.base_from_config = lambda _o: "main"
+    cli.state.Project.from_dir = lambda start: None
+    cli.daemon_mod.project_label = lambda c: Path(c).parent.name
+    cli._perm_asks = lambda port, proj: asks.get(str(proj.common), [])
+
+    def fake_reply(port, rid, reply, **kw) -> None:
+        replied.append((rid, reply, kw))
+        for lst in asks.values():
+            lst[:] = [a for a in lst if a.request_id != rid]
+    cli.harness.reply_permission = fake_reply
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs(global_=True))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "p1" in out and "p2" in out, "the project picker lists both"
+        assert "task-b" in out, "the picked project's task is walked"
+        assert replied == [("per_2", "once", {"directory": "/p2/wt"})], \
+            "selecting project 2 answers its task, not project 1's"
+    finally:
+        _perm_restore(saved)
+        cli.state.discover_projects = orig_disc
+        cli.state.base_from_config = orig_base
+        cli.state.Project.from_dir = orig_from
+        cli.daemon_mod.project_label = orig_label
+        cli._perm_asks = orig_asks
+    print("ok: --global picks a project interactively, then walks its task")
+
+
+def test_describe_permission_shows_the_actual_target() -> None:
+    cases = [
+        ({"permission": "bash", "patterns": ["*"],
+          "metadata": {"command": "npm run build"}}, "npm run build"),
+        ({"permission": "webfetch", "patterns": [],
+          "metadata": {"url": "https://example.com/x"}}, "https://example.com/x"),
+        ({"permission": "external_directory",
+          "patterns": ["/tmp/opencode/*"],
+          "metadata": {"filepath": "/tmp/opencode/a.sh"}}, "/tmp/opencode/a.sh"),
+        ({"permission": "write", "resources": ["src/x.ts"],
+          "metadata": {"filePath": "src/x.ts"}}, "src/x.ts"),
+        ({"permission": "bash", "patterns": ["*"]}, "*"),
+    ]
+    for raw, want in cases:
+        b = observe._describe_permission(raw)
+        assert b.detail == want, (raw, b.detail, want)
+    print("ok: a permission ask is described by what it tries to run")
 
 
 def main() -> int:

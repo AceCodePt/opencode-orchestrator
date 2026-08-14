@@ -64,6 +64,11 @@ bin/orch ask --async "<message>" # fire-and-forget: send and return immediately
 bin/orch ask --compact [msg]     # run opencode's own compaction, then optionally ask
 bin/orch ask --status            # is the primary agent idle, busy, or blocked
 
+bin/orch permissions             # approve/deny pending permission asks interactively (auto-picks the project you're in; --global picks a project first, then a task)
+bin/orch permissions --task <name> allow|deny   # scriptable one-shot for one task
+bin/orch permissions -C <dir>    # non-interactive: list the project's pending asks (a flag makes it non-interactive)
+bin/orch permissions --json      # list every pending permission ask, machine-readable
+
 bin/orch install                 # systemd user unit, enabled, with linger
 bin/orch uninstall                # remove config-level traces, keep projects alone
 bin/orch daemon status            # is anything actually supervising
@@ -130,6 +135,51 @@ The primary agent works in the base worktree: its edits stay uncommitted for you
 to review and commit, and the daemon never verifies, merges, or tears it down — it
 supervises only task worktrees. `--status` reports whether it is idle, busy, or
 blocked on a permission/question.
+
+## Permission approval (`orch permissions`)
+
+When an agent needs a permission to run a tool, it **blocks** on a pending ask
+instead of auto-answering it. `orch permissions` is the surface for those asks:
+approve, deny, skip, or quit, one at a time. It is **allow/deny only** — question
+asks are out of scope — and every answer is one-time: nothing is persisted, so the
+next ask is a fresh decision (matching the security model).
+
+**Interactive by default** — no flags. Run it inside a project and it auto-picks
+that project (no project prompt), then shows a numbered picker of every owner
+with pending asks: claimed tasks, plus a `primary-agent@<base>` row when the
+project's `orch ask` conversation is blocked on a permission. Pick one and the
+walk begins, one ask per block:
+
+```
+permissions for auth-migrate
+  bash: npm run build
+  [a]llow  [d]eny  [s]kip  [q]uit:
+```
+
+Each block shows what the agent is actually trying to run (the command, file,
+or URL from the ask's metadata), not the permission glob — so you can decide
+before you approve. `a` approves once, `d` denies, `s` leaves the ask pending
+and moves on, `q` stops
+the walk. **A denial asks you for a reason and sends it back to the agent** along
+with a nudge to adjust and continue — so a denied request becomes a
+conversation (the agent responds, tries a different approach, and can hit a new
+ask for you to decide again) instead of the session going idle and the task
+being swept up as a no-op by the daemon. An empty reason falls back to a generic
+denial. After the last ask it rescans and reports what is still pending — exit 1
+if anything is, 0 if all were answered. `--global` (or running outside a project)
+lists every supervised project with its pending count first (`*` marks the one
+you're in), then the same picker.
+
+**Flags make it non-interactive** — for scripts and the notification flow:
+- `orch permissions --task <name> allow|deny [--reason "..."]` — answer one
+  task's first pending ask, no terminal needed; a deny's `--reason` explains it
+  to the agent so it keeps working.
+- `orch permissions -C <dir>` — list that project's pending asks, one per line.
+- `orch permissions --json [--global]` — the same, machine-readable.
+
+On a non-terminal stdin with no flags, `orch permissions` refuses to run — a
+permission is a deliberate human act, so it must be interactive or explicitly
+flagged.
 
 ## Creating a project from scratch
 
