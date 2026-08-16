@@ -146,8 +146,9 @@ There is no external issue tracker. The project's own `tasks/` *is* the tracker:
 - a spec file declares work, a branch claims it, the daemon verifies and merges it, `archive/` closes it
 - ordering is `dependencies:` front matter — a slice dispatches when its dependencies archive, which is exactly the frontier query
 - intake is a conversation in opencode: the `create_task` custom tool turns free text
-  (with the human deciding the wait flags) into a spec task + slice tasks; `orch ask` is
-  the headless path, the TUI the interactive one
+  (with the human deciding the wait flags) into a spec task + slice tasks; the TUI is
+  the surface, `orch attach` drops you into it on the project's primary-agent session
+  (or, run from inside a claimed task worktree, on that task's session)
 - triage is a human reviewing uncommitted drafted specs — approve (commit), ask-for-info (leave uncommitted), or drop
 
 GitHub is **hosting only**: `orch project create` pushes a private repo; nothing reads
@@ -226,7 +227,7 @@ string cannot do this job.
 | `orch verify` | inspect whether the committed verification hook is trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify-run` | run the committed verification hook here and say why |
-| `orch ask "<message>"` | converse with the project's primary agent (create on first use; `--async`, `--compact`, `--status`) |
+| `orch attach` | attach the interactive TUI on the shared server — from inside a claimed task worktree to that task's session (create it on first use), otherwise to the project's primary agent (create the `orch:agent` session on first use) |
 | `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a daemon no-op), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
 
 The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
@@ -289,19 +290,16 @@ for blocked alerts). Existing dedup carries over — alerts fire once per reques
 ### 5. The primary agent — the project's own conversation
 
 Distinct from task agents, a project can have **one persistent primary agent**
-(`orch ask`). It is a session on the shared server attached to the project's
+(`orch attach`). It is a session on the shared server attached to the project's
 base worktree, found live by its `orch:agent` session title — no stored state,
 matching the "the repo is the state" rule. First use creates it with
-`POST /session?directory=<base>` plus `prompt_async`; later asks continue the
-same session via `POST /session/{id}/message`. Like task agents it is a plain
-server session with **no `opencode run` loop**, so a permission ask stays pending
-and is surfaced in the stream as `[blocked]` instead of being auto-rejected.
-`--compact` calls
-`POST /session/{id}/summarize`, which enqueues a `compaction` step and runs
-opencode's own `SessionCompaction` loop (the same path automatic context
-overflow uses), never a stand-in. The primary agent edits the base worktree
-uncommitted and is **outside the daemon's loop**: it is never verified, merged, or
-torn down, and its work is never a task.
+`POST /session?directory=<base>`; `orch attach` then runs opencode's own
+`attach <url> --session <id>` TUI on it, so every further message continues the
+same session via the normal client, not a headless proxy. Like task agents it is a
+plain server session with **no `opencode run` loop**, so a permission ask stays
+pending and is surfaced in the attached TUI instead of being auto-rejected. The
+primary agent edits the base worktree uncommitted and is **outside the daemon's
+loop**: it is never verified, merged, or torn down, and its work is never a task.
 
 ## Flow A — dispatch
 
@@ -326,7 +324,7 @@ from the worktree state, by the daemon; a permission ask stays pending until a
 human answers it with `orch task answer`.
 
 Intake has no CLI one-shot. It is a conversation: an opencode session in the base
-worktree (the TUI, or `orch ask` headlessly) turns a free-text description into one
+worktree (the TUI, via `orch attach`) turns a free-text description into one
 or more `tasks/<name>/task.md` specs by calling the machine-global `create_task`
 custom tool — writing into the base worktree and **committing the spec to base when
 `wait_human_start` is false**, so the daemon sees it and the loop runs on its own.

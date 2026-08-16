@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -900,7 +900,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                           sse=not args.no_sse)
 
 
-def cmd_ask(args: argparse.Namespace) -> int:
+def cmd_attach(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
     proj, err = agent_mod.project_of(start)
     if err or proj is None or proj.base_worktree is None:
@@ -912,183 +912,24 @@ def cmd_ask(args: argparse.Namespace) -> int:
     except (RuntimeError, TimeoutError, OSError) as e:
         print(f"could not start the shared server: {e}", file=sys.stderr)
         return 1
-
-    if args.status:
-        st = agent_mod.status(info, base)
-        if st["session"] is None:
-            print("no primary agent yet - the first `orch ask` creates it")
-            return 0
-        print(f"session {st['session']}")
-        print(f"state   {st['state']}")
-        for d in st["blocked"]:
-            print(f"  blocked: {d}")
-        return 0
-
-    sid = agent_mod.find(info.port, base)
-    if args.compact:
-        if sid is None:
-            print("nothing to compact - the first `orch ask` creates the "
-                  "conversation", file=sys.stderr)
-            return 1
-        ok, cerr = agent_mod.compact(info, sid, timeout=args.timeout)
-        if not ok:
-            print(cerr, file=sys.stderr)
-            return 1
-        print("compacted (opencode compaction ran)")
-        if args.message is None:
-            return 0
-
-    if args.stream and args.async_:
-        print("--stream cannot be combined with --async", file=sys.stderr)
-        return 2
-
-    if args.message is None:
-        return _ask_interactive(args, info, base, sid)
-
-    if args.async_:
-        if sid is None:
-            sid, notes = agent_mod.create(info, base, args.message,
-                                          timeout=args.timeout)
-            for n in notes:
-                print(f"  ! {n}", file=sys.stderr)
-            if sid is None:
-                return 1
-            print(f"sent to new session {sid}")
-            return 0
-        err = agent_mod.fire(info, sid, args.message)
-        if err:
-            print(err, file=sys.stderr)
-            return 1
-        print(f"sent to session {sid}")
-        return 0
-
-    if args.stream:
-        return _stream_ask(args, info, base, sid, args.message)
-
-    stop = _thinking()
-    reply = None
-    err = None
     try:
-        if sid is None:
-            sid, notes = agent_mod.create(info, base, args.message,
-                                          timeout=args.timeout)
-            for n in notes:
-                print(f"  ! {n}", file=sys.stderr)
-            if sid is None:
-                return 1
-            reply = agent_mod.last_reply(info.port, sid)
+        t = agent_mod.task_at(proj, info.port, start)
+        if t is not None and t.worktree:
+            dir_ = Path(t.worktree)
+            sid = agent_mod.ensure_task(info.port, dir_, t.name)
         else:
-            reply, err = agent_mod.ask(info, sid, args.message,
-                                       timeout=args.timeout)
-    finally:
-        if stop is not None:
-            stop.set()
-    if err:
-        print(err, file=sys.stderr)
-        return 1
-    print(reply or "(no text reply)")
-    return 0
-
-
-def _stream_ask(args: argparse.Namespace, info, base, sid, text: str) -> int:
-    got_text = False
-    try:
-        for kind, payload in agent_mod.stream_reply(
-                info, base, text, session_id=sid, timeout=args.timeout):
-            if kind == "text":
-                print(payload, end="", flush=True)
-                got_text = True
-            elif kind == "thinking":
-                line = " ".join(str(payload).split())
-                if line:
-                    print(f"\n[thinking] {line}", file=sys.stderr, flush=True)
-            elif kind == "tool":
-                print(f"\n[tool: {payload}]", file=sys.stderr, flush=True)
-            elif kind == "shell":
-                print(f"\n[shell] {payload}", file=sys.stderr, flush=True)
-            elif kind == "blocked":
-                print(f"\n[blocked: {payload} - answer with "
-                      "`opencode attach`]",
-                      file=sys.stderr, flush=True)
-            elif kind == "error":
-                print(f"\n[error: {payload}]", file=sys.stderr, flush=True)
-            elif kind == "exit":
-                if payload != "0":
-                    if not got_text:
-                        return 1
-                    print("\n[agent exited non-zero after partial output]",
-                          file=sys.stderr)
+            dir_ = base
+            sid = agent_mod.ensure(info.port, base)
     except harness.HarnessError as e:
-        print(str(e), file=sys.stderr)
+        print(e, file=sys.stderr)
         return 1
-    print()
-    return 0
-
-
-def _thinking() -> threading.Event | None:
-    """A small 'agent is thinking' spinner on stderr while the blocking ask
-    waits. Returns a stop event, or None when there is no terminal to draw on."""
     try:
-        if not sys.stderr.isatty():
-            return None
-    except (AttributeError, OSError):
-        return None
-    stop = threading.Event()
-    frames = "|/-\\"
-
-    def spin() -> None:
-        i = 0
-        while not stop.is_set():
-            sys.stderr.write(
-                f"\r  agent is thinking {frames[i % len(frames)]}"
-                "    (--stream for live output)"
-            )
-            sys.stderr.flush()
-            i += 1
-            stop.wait(0.15)
-        sys.stderr.write("\r" + " " * 64 + "\r")
-        sys.stderr.flush()
-
-    threading.Thread(target=spin, daemon=True).start()
-    return stop
-
-
-def _ask_interactive(args: argparse.Namespace, info, base, sid) -> int:
-    print("talking to the project's primary agent; Ctrl-C or EOF to end")
-    while True:
-        try:
-            line = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not line.strip():
-            continue
-        if args.stream:
-            rc = _stream_ask(args, info, base, sid, line)
-            if rc != 0:
-                return rc
-            continue
-        stop = _thinking()
-        reply = None
-        err = None
-        try:
-            if sid is None:
-                sid, notes = agent_mod.create(info, base, line,
-                                              timeout=args.timeout)
-                for n in notes:
-                    print(f"  ! {n}", file=sys.stderr)
-                if sid is None:
-                    return 1
-                reply = agent_mod.last_reply(info.port, sid)
-            else:
-                reply, err = agent_mod.ask(info, sid, line, timeout=args.timeout)
-        finally:
-            if stop is not None:
-                stop.set()
-        if err:
-            print(err, file=sys.stderr)
-            return 1
-        print(reply or "(no text reply)")
+        os.execvp("opencode", ["opencode", "attach", info.url,
+                               "--session", sid, "--dir", str(dir_)])
+    except OSError as e:
+        print(f"could not exec opencode attach: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_project_help(args: argparse.Namespace) -> int:
@@ -1178,7 +1019,7 @@ def cmd_project_create(args: argparse.Namespace) -> int:
         return 1
     print("\nnext:")
     print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit")
-    print('  bin/orch ask "<message>"             # converse with the project\'s primary agent')
+    print('  bin/orch attach                      # attach the interactive TUI to the primary agent, or to a task\'s session from its worktree')
     print("  bin/orch server start && bin/orch install && bin/orch doctor")
     print("  bin/orch task list && bin/orch task start <name>")
     return 0
@@ -1449,26 +1290,16 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--event", default="session-idle")
     gr.set_defaults(func=cmd_verify_run)
 
-    a = sub.add_parser(
-        "ask",
-        help="converse with the project's primary agent (created on first use)",
+    at = sub.add_parser(
+        "attach",
+        help="attach the interactive TUI to the project's primary agent "
+             "(created on first use), or to a task's session when run from "
+             "inside a claimed task worktree",
     )
-    a.add_argument("message", nargs="?",
-                   help="message to send; omit for an interactive conversation")
-    a.add_argument("--async", dest="async_", action="store_true",
-                   help="fire-and-forget: send the message and return immediately")
-    a.add_argument("--stream", action="store_true",
-                   help="stream the reply as it is produced instead of waiting "
-                        "for the whole block")
-    a.add_argument("--compact", action="store_true",
-                   help="compact the conversation first (opencode's own compaction)")
-    a.add_argument("--status", action="store_true",
-                   help="show the primary agent's session state")
-    a.add_argument("-C", "--directory",
-                   help="the project to ask (default: the current worktree's project)")
-    a.add_argument("--timeout", type=float, default=agent_mod.DEFAULT_ASK_TIMEOUT,
-                   help="max seconds to wait for a reply (default: %(default)s)")
-    a.set_defaults(func=cmd_ask)
+    at.add_argument("-C", "--directory",
+                    help="the project to attach to (default: the current "
+                         "worktree's project)")
+    at.set_defaults(func=cmd_attach)
 
     pm = sub.add_parser(
         "permissions",

@@ -339,7 +339,7 @@ def test_cmd_project_create_prints_next_steps() -> None:
         out = buf.getvalue()
         assert rc == 0, rc
         assert "git init" in out and "next:" in out
-        assert "orch ask" in out
+        assert "orch attach" in out
     finally:
         cli.project_mod.create = orig
         cli.sys.stdin = orig_stdin

@@ -58,11 +58,7 @@ bin/orch task reset <name>       # delete branch+worktree -> back to todo (a hum
 bin/orch task archive <name>     # close a reviewed needs-review task
 bin/orch task merge <name>       # re-run a merge after a conflict
 
-bin/orch ask "<message>"         # converse with the project's primary agent (created on first use)
-bin/orch ask --stream "<message>"# stream the reply as it is produced (tool calls shown); without it, a thinking indicator runs while you wait
-bin/orch ask --async "<message>" # fire-and-forget: send and return immediately
-bin/orch ask --compact [msg]     # run opencode's own compaction, then optionally ask
-bin/orch ask --status            # is the primary agent idle, busy, or blocked
+bin/orch attach                  # attach the interactive TUI to the primary agent, or to a task's session from its worktree (created on first use)
 
 bin/orch permissions             # approve/deny pending permission asks interactively (auto-picks the project you're in; --global picks a project first, then a task)
 bin/orch permissions --task <name> allow|deny [--reason "..."]   # scriptable one-shot for one task (a deny explains itself to the agent)
@@ -118,23 +114,32 @@ Requires opencode **1.18.11 or newer** — see Prerequisites.
 - **Provider API keys** — opencode needs a configured provider to run agents; the env
   filter deliberately lets `*_API_KEY` / `*_AUTH_TOKEN` through.
 
-## The primary agent (`orch ask`)
+## The primary agent (`orch attach`)
 
 Separate from tasks, every project can have **one primary agent**: a persistent
 conversation attached to the project's base worktree on the shared server, found
-live by its `orch:agent` session title. `orch ask` creates it on first use and
-keeps talking to the same session, so it remembers the conversation. You can ask
-it questions, have it change files, fire a message and check later (`--async`),
-compact the conversation when context grows — `--compact` runs **opencode's
-own compaction** (`POST /session/{id}/summarize`), not a stand-in — and stream
-the reply as it is produced (`--stream`): text parts print live and tool calls
-show as `[tool: …]` markers. Without `--stream`, a *thinking* indicator spins on
-the terminal while the reply is awaited, so a long answer is never silent.
+live by its `orch:agent` session title. `orch attach` creates it on first use,
+then hands you opencode's own interactive attach TUI pointed straight at that
+session (`opencode attach <url> --session <id>` in the base worktree) — so the
+conversation remembers everything, and you type in the same interface you always
+use instead of a CLI-side shim. Compaction, streaming, and every other
+conversation feature are opencode's own; orch only resolves the project's server
+and session for you.
+
+`orch attach` is context-sensitive: run from a **claimed task worktree** and it
+attaches to that task's session instead (creating it on first use, exactly like
+the primary agent) — the task's session is titled by the task slug and bound to
+the task worktree, so you can drive the task's agent and answer its asks in the
+same TUI. Run from the base worktree, or anywhere outside a task worktree, and it
+attaches to the primary agent as above. Running it somewhere that is not a
+project worktree at all is refused.
 
 The primary agent works in the base worktree: its edits stay uncommitted for you
 to review and commit, and the daemon never verifies, merges, or tears it down — it
-supervises only task worktrees. `--status` reports whether it is idle, busy, or
-blocked on a permission/question.
+supervises only task worktrees. Whether it is idle, busy, or blocked shows up in
+`orch project list` (and a blocked primary agent is a `primary-agent@<base>`
+owner in `orch permissions`, answerable there or by attaching and answering in
+the TUI).
 
 ## Permission approval (`orch permissions`)
 
@@ -147,7 +152,7 @@ next ask is a fresh decision (matching the security model).
 **Interactive by default** — no flags. Run it inside a project and it auto-picks
 that project (no project prompt), then shows a numbered picker of every owner
 with pending asks: claimed tasks, plus a `primary-agent@<base>` row when the
-project's `orch ask` conversation is blocked on a permission. Pick one and the
+project's primary-agent conversation is blocked on a permission. Pick one and the
 walk begins, one ask per block:
 
 ```
@@ -199,7 +204,7 @@ The parent must otherwise be inside a supervised root
 (`$HOME`, `/mnt`, `/tmp/opencode`, or `ORCH_ROOTS`) — a project the daemon cannot discover would
 never settle, so create refuses and says so; `--allow-unsupervised` creates one
 anyway, and `ORCH_ROOTS=/` supervises the whole filesystem. Then
-intake is a conversation: `orch ask "<free text>"` (or any opencode session in the
+intake is a conversation: `orch attach` (or any opencode session in the
 base worktree) turns an idea — or a whole pasted spec — into `tasks/<name>/task.md`
 specs via the machine's `create_task` custom tool, for you to review and commit. Both
 commands leave the project on the

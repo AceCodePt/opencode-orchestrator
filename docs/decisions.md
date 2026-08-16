@@ -300,29 +300,35 @@ in one source file has one place to check.
 
 - **One primary agent per project, found live, never stored.** It is the session
   titled `orch:agent` in the project's base worktree on the shared server; the first
-  `orch ask` creates it via `POST /session?directory=<base>` plus `prompt_async`,
-  later asks continue the same session through
-  `POST /session/{id}/message`. No registry, no file — the "repo is the state" rule
-  holds for a conversation too.
+  `orch attach` creates it via `POST /session?directory=<base>`, and every later
+  conversation continues the same session through opencode's own attach TUI. No
+  registry, no file — the "repo is the state" rule holds for a conversation too.
+- **`orch ask` was removed; `orch attach` replaced it, because a second client was
+  more inconvenient than useful.** The headless ask surface — a blocking reply, a
+  *thinking* spinner, `--stream`, `--async`, `--compact`, `--status` — duplicated a
+  tool the human already has: opencode's interactive TUI. Every feature was a shim
+  that had to keep up with opencode's own conversation UI (streaming parts, thinking,
+  tool traces, compaction, permission handling), which is a treadmill: the moment
+  opencode's UI improves, the shim drifts. Managing the conversation through the TUI
+  is simpler because there is nothing to maintain — orch only resolves the project's
+  server and session, and opencode owns the conversation. `orch attach` is therefore
+  a **thin resolver, not a client**: it finds or creates the session id and `exec`s
+  `opencode attach <url> --session <id> --dir <base>`, so the interactive TUI owns
+  the terminal and conversation features stay opencode's. The one thing the headless
+  client *did* provide — sending a message without opening the TUI (`--async`) — was
+  kept reachable through the same session from any opencode client, and answering
+  blocked permission asks stays a first-class `orch permissions` surface.
 - **The primary agent is outside the daemon's loop.** It works in the base worktree
   (the human's checkout), its edits stay uncommitted for the human to review, and it
   is never verified, merged, or torn down. Task worktrees branch from base HEAD, so its
   uncommitted edits never leak into a task.
-- **`--compact` is opencode's own compaction, not a stand-in.**
-  `POST /session/{id}/summarize` enqueues a `compaction` step and runs the message
-  loop, hitting the same `SessionCompaction.process` path automatic context-overflow
-  uses; it is the only working route — the v2 `POST /api/session/{id}/compact` is a
-  stub that returns 503 on 1.18.x.
 - **The primary agent is a server session like any task agent — no run loop.**
-  `create` and `--stream` are `POST /session?directory=<base>` + `prompt_async` with
-  the reply read back through the messages API, so `orch ask` renders the
-  conversation without ever spawning `opencode run`. That means the primary agent is
-  held to the same permission gate as task agents: an ask stays pending (surfaced as
-  `[blocked]` in the stream and in `orch ask --status`) instead of being auto-rejected
-  by the headless run loop. The workspace-routing middleware binds the session to the
-  base worktree, so a neutral server cwd is no obstacle.
-- **Reply rendering skips synthetic parts.** Only non-synthetic `text` parts are the
-  agent's actual answer; tool traces and "Called the Read tool" fillers are noise.
+  Creation is `POST /session?directory=<base>` with no `prompt_async`; nothing ever
+  spawns `opencode run`. That means the primary agent is held to the same permission
+  gate as task agents: an ask stays pending (surfaced as a `primary-agent@<base>`
+  owner in `orch permissions` and shown live in the attached TUI) instead of being
+  auto-rejected by a headless run loop. The workspace-routing middleware binds the
+  session to the base worktree, so a neutral server cwd is no obstacle.
 
 ## `cli.py`
 

@@ -19,20 +19,21 @@ class _FakeProject:
     base_worktree = Path("/tmp/lab/lab")
     common = Path("/tmp/lab/lab.git")
 
+    def scan(self, port: int | None = None) -> list:
+        return []
+
+
+def _task_state(name: str = "text",
+                worktree: str = "/tmp/lab/lab/text") -> state.TaskState:
+    return state.TaskState(project=str(_FakeProject.common), name=name,
+                           base="main", claimed=True, worktree=worktree)
+
 
 def _args(**kw) -> argparse.Namespace:
-    a = argparse.Namespace(directory=None, timeout=60.0, status=False,
-                           compact=False, async_=False, stream=False)
+    a = argparse.Namespace(directory=None)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
-
-
-def _text_part(text: str, synthetic: bool = False) -> dict:
-    p: dict[str, object] = {"type": "text", "text": text}
-    if synthetic:
-        p["synthetic"] = True
-    return p
 
 
 def test_project_of_requires_a_base_worktree() -> None:
@@ -78,8 +79,7 @@ def test_find_returns_none_when_no_marked_session() -> None:
 
 
 def _save_harness(*names: str) -> list:
-    saved = [(name, getattr(agent.harness, name)) for name in names]
-    return saved
+    return [(name, getattr(agent.harness, name)) for name in names]
 
 
 def _restore_harness(saved: list) -> None:
@@ -87,158 +87,143 @@ def _restore_harness(saved: list) -> None:
         setattr(agent.harness, name, orig)
 
 
-def test_create_creates_a_session_and_waits_for_idle() -> None:
-    calls: list = []
-    orig_sleep = agent.time.sleep
-    agent.time.sleep = lambda s: None
-    busy = {"n": 0}
-
-    def _status(p, d=None):
-        busy["n"] += 1
-        return {"ses_new": {}} if busy["n"] == 1 else {}
-
-    saved = _save_harness("create_session", "prompt_async", "session_status",
-                          "messages", "permissions", "questions")
+def test_ensure_returns_the_found_session() -> None:
+    orig = agent.harness.sessions
+    orig_create = agent.harness.create_session
+    calls = []
+    agent.harness.sessions = lambda _p, **kw: [
+        {"id": "ses_1", "title": agent.AGENT_TITLE}]
     agent.harness.create_session = lambda p, d=None, title=None: (
-        calls.append(("create_session", d, title)) or {"id": "ses_new"})
-    agent.harness.prompt_async = lambda p, sid, text: (
-        calls.append(("prompt_async", sid, text)) or None)
-    agent.harness.session_status = _status
-    agent.harness.messages = lambda p, sid: []
-    agent.harness.permissions = lambda p, d=None: []
-    agent.harness.questions = lambda p, d=None: []
+        calls.append((d, title)) or {"id": "ses_new"})
     try:
-        sid, notes = agent.create(_INFO, _FakeProject.base_worktree,
-                                  "hello agent", timeout=5.0)
-        assert sid == "ses_new" and notes == []
-        assert ("create_session", str(_FakeProject.base_worktree),
-                agent.AGENT_TITLE) in calls
-        assert ("prompt_async", "ses_new", "hello agent") in calls
-        assert not hasattr(agent, "subprocess"), \
-            "the primary agent must not spawn an `opencode run` process"
+        assert agent.ensure(_INFO.port, _FakeProject.base_worktree) == "ses_1"
+        assert calls == [], "an existing session must not be recreated"
     finally:
-        _restore_harness(saved)
-        agent.time.sleep = orig_sleep
-    print("ok: first use creates a server session in the base worktree and waits")
+        agent.harness.sessions = orig
+        agent.harness.create_session = orig_create
+    print("ok: ensure reuses the existing primary-agent session")
 
 
-def test_create_reports_when_the_agent_blocks() -> None:
-    orig_sleep = agent.time.sleep
-    agent.time.sleep = lambda s: None
-    saved = _save_harness("create_session", "prompt_async", "session_status",
-                          "messages", "permissions", "questions")
-    agent.harness.create_session = lambda p, d=None, title=None: {"id": "ses_new"}
-    agent.harness.prompt_async = lambda p, sid, text: None
-    agent.harness.session_status = lambda p, d=None: {}
-    agent.harness.messages = lambda p, sid: []
-    agent.harness.permissions = lambda p, d=None: [{
-        "id": "per_1", "sessionID": "ses_new", "permission": "bash",
-        "patterns": ["/etc/*"]}]
-    agent.harness.questions = lambda p, d=None: []
+def test_ensure_creates_a_session_bound_to_the_base_worktree() -> None:
+    orig = agent.harness.sessions
+    orig_create = agent.harness.create_session
+    calls = []
+    agent.harness.sessions = lambda _p, **kw: []
+    agent.harness.create_session = lambda p, d=None, title=None: (
+        calls.append((p, d, title)) or {"id": "ses_new"})
     try:
-        sid, notes = agent.create(_INFO, _FakeProject.base_worktree, "x",
-                                  timeout=5.0)
+        sid = agent.ensure(_INFO.port, _FakeProject.base_worktree)
         assert sid == "ses_new"
-        assert notes == ["blocked: /etc/*"], notes
+        assert calls == [(_INFO.port, str(_FakeProject.base_worktree),
+                          agent.AGENT_TITLE)]
     finally:
-        _restore_harness(saved)
-        agent.time.sleep = orig_sleep
-    print("ok: a blocking agent is reported, not auto-rejected")
+        agent.harness.sessions = orig
+        agent.harness.create_session = orig_create
+    print("ok: ensure creates the primary agent in the base worktree on first use")
 
 
-def test_create_fails_when_prompting_errors() -> None:
-    saved = _save_harness("create_session", "prompt_async")
-    agent.harness.create_session = lambda p, d=None, title=None: {"id": "ses_new"}
-    agent.harness.prompt_async = lambda *a, **k: (_ for _ in ()).throw(
-        agent.harness.HarnessError("POST failed"))
+def test_ensure_surfaces_a_failed_creation() -> None:
+    orig = agent.harness.sessions
+    orig_create = agent.harness.create_session
+    agent.harness.sessions = lambda _p, **kw: []
+    agent.harness.create_session = lambda p, d=None, title=None: {}
     try:
-        sid, notes = agent.create(_INFO, _FakeProject.base_worktree, "x")
-        assert sid is None and notes and "POST failed" in notes[0]
+        try:
+            agent.ensure(_INFO.port, _FakeProject.base_worktree)
+            assert False, "ensure must raise when no session id comes back"
+        except agent.harness.HarnessError as e:
+            assert "session id" in str(e)
     finally:
-        _restore_harness(saved)
-    print("ok: a failed prompt surfaces the harness error")
+        agent.harness.sessions = orig
+        agent.harness.create_session = orig_create
+    print("ok: a failed creation raises the harness error")
 
 
-def test_render_message_keeps_only_non_synthetic_text() -> None:
-    msg = {"info": {}, "parts": [
-        {"type": "reasoning", "text": "think"},
-        _text_part("the answer"),
-        _text_part("Called the Read tool", synthetic=True),
-        {"type": "tool", "state": {"status": "completed"}},
-        _text_part("and the rest"),
-    ]}
-    assert agent.render_message(msg) == "the answer\nand the rest"
-    print("ok: render skips reasoning, tool and synthetic parts")
+def _proj_with(tasks: list) -> state.Project:
+    proj = state.Project(_FakeProject.common)
+    proj.scan = lambda port=None: tasks
+    return proj
 
 
-def test_ask_posts_a_message_and_returns_the_rendered_reply() -> None:
-    sent = []
-    orig = agent.harness.message
-    agent.harness.message = lambda p, sid, text, timeout=None: (
-        sent.append((p, sid, text)) or {"parts": [_text_part("reply text")]})
+def test_task_at_returns_the_claimed_task_whose_worktree_contains_start() -> None:
+    t = _task_state()
+    proj = _proj_with([t])
+    assert agent.task_at(proj, _INFO.port, Path("/tmp/lab/lab/text")) is t
+    assert agent.task_at(proj, _INFO.port, Path("/tmp/lab/lab/text/sub")) is t
+    print("ok: task_at finds the claimed task whose worktree contains the path")
+
+
+def test_task_at_returns_none_outside_any_task_worktree() -> None:
+    proj = _proj_with([_task_state()])
+    assert agent.task_at(proj, _INFO.port, Path("/tmp/lab/lab")) is None
+    assert agent.task_at(proj, _INFO.port, Path("/tmp/other")) is None
+    print("ok: task_at ignores the base worktree and unrelated paths")
+
+
+def test_task_at_ignores_unclaimed_tasks() -> None:
+    t = _task_state()
+    t.claimed = False
+    proj = _proj_with([t])
+    assert agent.task_at(proj, _INFO.port, Path("/tmp/lab/lab/text")) is None
+    print("ok: task_at never returns an unclaimed task")
+
+
+def test_find_task_picks_the_newest_marked_session() -> None:
+    orig = agent.harness.sessions
+    agent.harness.sessions = lambda _p, **kw: [
+        {"id": "old", "title": "text", "time": {"updated": 1}},
+        {"id": "new", "title": "text", "time": {"updated": 3}},
+        {"id": "other", "title": agent.AGENT_TITLE, "time": {"updated": 9}},
+    ]
     try:
-        reply, err = agent.ask(_INFO, "ses_1", "why?")
-        assert err is None
-        assert reply == "reply text"
-        assert sent == [(_INFO.port, "ses_1", "why?")]
+        assert agent.find_task(_INFO.port, Path("/tmp/lab/lab/text"), "text") == "new"
     finally:
-        agent.harness.message = orig
-    print("ok: ask sends the message and renders the assistant reply")
+        agent.harness.sessions = orig
+    print("ok: find_task selects the newest session titled like the task")
 
 
-def test_ask_surfaces_harness_failures() -> None:
-    orig = agent.harness.message
-    agent.harness.message = lambda *a, **k: (_ for _ in ()).throw(
-        agent.harness.HarnessError("POST failed"))
+def test_find_task_returns_none_when_no_task_session() -> None:
+    orig = agent.harness.sessions
+    agent.harness.sessions = lambda _p, **kw: [{"id": "x", "title": "other"}]
     try:
-        reply, err = agent.ask(_INFO, "ses_1", "x")
-        assert reply == "" and err and "POST failed" in err
+        assert agent.find_task(_INFO.port, Path("/tmp/lab/lab/text"), "text") is None
     finally:
-        agent.harness.message = orig
-    print("ok: a failed ask reports the harness error")
+        agent.harness.sessions = orig
+    print("ok: find_task returns None when the task was never started")
 
 
-def test_fire_uses_prompt_async() -> None:
-    sent = []
-    orig = agent.harness.prompt_async
-    agent.harness.prompt_async = lambda p, sid, text: sent.append((p, sid, text))
+def test_ensure_task_reuses_the_existing_task_session() -> None:
+    orig = agent.harness.sessions
+    orig_create = agent.harness.create_session
+    calls = []
+    agent.harness.sessions = lambda _p, **kw: [
+        {"id": "ses_t", "title": "text"}]
+    agent.harness.create_session = lambda p, d=None, title=None: (
+        calls.append((d, title)) or {"id": "ses_new"})
     try:
-        assert agent.fire(_INFO, "ses_1", "go do it") is None
-        assert sent == [(_INFO.port, "ses_1", "go do it")]
+        assert agent.ensure_task(_INFO.port, Path("/tmp/lab/lab/text"), "text") == "ses_t"
+        assert calls == [], "an existing task session must not be recreated"
     finally:
-        agent.harness.prompt_async = orig
-    print("ok: fire sends asynchronously through prompt_async")
+        agent.harness.sessions = orig
+        agent.harness.create_session = orig_create
+    print("ok: ensure_task reuses the existing task session")
 
 
-def test_compact_calls_opencode_summarize_with_the_session_model() -> None:
-    got = []
-    orig_info = agent.harness.session_info
-    orig_sum = agent.harness.summarize
-    agent.harness.session_info = lambda _p, _s: {
-        "model": {"providerID": "anthropic", "id": "claude-x"}}
-    agent.harness.summarize = lambda *a, **k: got.append((a, k)) or True
+def test_ensure_task_creates_a_session_bound_to_the_task_worktree() -> None:
+    orig = agent.harness.sessions
+    orig_create = agent.harness.create_session
+    calls = []
+    agent.harness.sessions = lambda _p, **kw: []
+    agent.harness.create_session = lambda p, d=None, title=None: (
+        calls.append((p, d, title)) or {"id": "ses_new"})
     try:
-        ok, err = agent.compact(_INFO, "ses_1", timeout=123.0)
-        assert ok and err is None
-        (port, sid, pid, mid), kw = got[0]
-        assert (port, sid, pid, mid) == (_INFO.port, "ses_1", "anthropic",
-                                         "claude-x")
-        assert kw == {"timeout": 123.0}
+        sid = agent.ensure_task(_INFO.port, Path("/tmp/lab/lab/text"), "text")
+        assert sid == "ses_new"
+        assert calls == [(_INFO.port, "/tmp/lab/lab/text", "text")]
     finally:
-        agent.harness.session_info = orig_info
-        agent.harness.summarize = orig_sum
-    print("ok: compact resolves the session model and POSTs to /summarize")
-
-
-def test_compact_requires_a_model() -> None:
-    orig_info = agent.harness.session_info
-    agent.harness.session_info = lambda _p, _s: {"model": None}
-    try:
-        ok, err = agent.compact(_INFO, "ses_1")
-        assert not ok and err and "no model" in err
-    finally:
-        agent.harness.session_info = orig_info
-    print("ok: compact refuses a session with no recorded model")
+        agent.harness.sessions = orig
+        agent.harness.create_session = orig_create
+    print("ok: ensure_task creates the task session in the task worktree on first use")
 
 
 def test_status_reports_busy() -> None:
@@ -295,7 +280,11 @@ def test_status_reports_blocked_and_none_when_absent() -> None:
 
 def _patch_cli(**fns) -> list:
     saved = [(cli.agent_mod, "project_of", cli.agent_mod.project_of),
-             (cli.server_mod, "start", cli.server_mod.start)]
+             (cli.server_mod, "start", cli.server_mod.start),
+             (cli.agent_mod, "ensure", cli.agent_mod.ensure),
+             (cli.agent_mod, "task_at", cli.agent_mod.task_at),
+             (cli.agent_mod, "ensure_task", cli.agent_mod.ensure_task),
+             (cli.os, "execvp", cli.os.execvp)]
     cli.agent_mod.project_of = lambda _s: (_FakeProject(), None)
     cli.server_mod.start = lambda **k: _INFO
     for attr, val in fns.items():
@@ -309,251 +298,134 @@ def _restore(saved: list) -> None:
         setattr(mod, name, val)
 
 
-def test_cmd_ask_status_when_no_session() -> None:
-    saved = _patch_cli(find=lambda p, b: None)
+def test_cmd_attach_attaches_to_the_found_session() -> None:
+    execd = []
+    saved = _patch_cli(ensure=lambda p, b: "ses_1")
+    cli.os.execvp = lambda *a: execd.append(a)
     try:
-        rc = cli.cmd_ask(_args(status=True))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_attach(_args())
         assert rc == 0, rc
+        assert execd == [("opencode", ["opencode", "attach",
+                                       _INFO.url, "--session", "ses_1",
+                                       "--dir", str(_FakeProject.base_worktree)])]
+        assert buf.getvalue() == ""
     finally:
-        for mod, name, val in saved:
-            setattr(mod, name, val)
-    print("ok: `ask --status` with no agent yet exits cleanly")
+        _restore(saved)
+    print("ok: `attach` execs opencode attach on the found session, silent")
 
 
-def test_cmd_ask_first_use_creates_and_prints_reply() -> None:
-    saved = _patch_cli(find=lambda p, b: None,
-                       create=lambda info, b, text, timeout: ("ses_new", []),
-                       last_reply=lambda p, s: "first answer")
+def test_cmd_attach_first_use_creates_then_attaches() -> None:
+    ensured = []
+    execd = []
+    saved = _patch_cli(ensure=lambda p, b: ensured.append((p, b)) or "ses_new")
+    cli.os.execvp = lambda *a: execd.append(a)
     try:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.cmd_ask(_args(message="hi"))
+        rc = cli.cmd_attach(_args())
         assert rc == 0, rc
-        assert "first answer" in buf.getvalue()
+        assert ensured == [(_INFO.port, _FakeProject.base_worktree)]
+        argv = execd[0][1]
+        assert argv[argv.index("--session") + 1] == "ses_new"
     finally:
         _restore(saved)
-    print("ok: first `ask` creates the session and prints the reply")
+    print("ok: first `attach` creates the session via ensure then attaches")
 
 
-def test_cmd_ask_existing_session_posts_and_prints() -> None:
-    sent = []
-    saved = _patch_cli(find=lambda p, b: "ses_1",
-                       ask=lambda info, sid, text, timeout: (
-                           sent.append(text) or ("the reply", None)))
+def test_cmd_attach_refuses_outside_a_worktree() -> None:
+    saved = _patch_cli()
+    cli.agent_mod.project_of = lambda _s: (None, "not in a worktree")
     try:
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.cmd_ask(_args(message="hello"))
-        assert rc == 0 and sent == ["hello"]
-        assert "the reply" in buf.getvalue()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = cli.cmd_attach(_args())
+        assert rc == 2, rc
+        assert "not in a worktree" in err.getvalue()
     finally:
         _restore(saved)
-    print("ok: `ask` on an existing session posts and prints the reply")
+    print("ok: `attach` outside a project worktree exits 2")
 
 
-def test_cmd_ask_async_returns_immediately() -> None:
-    saved = _patch_cli(find=lambda p, b: "ses_1",
-                       fire=lambda info, sid, text: None)
+def test_cmd_attach_reports_a_failed_server_start() -> None:
+    saved = _patch_cli()
+    cli.server_mod.start = lambda **k: (_ for _ in ()).throw(
+        RuntimeError("boom"))
     try:
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.cmd_ask(_args(message="do it", async_=True))
-        assert rc == 0
-        assert "sent to session ses_1" in buf.getvalue()
-    finally:
-        _restore(saved)
-    print("ok: `ask --async` fires and returns the session id")
-
-
-def test_cmd_ask_compact_without_session_is_refused() -> None:
-    saved = _patch_cli(find=lambda p, b: None)
-    try:
-        rc = cli.cmd_ask(_args(compact=True, message=None, status=False,
-                               async_=False))
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = cli.cmd_attach(_args())
         assert rc == 1, rc
-    finally:
-        for mod, name, val in saved:
-            setattr(mod, name, val)
-    print("ok: `ask --compact` refuses before a conversation exists")
-
-
-def test_cmd_ask_compact_then_send() -> None:
-    compacted = []
-    saved = _patch_cli(find=lambda p, b: "ses_1",
-                       compact=lambda info, sid, timeout: (
-                           compacted.append(sid) or (True, None)),
-                       ask=lambda info, sid, text, timeout: ("after", None))
-    try:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.cmd_ask(_args(compact=True, message="continue",
-                                   status=False, async_=False))
-        assert rc == 0
-        assert compacted == ["ses_1"]
-        assert "after" in buf.getvalue()
+        assert "boom" in err.getvalue()
     finally:
         _restore(saved)
-    print("ok: `ask --compact <msg>` compacts then sends")
+    print("ok: `attach` reports a server that would not start")
 
 
-def test_stream_part_maps_text_thinking_tool_and_shell() -> None:
-    assert agent._stream_part({"type": "text", "text": "hello"}) \
-        == ("text", "hello")
-    assert agent._stream_part({"type": "text", "text": "x", "synthetic": True}) \
-        is None
-    assert agent._stream_part({"type": "reasoning", "text": "think aloud"}) \
-        == ("thinking", "think aloud")
-    assert agent._stream_part(
-        {"type": "tool", "tool": "create_task"}) == ("tool", "create_task")
-    assert agent._stream_part({"type": "tool", "tool": "bash",
-                               "state": {"input": {"command": "ls"}}}) \
-        == ("shell", "ls")
-    assert agent._stream_part({"type": "step-finish"}) is None
-    print("ok: the stream renderer maps text, thinking, tool and shell parts")
-
-
-def test_stream_part_shows_tool_args_capped() -> None:
-    tool = agent._stream_part({"type": "tool", "tool": "create_task",
-                               "state": {"input": {"name": "x",
-                                                   "context": "why"}}})
-    assert tool == ("tool", 'create_task({"context": "why", "name": "x"})')
-    big = agent._stream_part({"type": "tool", "tool": "read_file",
-                              "state": {"input": {"path": "x" * 500}}})
-    assert big is not None and big[0] == "tool" and len(big[1]) <= 260, \
-        "a giant tool payload must be capped so it cannot flood the terminal"
-    assert "..." in big[1], "a truncated payload must say so"
-    print("ok: tool args show up, capped; IDs stay hidden")
-
-
-def test_stream_reply_yields_parts_and_the_exit_code() -> None:
-    polls = {"n": 0}
-    orig_sleep = agent.time.sleep
-    agent.time.sleep = lambda s: None
-
-    def _tick() -> int:
-        polls["n"] += 1
-        return polls["n"]
-
-    def _messages(p, sid):
-        _tick()
-        return [{"info": {"role": "user"}, "parts": [
-            {"type": "text", "text": "hi"}]},
-            {"info": {"role": "assistant"}, "parts": [
-                {"type": "text", "text": "first "},
-                {"type": "tool", "tool": "create_task"},
-                {"type": "text", "text": "reply"}]}]
-
-    def _perms(p, d=None):
-        _tick()
-        return []
-
-    def _ques(p, d=None):
-        _tick()
-        return []
-
-    def _status(p, d=None):
-        t = _tick()
-        return {"ses_1": {}} if t < 5 else {}
-
-    saved = _save_harness("messages", "permissions", "questions",
-                          "session_status", "create_session", "prompt_async")
-    agent.harness.messages = _messages
-    agent.harness.permissions = _perms
-    agent.harness.questions = _ques
-    agent.harness.session_status = _status
-    agent.harness.create_session = lambda p, d=None, title=None: {"id": "ses_1"}
-    agent.harness.prompt_async = lambda p, sid, text: None
-    try:
-        events = list(agent.stream_reply(_INFO, _FakeProject.base_worktree,
-                                         "hi", session_id="ses_1",
-                                         timeout=30.0))
-        text = "".join(p for k, p in events if k == "text")
-        assert text == "first reply"
-        assert ("tool", "create_task") in events
-        assert ("exit", "0") in events
-        assert not hasattr(agent, "subprocess"), \
-            "stream_reply must not spawn an `opencode run` process"
-    finally:
-        _restore_harness(saved)
-        agent.time.sleep = orig_sleep
-    print("ok: stream_reply polls the session and yields text, tools, exit")
-
-
-def test_stream_reply_reports_a_block_once_and_continues() -> None:
-    ticks = {"n": 0}
-    orig_sleep = agent.time.sleep
-    agent.time.sleep = lambda s: None
-    replied = []
-
-    def _tick() -> int:
-        ticks["n"] += 1
-        return ticks["n"]
-
-    def _messages(p, sid):
-        t = _tick()
-        parts = [{"type": "text", "text": "done"}] if t >= 4 else []
-        return [{"info": {"role": "assistant"}, "parts": parts}]
-
-    def _perms(p, d=None):
-        t = _tick()
-        if t < 3:
-            return [{"id": "per_1", "sessionID": "ses_1", "permission": "bash",
-                     "patterns": ["/etc/*"]}]
-        return []
-
-    def _ques(p, d=None):
-        _tick()
-        return []
-
-    def _status(p, d=None):
-        t = _tick()
-        return {"ses_1": {}} if t < 6 else {}
-
-    saved = _save_harness("messages", "permissions", "questions",
-                          "session_status", "create_session", "prompt_async",
-                          "reply_permission")
-    agent.harness.messages = _messages
-    agent.harness.permissions = _perms
-    agent.harness.questions = _ques
-    agent.harness.session_status = _status
-    agent.harness.create_session = lambda p, d=None, title=None: {"id": "ses_1"}
-    agent.harness.prompt_async = lambda p, sid, text: None
-    agent.harness.reply_permission = lambda *a, **k: replied.append(a)
-    try:
-        events = list(agent.stream_reply(_INFO, _FakeProject.base_worktree,
-                                         "hi", session_id="ses_1",
-                                         timeout=30.0))
-        assert events.count(("blocked", "/etc/*")) == 1, events
-        assert ("text", "done") in events
-        assert ("exit", "0") in events
-        assert replied == [], "a blocked ask must stay pending, never auto-answered"
-    finally:
-        _restore_harness(saved)
-        agent.time.sleep = orig_sleep
-    print("ok: a block is reported once and left pending for a human")
-
-
-def test_cmd_ask_stream_uses_stream_reply_on_the_found_session() -> None:
-    streamed = []
-    saved = _patch_cli(find=lambda p, b: "ses_1")
-    orig_stream = cli.agent_mod.stream_reply
-
-    def fake_stream(info, base, text, session_id=None, timeout=60.0):
-        streamed.append((session_id, text))
-        yield "text", "live answer"
-
-    cli.agent_mod.stream_reply = fake_stream
+def test_cmd_attach_reports_a_failed_creation() -> None:
+    saved = _patch_cli(ensure=lambda p, b: (_ for _ in ()).throw(
+        cli.harness.HarnessError("no session id")))
     try:
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.cmd_ask(_args(stream=True, message="go"))
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = cli.cmd_attach(_args())
+        assert rc == 1, rc
+        assert "no session id" in err.getvalue()
+    finally:
+        _restore(saved)
+    print("ok: `attach` reports when the session cannot be created")
+
+
+def test_cmd_attach_reports_when_opencode_cannot_be_executed() -> None:
+    saved = _patch_cli(ensure=lambda p, b: "ses_1")
+    cli.os.execvp = lambda *a: (_ for _ in ()).throw(OSError("not found"))
+    try:
+        buf = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = cli.cmd_attach(_args())
+        assert rc == 1, rc
+        assert "not found" in err.getvalue()
+    finally:
+        _restore(saved)
+    print("ok: `attach` reports when opencode is missing")
+
+
+def test_cmd_attach_attaches_to_the_task_session_in_a_task_worktree() -> None:
+    execd = []
+    saved = _patch_cli(task_at=lambda proj, port, start: _task_state(),
+                       ensure_task=lambda port, wt, task: "ses_task")
+    cli.os.execvp = lambda *a: execd.append(a)
+    try:
+        rc = cli.cmd_attach(_args())
         assert rc == 0, rc
-        assert "live answer" in buf.getvalue()
-        assert streamed == [("ses_1", "go")]
+        assert execd == [("opencode", ["opencode", "attach", _INFO.url,
+                                       "--session", "ses_task",
+                                       "--dir", "/tmp/lab/lab/text"])]
     finally:
         _restore(saved)
-        cli.agent_mod.stream_reply = orig_stream
-    print("ok: `ask --stream` streams the reply on the found session")
+    print("ok: inside a task worktree `attach` execs opencode attach on the task session")
+
+
+def test_cmd_attach_creates_the_task_session_on_first_use() -> None:
+    created = []
+    execd = []
+    saved = _patch_cli(task_at=lambda proj, port, start: _task_state())
+    cli.agent_mod.ensure_task = lambda port, wt, task: (
+        created.append((port, str(wt), task)) or "ses_new")
+    cli.os.execvp = lambda *a: execd.append(a)
+    try:
+        rc = cli.cmd_attach(_args())
+        assert rc == 0, rc
+        assert created == [(_INFO.port, "/tmp/lab/lab/text", "text")]
+        argv = execd[0][1]
+        assert argv[argv.index("--session") + 1] == "ses_new"
+        assert argv[argv.index("--dir") + 1] == "/tmp/lab/lab/text"
+    finally:
+        _restore(saved)
+    print("ok: a task worktree with no live session gets one created, then attached")
 
 
 def main() -> int:
