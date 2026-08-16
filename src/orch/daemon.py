@@ -299,7 +299,13 @@ def decide(snap: Snapshot) -> list[Action]:
             continue
 
         if snap.now < mem.wait_until.get(key, 0):
-            continue
+            # A backoff (e.g. from a failed merge) must not freeze a clean,
+            # already-merged task: its branch is an ancestor of base, so there is
+            # nothing left to re-attempt and the no-op sweep is idempotent.
+            if not t.dirty and not t.diff:
+                mem.wait_until.pop(key, None)
+            else:
+                continue
 
         if key not in mem.settled_at:
             mem.settled_at[key] = snap.now

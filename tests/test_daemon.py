@@ -305,6 +305,18 @@ def test_wait_backoff_blocks_repeated_actions() -> None:
     print("ok: a task in backoff is left alone")
 
 
+def test_backoff_does_not_freeze_an_already_merged_noop() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.wait_until[key] = NOW + 9999
+    mem.settled_at[key] = NOW - daemon.SETTLE_BUDGET_S - 1
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
+    acts = daemon.decide(_snap(tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.REMOVE], _kinds(acts)
+    assert key not in mem.wait_until, "the stale merge backoff must be spent"
+    print("ok: a merge backoff does not freeze a clean, already-merged task")
+
+
 def test_unchanged_worktree_after_failure_stalls_to_review() -> None:
     mem = daemon.LoopState()
     key = ("/tmp/lab/lab.git", "task-a")

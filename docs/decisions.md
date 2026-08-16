@@ -264,8 +264,11 @@ in one source file has one place to check.
   dispatched into the
   base worktree to resolve and commit, bounded by `retryCap` before it escalates to a
   human. Either way, once the merge lands the branch is merged into base and the
-  no-op path archives the task. The resolution agent is detected by base-worktree path
-  **and** task title, because the base worktree is shared with every task. `task merge`
+  no-op path archives the task. The failed-merge backoff only delays *re-attempts*,
+  never the sweep: a clean branch identical to base is already merged, so the
+  no-op archive is not held hostage by the stale `wait_until`. The resolution agent
+  is detected by base-worktree path **and** task title, because the base worktree is
+  shared with every task. `task merge`
   still re-runs a merge after a human has aborted or fixed one.
 - **`remove_task` and `reset_task` force-delete the branch** — they are explicit
   removal acts (a no-op task produced nothing; a human decided to discard). Only
