@@ -144,6 +144,32 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
+def _task_mtime(t: state.TaskState, base_wt: Path | None) -> float:
+    """The newest folder mtime for a task: the worktree tree for a claimed
+    task, else tasks/<name> or archive/<name> in the base worktree. 0 when no
+    folder exists. Drives the display sort only - scan order (which the
+    scheduler iterates in name order) is untouched."""
+    paths = [Path(p) for p in (t.worktree, base_wt and base_wt / "tasks" / t.name,
+                               base_wt and base_wt / "archive" / t.name)
+             if p]
+    newest = 0.0
+    for root in paths:
+        try:
+            if root.is_dir():
+                for dirpath, _dirs, files in os.walk(root):
+                    for name in files + [""]:
+                        p = Path(dirpath, name) if name else Path(dirpath)
+                        try:
+                            newest = max(newest, p.stat().st_mtime)
+                        except OSError:
+                            pass
+            elif root.exists():
+                newest = max(newest, root.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
 def cmd_task_list(args: argparse.Namespace) -> int:
     if args.global_:
         return _task_list_global(args)
@@ -155,13 +181,14 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     st = server_mod.status()
     port = st.get("port") if st.get("running") and not st.get("unresponsive") else None
     tasks = proj.scan(port)
+    base_wt = proj.base_worktree
+    tasks.sort(key=lambda t: (_task_mtime(t, base_wt), t.name))
     if args.json:
         print(json.dumps([_task_json(t) for t in tasks], indent=2))
         return 0
     if not tasks:
         print("no tasks recorded for this project")
         return 0
-    base_wt = proj.base_worktree
     for t in tasks:
         branch = t.branch or "-"
         where = (t.worktree or "-").split("/")[-1]
