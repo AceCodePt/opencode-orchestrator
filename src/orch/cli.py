@@ -219,6 +219,9 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None) -> tuple[str | None
     if t.conflicted:
         return "needs-you", f"resolve the merge conflict in {_q(base_wt)}", \
             "merge conflict in progress"
+    if t.interrupted and (t.dirty or t.diff):
+        return "needs-you", f"orch task archive -C {_q(base_wt)} {t.name}", \
+            "interrupted: the turn was aborted (a user stop); the work is held for you to verify"
     if t.dirty:
         return "needs-you", f"review the uncommitted changes in {_q(t.worktree)}", \
             "worktree is dirty"
@@ -322,6 +325,7 @@ def _task_json(t: state.TaskState) -> dict:
         "dispatch_orchestrated": t.dispatch_orchestrated,
         "wait_human_start": t.wait_human_start,
         "wait_human_merge": t.wait_human_merge,
+        "interrupted": t.interrupted,
         "dependencies": t.dependencies,
         "base": t.base,
     }

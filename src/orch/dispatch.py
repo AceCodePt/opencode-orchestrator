@@ -225,27 +225,6 @@ def create_worktree(p: Plan, result: Result) -> bool:
     return True
 
 
-AGENT_IDENTITY_NAME = "orch"
-AGENT_IDENTITY_EMAIL = "orch@localhost"
-
-
-def configure_identity(worktree: Path) -> str | None:
-    """Give the task worktree its own git identity so the agent can commit its
-    work. Per-worktree (`--worktree`) config, never the shared repo config, so
-    the human's base-worktree commits keep their own author. Best-effort: a
-    machine that already has a global identity does not need this, so a
-    failure is a note, not a dispatch error."""
-    code, out = _git(worktree, "config", "extensions.worktreeConfig", "true")
-    if code != 0:
-        return f"could not enable per-worktree git config: {out[:200]}"
-    for key, value in (("user.name", AGENT_IDENTITY_NAME),
-                       ("user.email", AGENT_IDENTITY_EMAIL)):
-        code, out = _git(worktree, "config", "--worktree", key, value)
-        if code != 0:
-            return f"could not set worktree git {key}: {out[:200]}"
-    return None
-
-
 RESOLVE_PROMPT = (
     "A merge into the base branch is in progress and conflicts. Resolve every "
     "conflict marker in this worktree so the tree is coherent, then commit the "
@@ -342,14 +321,6 @@ def start(
 
     if not create_worktree(p, result):
         return result
-
-    ident_note = configure_identity(p.worktree)
-    if ident_note:
-        result.step(f"identity: {ident_note}")
-    else:
-        result.step("worktree git identity set to "
-                    f"{AGENT_IDENTITY_NAME} <{AGENT_IDENTITY_EMAIL}> so the agent "
-                    "can commit its work")
 
     ok, msg = run_hook(p.worktree, HOOK_POST, env)
     result.step(f"post-create: {msg}")

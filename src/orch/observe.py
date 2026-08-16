@@ -8,6 +8,7 @@ BLOCKED_PERMISSION = "blocked-on-permission"
 BLOCKED_QUESTION = "blocked-on-question"
 BUSY = "busy"
 IDLE = "idle"
+INTERRUPTED = "interrupted"
 
 
 @dataclass
@@ -26,6 +27,8 @@ class TaskFact:
     state: str = IDLE
     blocked: list[Blocked] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    interrupted: bool = False
+    orphaned: list[dict] = field(default_factory=list)
 
     @property
     def needs_human(self) -> bool:
@@ -74,6 +77,52 @@ def _describe_question(q: dict) -> Blocked:
     return Blocked(kind="question", request_id=rid, session_id=sid, detail=detail)
 
 
+def _ask_message_id(ask: dict) -> str | None:
+    """The message a pending ask belongs to, from the ask's `tool.messageID`.
+    None when the server did not attach one - such an ask is treated as a live
+    block (the safe default)."""
+    tool = ask.get("tool")
+    if isinstance(tool, dict):
+        mid = tool.get("messageID")
+        return str(mid) if mid else None
+    return None
+
+
+def _message_aborted(port: int, session_id: str, message_id: str) -> bool:
+    """Whether a message ended in an abort (`MessageAbortedError`), i.e. the
+    turn that raised an ask was stopped by a user interrupt (the TUI stop) or
+    died for another reason - so the ask it created is orphaned."""
+    try:
+        m = harness.message_by_id(port, session_id, message_id)
+    except Exception:
+        return False
+    if not isinstance(m, dict):
+        return False
+    info = m.get("info")
+    if not isinstance(info, dict):
+        return False
+    err = info.get("error")
+    return bool(isinstance(err, dict) and err.get("name") == "MessageAbortedError")
+
+
+def _last_turn_aborted(port: int, session_id: str) -> bool:
+    """Whether the session's last assistant message was aborted - the task is
+    currently interrupted (a user stopped it in the TUI, or its turn died)."""
+    try:
+        msgs = harness.messages(port, session_id, limit=5)
+    except Exception:
+        return False
+    for m in reversed(msgs):
+        if not isinstance(m, dict):
+            continue
+        info = m.get("info")
+        if not isinstance(info, dict) or info.get("role") != "assistant":
+            continue
+        err = info.get("error")
+        return bool(isinstance(err, dict) and err.get("name") == "MessageAbortedError")
+    return False
+
+
 def look_task(port: int, worktree: str) -> TaskFact | None:
     sess = harness.sessions(port, worktree)
     if not sess:
@@ -92,9 +141,27 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
     ques = [q for q in harness.questions(port, worktree)
             if str(q.get("sessionID") or "") in set(ids)]
 
-    if perms:
+    interrupted = False
+    orphaned: list[dict] = []
+    if not busy and ids:
+        sid = (primary or ids)[0]
+        interrupted = _last_turn_aborted(port, sid)
+        for ask in perms + ques:
+            mid = _ask_message_id(ask)
+            if mid and _message_aborted(port, sid, mid):
+                orphaned.append(ask)
+
+    orphan_ids = {str(a.get("id") or a.get("requestID") or "") for a in orphaned}
+    live_perms = [p for p in perms
+                  if str(p.get("id") or p.get("requestID") or "") not in orphan_ids]
+    live_ques = [q for q in ques
+                 if str(q.get("id") or q.get("requestID") or "") not in orphan_ids]
+
+    if interrupted:
+        state = INTERRUPTED
+    elif live_perms:
         state = BLOCKED_PERMISSION
-    elif ques:
+    elif live_ques:
         state = BLOCKED_QUESTION
     elif busy:
         state = BUSY
@@ -105,6 +172,8 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
         worktree=worktree,
         session_ids=watch,
         state=state,
-        blocked=[_describe_permission(p) for p in perms]
-        + [_describe_question(q) for q in ques],
+        interrupted=interrupted,
+        orphaned=orphaned,
+        blocked=[_describe_permission(p) for p in live_perms]
+        + [_describe_question(q) for q in live_ques],
     )

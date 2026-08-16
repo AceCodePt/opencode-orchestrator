@@ -242,6 +242,59 @@ def test_missing_worktree_needs_review() -> None:
     print("ok: a claimed task with no worktree needs review")
 
 
+def test_interrupted_with_work_is_held_for_review() -> None:
+    acts = daemon.decide(_snap(tasks=[_task(session=state.SESSION_IDLE,
+                                            interrupted=True, diff=True)]))
+    kinds = _kinds(acts)
+    assert kinds == [daemon.NEEDS_REVIEW], kinds
+    assert acts[0].reason == "interrupted"
+    print("ok: an interrupted task with work is held for review, never merged")
+
+
+def test_interrupted_noop_is_still_removed() -> None:
+    mem = daemon.LoopState()
+    key = ("/tmp/lab/lab.git", "task-a")
+    mem.settled_at[key] = NOW - daemon.SETTLE_BUDGET_S - 1
+    t = _task(session=state.SESSION_IDLE, interrupted=True,
+              dirty=False, diff=False)
+    acts = daemon.decide(_snap(tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.REMOVE], _kinds(acts)
+    print("ok: an interrupt with no produced work still closes as a no-op")
+
+
+def test_orphaned_asks_emit_a_clear_action() -> None:
+    t = _task(session=state.SESSION_IDLE,
+              orphaned=[{"id": "per_1", "sessionID": "ses_1"}])
+    acts = daemon.decide(_snap(tasks=[t]))
+    kinds = _kinds(acts)
+    assert daemon.CLEAR_ORPHANED in kinds, kinds
+    clear = [a for a in acts if a.kind == daemon.CLEAR_ORPHANED][0]
+    assert clear.orphaned[0]["id"] == "per_1"
+    assert clear.port == 4096
+    print("ok: orphaned asks emit a clear action")
+
+
+def test_apply_clears_orphaned_asks() -> None:
+    calls: list[tuple] = []
+    orig = daemon.harness.reply_permission
+    daemon.harness.reply_permission = lambda port, rid, reply, directory=None, \
+        message=None: (calls.append((port, rid, reply, directory)) or {})
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        a = daemon.Action(daemon.CLEAR_ORPHANED, "task-a",
+                          "orphaned ask from an aborted turn",
+                          project="/tmp/lab/lab.git", worktree=WT,
+                          branch="task-a", base="main", port=4096,
+                          orphaned=[{"id": "per_1", "sessionID": "ses_1"}])
+        log = sup.apply([a])
+        assert any("cleared orphaned ask per_1" in l for l in log), log
+        assert calls == [(4096, "per_1", "reject", WT)], calls
+        assert "per_1" in sup.mem.cleared
+    finally:
+        daemon.harness.reply_permission = orig
+    print("ok: the daemon replies reject to clear an orphaned ask")
+
+
 def test_wait_backoff_blocks_repeated_actions() -> None:
     mem = daemon.LoopState()
     mem.wait_until[("/tmp/lab/lab.git", "task-a")] = NOW + 9999

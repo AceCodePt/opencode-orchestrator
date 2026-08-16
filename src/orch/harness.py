@@ -223,8 +223,20 @@ def message(port: int, session_id: str, text: str,
                 {"parts": [{"type": "text", "text": text}]}, timeout=timeout)
 
 
-def messages(port: int, session_id: str) -> list[dict]:
-    return _as_list(get(port, f"/session/{session_id}/message"))
+def messages(port: int, session_id: str, limit: int | None = None) -> list[dict]:
+    """The session's messages, newest first. The full list is huge (parts
+    included), so pass a small `limit` (e.g. 5) to read just the recent
+    messages' `info` (which carries each message's error, used to detect an
+    aborted turn)."""
+    path = f"/session/{session_id}/message"
+    if limit:
+        path += f"?limit={limit}"
+    return _as_list(get(port, path))
+
+
+def message_by_id(port: int, session_id: str, message_id: str) -> dict | None:
+    m = get(port, f"/session/{session_id}/message/{message_id}")
+    return m if isinstance(m, dict) else None
 
 
 def session_info(port: int, session_id: str) -> dict | None:

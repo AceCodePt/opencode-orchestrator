@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import daemon, dispatch, server, state  # noqa: E402
+from orch import daemon, dispatch, harness, observe, server, state  # noqa: E402
 
 PASSING_HOOK = """#!/usr/bin/env bash
 set -euo pipefail
@@ -66,12 +66,11 @@ def _install_hook(root: Path, body: str) -> None:
 
 
 def _claim_and_commit(root: Path, name: str, files: dict[str, str]) -> Path:
-    """The agent's act under the new definition: configure its identity, write
-    the work, and commit it to the branch. A plain `git commit` relying on the
-    per-worktree identity dispatch would have set up."""
+    """The agent's act under the new definition: write the work and commit it
+    to the branch with the machine's git identity (like the merge-resolution
+    agent does)."""
     wt = root.parent / name
     _git("-C", str(root), "worktree", "add", "-b", name, str(wt), "main")
-    dispatch.configure_identity(wt)
     for rel, content in files.items():
         (wt / rel).write_text(content)
     _git("-C", str(wt), "add", "-A")
@@ -96,6 +95,135 @@ def _restore(saved: dict[str, str | None]) -> None:
             os.environ[k] = v
 
 
+def _patch_orphan_ask(sid: str, last_turn_aborted: bool) -> tuple[dict, dict]:
+    """Simulate the session's message record so the given pending ask's owning
+    message is aborted (orphaned) and the last assistant turn is either
+    finished or aborted. A real `MessageAbortedError` needs a live model turn,
+    so only the message record is faked; the server, session, git and the whole
+    daemon loop are real."""
+    ask = {"id": "per_fake1", "sessionID": sid, "permission": "external_directory",
+           "metadata": {"command": "ls /tmp"},
+           "tool": {"messageID": "m_ask", "callID": "c1"}}
+    orig = {n: getattr(observe.harness, n)
+            for n in ("permissions", "messages", "message_by_id")}
+
+    def permissions(port, directory=None):
+        return [ask]
+
+    def messages(port, session_id, limit=None):
+        error = {"name": "MessageAbortedError",
+                 "data": {"message": "Aborted"}} if last_turn_aborted else None
+        return [{"info": {"id": "m_last", "role": "assistant", "error": error}}]
+
+    def message_by_id(port, session_id, message_id):
+        return {"info": {"id": message_id, "role": "assistant",
+                         "error": {"name": "MessageAbortedError"}}}
+
+    observe.harness.permissions = permissions
+    observe.harness.messages = messages
+    observe.harness.message_by_id = message_by_id
+    return orig, ask
+
+
+def _restore_patch(orig: dict) -> None:
+    for name, fn in orig.items():
+        setattr(observe.harness, name, fn)
+
+
+def _setup_interrupted(root: Path, name: str, answer: str,
+                       last_turn_aborted: bool) -> tuple[Path, list, tuple]:
+    """Shared setup for the orphaned/interrupted live-server scenarios: trust
+    the project, claim + commit the work, create a real session bound to the
+    worktree, simulate the aborted-message record, and start the server."""
+    _top, common, _err = dispatch.project_of(root)
+    assert common is not None, _err
+    state.trust_project(common)
+    wt = _claim_and_commit(root, name, {"answer.txt": answer})
+    srv = server.start()
+    sess = harness.create_session(srv.port, str(wt), title=name)
+    sid = (sess or {}).get("id")
+    assert sid, "the server must return a session id"
+    orig_patch, _ask = _patch_orphan_ask(sid, last_turn_aborted)
+    cleared: list = []
+    orig_reply = daemon.harness.reply_permission
+    daemon.harness.reply_permission = lambda port, rid, reply, directory=None, \
+        message=None: (cleared.append((rid, reply, directory)) or {})
+    return wt, cleared, (orig_patch, orig_reply)
+
+
+def _teardown_interrupted(cleanups: tuple) -> None:
+    orig_patch, orig_reply = cleanups
+    _restore_patch(orig_patch)
+    daemon.harness.reply_permission = orig_reply
+    server.stop()
+
+
+def test_an_orphaned_ask_never_freezes_a_task_and_is_cleared() -> None:
+    if not _have_opencode():
+        print("skip: opencode not on PATH (no live server)")
+        return
+    tmp = tempfile.TemporaryDirectory()
+    saved_env = {k: os.environ.get(k) for k in ("XDG_STATE_HOME",)}
+    os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+    try:
+        t = Path(tmp.name)
+        root = _project(t)
+        _install_hook(root, PASSING_HOOK)
+        wt, cleared, cleanups = _setup_interrupted(
+            root, "done-commit", "answer: 42", last_turn_aborted=False)
+        try:
+            log = _run_step(root, "done-commit")
+            joined = "\n".join(log)
+        finally:
+            _teardown_interrupted(cleanups)
+
+        # the orphaned ask was cleared (replied reject) and never blocked
+        assert cleared == [("per_fake1", "reject", str(wt))], cleared
+        assert "verify passed" in joined, joined
+        assert "merged" in joined and "archived" in joined, joined
+        assert (root / "answer.txt").read_text() == "answer: 42"
+        assert not wt.exists(), "the worktree must be torn down after the merge"
+        assert _git("-C", str(root), "show-ref", "--verify", "-q",
+                    "refs/heads/done-commit").returncode != 0
+    finally:
+        _restore(saved_env)
+        tmp.cleanup()
+    print("ok: an orphaned ask is cleared and the committed work still merges")
+
+
+def test_an_interrupted_turn_is_held_for_review_not_merged() -> None:
+    if not _have_opencode():
+        print("skip: opencode not on PATH (no live server)")
+        return
+    tmp = tempfile.TemporaryDirectory()
+    saved_env = {k: os.environ.get(k) for k in ("XDG_STATE_HOME",)}
+    os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+    try:
+        t = Path(tmp.name)
+        root = _project(t)
+        _install_hook(root, PASSING_HOOK)
+        wt, cleared, cleanups = _setup_interrupted(
+            root, "done-commit", "answer: 42", last_turn_aborted=True)
+        try:
+            log = _run_step(root, "done-commit")
+            joined = "\n".join(log)
+        finally:
+            _teardown_interrupted(cleanups)
+
+        # the orphaned ask is still cleared, but the interrupted work is held
+        assert cleared == [("per_fake1", "reject", str(wt))], cleared
+        assert "needs-review" in joined and "interrupted" in joined, joined
+        assert "merged" not in joined, joined
+        assert wt.exists(), "interrupted work must survive, held for review"
+        assert (wt / "answer.txt").read_text() == "answer: 42"
+        assert _git("-C", str(root), "show-ref", "--verify", "-q",
+                    "refs/heads/done-commit").returncode == 0
+    finally:
+        _restore(saved_env)
+        tmp.cleanup()
+    print("ok: an interrupted turn is held for review, never merged")
+
+
 def test_an_agent_commit_is_the_done_signal_and_the_loop_merges_it() -> None:
     if not _have_opencode():
         print("skip: opencode not on PATH (no live server)")
@@ -111,8 +239,6 @@ def test_an_agent_commit_is_the_done_signal_and_the_loop_merges_it() -> None:
         assert common is not None, _err
         state.trust_project(common)
         wt = _claim_and_commit(root, "done-commit", {"answer.txt": "answer: 42"})
-        assert _git("-C", str(wt), "config", "user.name").stdout.strip() == "orch", \
-            "dispatch's per-worktree identity must let the agent commit"
         # the agent committed, so the branch is clean + diffing vs base
         assert not state._dirty(wt)
         assert state._diff(common, "main", "done-commit")

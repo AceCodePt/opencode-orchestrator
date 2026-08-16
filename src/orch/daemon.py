@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, hooks, merge, observe, server, sse, state, verify
+from . import dispatch, hooks, harness, merge, observe, server, sse, state, verify
 from .harness import prompt_async
 
 SETTLE_BUDGET_S = 30
@@ -28,6 +28,7 @@ DISPATCH = "dispatch"
 RESOLVE = "resolve"
 ALERT = "alert"
 NOTE = "note"
+CLEAR_ORPHANED = "clear-orphaned"
 
 
 @dataclass
@@ -46,6 +47,7 @@ class Action:
     blocked: list[observe.Blocked] = field(default_factory=list)
     start: str | None = None
     wait_human_merge: bool = False
+    orphaned: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -58,6 +60,7 @@ class LoopState:
     wait_until: dict[tuple[str, str], int] = field(default_factory=dict)
     verifying_until: dict[tuple[str, str], int] = field(default_factory=dict)
     alerted: set[str] = field(default_factory=set)
+    cleared: set[str] = field(default_factory=set)
     trusted_alerted: set[str] = field(default_factory=set)
     dispatch_backoff: dict[tuple[str, str], int] = field(default_factory=dict)
     dispatch_error: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -176,6 +179,31 @@ def decide(snap: Snapshot) -> list[Action]:
         if t.project not in snap.trusted:
             continue
         key = (t.project, t.name)
+
+        if t.orphaned:
+            fresh = [a for a in t.orphaned
+                     if str(a.get("id") or a.get("requestID") or "") not in mem.cleared]
+            if fresh:
+                actions.append(Action(
+                    CLEAR_ORPHANED, t.name,
+                    "orphaned ask(s) from an aborted turn",
+                    project=t.project, worktree=t.worktree, branch=t.branch,
+                    base=t.base, port=snap.port, orphaned=fresh,
+                ))
+
+        if t.interrupted:
+            if t.dirty or t.diff:
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name, "interrupted",
+                    "the task's turn was aborted (a user stop, or the turn "
+                    "died); its work is held for you to verify",
+                    project=t.project, worktree=t.worktree, branch=t.branch,
+                    base=t.base,
+                ))
+                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                _reset_loop(mem, key, keep=("wait_until",))
+                continue
+            # no work produced: fall through to the normal no-op close
 
         if t.session == state.SESSION_BLOCKED:
             for b in t.blocked:
@@ -648,6 +676,18 @@ class Supervisor:
             elif a.kind == NEEDS_REVIEW:
                 log.append(f"  -> {a.task} needs-review ({a.reason})")
                 log.extend(self._hook_log("needs-review", _hook_env(a), _hook_cwd(a)))
+            elif a.kind == CLEAR_ORPHANED and a.port and a.worktree:
+                for ask in a.orphaned:
+                    rid = str(ask.get("id") or ask.get("requestID") or "")
+                    if not rid or rid in self.mem.cleared:
+                        continue
+                    try:
+                        harness.reply_permission(a.port, rid, "reject",
+                                                 directory=a.worktree)
+                        self.mem.cleared.add(rid)
+                        log.append(f"  -> cleared orphaned ask {rid}")
+                    except Exception as e:  # noqa: BLE001
+                        log.append(f"  -> could not clear orphaned ask {rid}: {e}")
             elif a.kind == DISPATCH and a.project:
                 log.extend(f"  -> {l}" for l in self._dispatch(a))
             elif a.kind == RESOLVE and a.project:

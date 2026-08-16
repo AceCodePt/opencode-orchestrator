@@ -26,7 +26,8 @@ task.md committed (base)  →  branch exists (claimed)  →  agent dispatched
           → pass: the hook commits any stragglers  →  merge + archive + teardown
           → fail:  daemon injects the failure back, bounded by retryCap
           → no-op: clean branch identical to base  →  removed + archived
-     →  needs-review: dirty work, retries exhausted, or a missing worktree
+     →  needs-review: dirty work, retries exhausted, a missing worktree, or a turn the
+        user interrupted in the TUI (interrupted work is held, never auto-merged)
 ```
 
 **Done is a git state, and git is the only state.** The working agent declares the task

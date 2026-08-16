@@ -170,6 +170,22 @@ def test_scan_clean_no_diff_is_a_noop() -> None:
     print("ok: a clean branch identical to base is a no-op")
 
 
+def test_interrupted_status_depends_on_the_work() -> None:
+    wt = tempfile.mkdtemp(prefix="orch-status-")
+    try:
+        held = state.TaskState(project="/p", name="x", base="main", claimed=True,
+                               branch="x", worktree=wt, session=state.SESSION_IDLE,
+                               interrupted=True, dirty=False, diff=True)
+        assert held.status == state.NEEDS_REVIEW
+        noop = state.TaskState(project="/p", name="x", base="main", claimed=True,
+                               branch="x", worktree=wt, session=state.SESSION_IDLE,
+                               interrupted=True, dirty=False, diff=False)
+        assert noop.status == state.NOOP
+    finally:
+        os.rmdir(wt)
+    print("ok: interrupted work is held for review, an interrupted no-op still closes")
+
+
 def test_scan_marks_a_missing_worktree() -> None:
     root, tmp = _repo()
     _task(root, "a-task")

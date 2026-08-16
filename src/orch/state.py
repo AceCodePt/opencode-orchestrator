@@ -13,6 +13,7 @@ from . import observe
 SESSION_BUSY = "busy"
 SESSION_IDLE = "idle"
 SESSION_BLOCKED = "blocked"
+SESSION_INTERRUPTED = "interrupted"
 SESSION_NONE = "none"
 
 TODO = "todo"
@@ -530,6 +531,8 @@ def _cwd(pid: int) -> str | None:
 
 
 def _session_of(tf: observe.TaskFact) -> str:
+    if tf.state == observe.INTERRUPTED:
+        return SESSION_INTERRUPTED
     if tf.state in (observe.BLOCKED_PERMISSION, observe.BLOCKED_QUESTION):
         return SESSION_BLOCKED
     if tf.state == observe.BUSY:
@@ -559,6 +562,8 @@ class TaskState:
     wait_human_merge: bool = False
     dependencies: list[str] = field(default_factory=list)
     conflicted: bool = False
+    interrupted: bool = False
+    orphaned: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -576,6 +581,8 @@ class TaskState:
         if not self.worktree or not os.path.isdir(self.worktree):
             return NEEDS_REVIEW
         if self.conflicted:
+            return NEEDS_REVIEW
+        if self.interrupted and (self.dirty or self.diff):
             return NEEDS_REVIEW
         if self.dirty:
             return NEEDS_REVIEW
@@ -628,6 +635,13 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
                     st.session = _session_of(tf)
                     st.session_ids = tf.session_ids
                     st.blocked = tf.blocked
+                    st.interrupted = tf.interrupted
+                    st.orphaned = tf.orphaned
+                    if tf.interrupted:
+                        st.notes.append(
+                            "interrupted: the task's turn was aborted (a user stop, "
+                            "or the turn died); its work is held for you to verify"
+                        )
             st.dispatch_alive = dispatch_pid(str(wt)) is not None
             st.dispatch_orchestrated = dispatch_pid(str(wt),
                                                      orchestrated=True) is not None

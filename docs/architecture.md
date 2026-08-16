@@ -83,22 +83,29 @@ dispatch subprocess to inspect. The daemon reads three signals from the server:
 
 - **busy** — the session appears in `/session/status` (opencode reports `busy` for the
   whole agent loop, including long-running tool calls); the agent is working.
-- **blocked** — a pending ask for that worktree in `/permission` or `/question`; the
+- **blocked** — a live pending ask for that worktree in `/permission` or `/question`; the
   agent is waiting on a human.
+- **interrupted** — the session's last assistant message was aborted (`MessageAbortedError`,
+  i.e. a user stopped the turn in the TUI or it died); the work is held for the human.
 - **idle** — neither; the work is settled, and the verification hook plus the worktree
   state decide the outcome.
 
 A human-attached client (`opencode attach`) shares the same sessions and is simply
 another viewer; nothing about a controlling terminal distinguishes an orchestrated
-agent anymore.
+agent anymore. A pending ask whose **owning message** was aborted is **orphaned** — the
+turn that created it is dead, so it is not a block; the daemon replies `reject` to clear
+it from the server and the task settles by its worktree state (an interrupted turn's
+work is `needs-review`, never auto-merged).
 
 Per claimed task, each cycle:
 
-1. **Blocked** on a permission/question → alert (deduped by request id, in-memory).
-2. **Busy** session, or an orchestrated run process alive → running; nothing. (A run
+1. **Interrupted** with work (`dirty` or `diff`) → `needs-review` (`interrupted`), held for
+   the human; an interrupted task with no produced work still closes as a no-op.
+2. **Blocked** on a live permission/question → alert (deduped by request id, in-memory).
+3. **Busy** session, or an orchestrated run process alive → running; nothing. (A run
    client stuck alive past `MAX_ORCHESTRATED_S` is escaped, so it can never stall a
    task forever.)
-3. **Settled** (session idle or gone) past a settle budget (~30s):
+4. **Settled** (session idle or gone) past a settle budget (~30s):
    - worktree missing → `needs-review`
    - clean + no diff → `remove` (no-op)
    - otherwise: the committed verification hook decides, or its absence is the

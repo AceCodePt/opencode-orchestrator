@@ -96,6 +96,19 @@ in one source file has one place to check.
   state and the verification hook are the truth. Blocked asks stay pending until a human
   answers them: the headless `opencode run` loop used to auto-reject (or auto-approve
   with `--auto`) every ask before a human could see it.
+- **A user interrupt and an orphaned ask are derived from the message record, never
+  stored.** When a turn is stopped in the TUI (`POST /session/{id}/interrupt`), opencode
+  records it on the message (`MessageAbortedError`, the tool part's
+  `metadata.interrupted`) but does **not** garbage-collect the permission ask that turn
+  created — so an idle session can carry a pending ask forever, and a scan that treats
+  "a pending ask exists" as `blocked` would freeze the task for good. `observe.look_task`
+  therefore reads the session's recent messages: if the **last** assistant message was
+  aborted the session is `interrupted`, and a pending ask whose **owning message** was
+  aborted is **orphaned** (never a live block, and the daemon replies `reject` to clear
+  it). An interrupted task with work (`dirty` or `diff`) is held as `needs-review`
+  (`interrupted`) — the human stopped the turn and must verify it, so it is never
+  auto-merged or auto-committed; an interrupted task with no produced work still closes
+  as a no-op. Only live asks (owning message not aborted) keep the `blocked` alert flow.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
@@ -162,11 +175,14 @@ in one source file has one place to check.
 - **Completion is never the dispatch call's return.** The agent declares done by
   committing its work; the daemon then derives completion from the git state (clean +
   committed + diffing) once the session idles.
-- **Task worktrees get their own git identity at dispatch.** Because committing is now
-  the agent's declaration of done, `dispatch.start` enables per-worktree config
-  (`extensions.worktreeConfig`) and sets `user.name`/`user.email` to the orch identity on
-  the task worktree — never the shared repo config, so the human's base-worktree commits
-  keep their own author. Fail-open: a machine with a global identity does not need it.
+- **Task agents commit with the machine's existing git identity.** Per-worktree
+  identity was tried and rejected: it needs `extensions.worktreeConfig`, and enabling it
+  in the shared config breaks every existing linked worktree of a bare-repo project
+  (the `project create` layout) that lacks a `config.worktree` file — git then refuses
+  `git status` in the base worktree with "must be run in a work tree". So nothing is
+  configured at dispatch; the agent commits with whatever identity exists (global or
+  repo-local), exactly like the merge-resolution agent, and the verification hook's
+  pass-commit still uses the explicit `-c user.name=orch` identity.
 
 ## `verify.py`
 
