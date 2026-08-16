@@ -10,7 +10,7 @@ from pathlib import Path
 from . import dispatch, hooks, harness, merge, observe, server, sse, state, verify
 from .harness import prompt_async
 
-SETTLE_BUDGET_S = 30
+SETTLE_BUDGET_S = 5
 STALL_BUDGET_S = 10 * 60
 RETRIGGER_GRACE_S = 30
 REVIEW_BACKOFF_S = 15 * 60

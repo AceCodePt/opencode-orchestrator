@@ -196,7 +196,7 @@ def test_newly_settled_task_waits_out_the_budget() -> None:
     acts = daemon.decide(_snap(tasks=[t], mem=mem))
     assert acts == [], "the first settle observation must only start the timer"
     assert daemon.VERIFY not in _kinds(acts)
-    acts = daemon.decide(_snap(now=NOW + 10, tasks=[t], mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S - 1, tasks=[t], mem=mem))
     assert daemon.VERIFY not in _kinds(acts), "before the budget no action"
     print("ok: a freshly settled task waits before being acted on")
 
