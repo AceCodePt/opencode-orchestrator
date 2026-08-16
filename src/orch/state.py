@@ -267,6 +267,30 @@ def machine_budget() -> int | None:
     return max_conc if max_conc > 0 else 0
 
 
+def machine_settle_budget() -> int | None:
+    """The machine-wide settle budget, in seconds - how long an idle task
+    session must sit before the daemon verifies/sweeps it - from
+    ~/.config/orch/daemon.json {"settleBudget": N}. Must be greater than 1
+    (the daemon wakes every second, so a 1s budget would act on the very next
+    tick); a value of 1 or less is ignored. None means the code default
+    applies. Re-read every pass, so an edit applies on the next cycle with no
+    daemon restart."""
+    try:
+        raw = json.loads(machine_config_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("settleBudget")
+    if value is None:
+        return None
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 1 else None
+
+
 def set_machine_budget(max_concurrent: int | None) -> dict:
     """Write the machine-wide budget. None removes the cap (unlimited)."""
     p = machine_config_path()

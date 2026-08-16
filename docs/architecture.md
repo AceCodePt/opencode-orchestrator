@@ -385,6 +385,13 @@ reaches the budget (`0` disables scheduling machine-wide; `off`/absent means
 per-project caps only). The budget bounds auto-dispatch only — a human
 `orch task start` is not refused.
 
+Also machine-wide in the same file, `{"settleBudget": N}` sets how many **seconds** an
+idle task session must sit before the daemon settles it (verifies/merges/sweeps). It is
+re-read every pass, so editing `~/.config/orch/daemon.json` applies on the next cycle
+with no daemon restart; a value of 1 second or less is ignored (the daemon wakes every
+second, so the budget would be meaningless), and absent, it falls back to the built-in
+default (30s).
+
 **The machine runs and merges by default; the human opts in per task.** Two front-matter
 flags (the gray-matter block at the top of `tasks/<name>/task.md`) put the human back
 in the loop: `wait_human_start: true` keeps the scheduler from auto-dispatching a task

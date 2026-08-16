@@ -201,6 +201,20 @@ def test_newly_settled_task_waits_out_the_budget() -> None:
     print("ok: a freshly settled task waits before being acted on")
 
 
+def test_machine_settle_budget_is_honored_per_pass() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=True)
+    snap = _snap(tasks=[t], mem=mem, now=NOW)
+    daemon.decide(snap)
+    acts = daemon.decide(_snap(tasks=[t], mem=mem, now=NOW + 5,
+                               settle_budget=5))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    acts = daemon.decide(_snap(tasks=[t], mem=mem, now=NOW + 5,
+                               settle_budget=30))
+    assert acts == [], "a longer configured budget must still hold the task"
+    print("ok: the machine settleBudget is read every pass, no restart needed")
+
+
 def test_settled_dirty_task_is_verified() -> None:
     mem = daemon.LoopState()
     t = _task(session=state.SESSION_IDLE, dirty=True)

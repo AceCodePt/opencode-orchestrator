@@ -10,7 +10,7 @@ from pathlib import Path
 from . import dispatch, hooks, harness, merge, observe, server, sse, state, verify
 from .harness import prompt_async
 
-SETTLE_BUDGET_S = 5
+SETTLE_BUDGET_S = 30
 STALL_BUDGET_S = 10 * 60
 RETRIGGER_GRACE_S = 30
 REVIEW_BACKOFF_S = 15 * 60
@@ -82,6 +82,7 @@ class Snapshot:
     policies: dict[str, state.SchedulerPolicy] = field(default_factory=dict)
     trusted: set[str] = field(default_factory=set)
     global_max: int | None = None
+    settle_budget: int = SETTLE_BUDGET_S
 
 
 def project_label(project: str) -> str:
@@ -310,7 +311,7 @@ def decide(snap: Snapshot) -> list[Action]:
         if key not in mem.settled_at:
             mem.settled_at[key] = snap.now
             continue
-        if snap.now - mem.settled_at[key] < SETTLE_BUDGET_S:
+        if snap.now - mem.settled_at[key] < snap.settle_budget:
             continue
 
         if not t.dirty and not t.diff:
@@ -490,6 +491,7 @@ class Supervisor:
             policies=policies,
             trusted=state.trusted_projects(),
             global_max=state.machine_budget(),
+            settle_budget=state.machine_settle_budget() or SETTLE_BUDGET_S,
         )
 
     def _verify(self, a: Action) -> None:
@@ -731,7 +733,7 @@ class Supervisor:
 
 
 def run(project: str | None = None, roots: list[str] | None = None,
-        interval: float = 10.0, once: bool = False,
+        interval: float = 1.0, once: bool = False,
         dry_run: bool = False, sse: bool = True) -> int:
     sup = Supervisor(project=project, roots=roots, dry_run=dry_run)
     scope = project_label(project) if project else "every discovered project"
@@ -804,7 +806,7 @@ def _dedup_path(path: str) -> str:
     return ":".join(out)
 
 
-def unit_text(interval: float = 10.0) -> str:
+def unit_text(interval: float = 1.0) -> str:
     env = {"HOME": os.environ.get("HOME") or str(Path.home()),
            "PATH": _dedup_path(os.environ.get("PATH")
                                or "/usr/local/bin:/usr/bin:/bin")}
@@ -870,7 +872,7 @@ def install_opencode_deny() -> tuple[bool, str]:
     return True, f"deny rules for .orchestration/** written to {p}"
 
 
-def install(interval: float = 10.0, enable: bool = True) -> list[str]:
+def install(interval: float = 1.0, enable: bool = True) -> list[str]:
     out: list[str] = []
     path = unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)

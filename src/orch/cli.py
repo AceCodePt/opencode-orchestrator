@@ -1365,7 +1365,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="supervise only this project (default: every project)")
     dm.add_argument("--project-only", action="store_true",
                     help="supervise only the project of the current directory")
-    dm.add_argument("-n", "--interval", type=float, default=10.0)
+    dm.add_argument("-n", "--interval", type=float, default=1.0)
     dm.add_argument("--once", action="store_true", help="one pass, then exit")
     dm.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
@@ -1380,7 +1380,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="supervise only this project (default: every project)")
     dr.add_argument("--project-only", action="store_true",
                     help="supervise only the project of the current directory")
-    dr.add_argument("-n", "--interval", type=float, default=10.0)
+    dr.add_argument("-n", "--interval", type=float, default=1.0)
     dr.add_argument("--once", action="store_true", help="one pass, then exit")
     dr.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
@@ -1401,7 +1401,7 @@ def build_parser() -> argparse.ArgumentParser:
     inst = sub.add_parser(
         "install",
         help="write and enable the systemd user unit supervising every project")
-    inst.add_argument("-n", "--interval", type=float, default=10.0)
+    inst.add_argument("-n", "--interval", type=float, default=1.0)
     inst.add_argument("--no-enable", action="store_true",
                       help="write the systemd unit but do not enable it")
     inst.set_defaults(func=cmd_install)
