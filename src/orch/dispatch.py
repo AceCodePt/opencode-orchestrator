@@ -156,7 +156,10 @@ def _prompt_from_task_file(
     if committed is not None:
         return (
             f"Read {rel} and execute it. Follow its Verification section; a task is "
-            f"not done because code exists."
+            f"not done because code exists. When you believe the Verification is "
+            f"satisfied, declare the task done by committing your work to this branch "
+            f"(`git add -A && git commit`). The committed branch is the done signal "
+            f"the daemon reads; it then verifies and merges."
         ), None
 
     if (dispatcher / rel).exists():
@@ -220,6 +223,27 @@ def create_worktree(p: Plan, result: Result) -> bool:
         return True
     result.step(f"worktree {p.worktree.name} on new branch {p.branch} from {p.base}")
     return True
+
+
+AGENT_IDENTITY_NAME = "orch"
+AGENT_IDENTITY_EMAIL = "orch@localhost"
+
+
+def configure_identity(worktree: Path) -> str | None:
+    """Give the task worktree its own git identity so the agent can commit its
+    work. Per-worktree (`--worktree`) config, never the shared repo config, so
+    the human's base-worktree commits keep their own author. Best-effort: a
+    machine that already has a global identity does not need this, so a
+    failure is a note, not a dispatch error."""
+    code, out = _git(worktree, "config", "extensions.worktreeConfig", "true")
+    if code != 0:
+        return f"could not enable per-worktree git config: {out[:200]}"
+    for key, value in (("user.name", AGENT_IDENTITY_NAME),
+                       ("user.email", AGENT_IDENTITY_EMAIL)):
+        code, out = _git(worktree, "config", "--worktree", key, value)
+        if code != 0:
+            return f"could not set worktree git {key}: {out[:200]}"
+    return None
 
 
 RESOLVE_PROMPT = (
@@ -319,6 +343,14 @@ def start(
     if not create_worktree(p, result):
         return result
 
+    ident_note = configure_identity(p.worktree)
+    if ident_note:
+        result.step(f"identity: {ident_note}")
+    else:
+        result.step("worktree git identity set to "
+                    f"{AGENT_IDENTITY_NAME} <{AGENT_IDENTITY_EMAIL}> so the agent "
+                    "can commit its work")
+
     ok, msg = run_hook(p.worktree, HOOK_POST, env)
     result.step(f"post-create: {msg}")
     if not ok:
@@ -346,7 +378,8 @@ def start(
     result.session_id = sid
     result.step(f"task session {sid} for {p.task} in {p.worktree}")
     result.step(
-        "completion is NOT a process exiting: the daemon settles on a clean, "
-        "committed, diffing branch. Watch `orch task list`."
+        "completion is NOT a process exiting: the agent declares done by committing "
+        "its work, and the daemon settles on that committed, diffing branch. "
+        "Watch `orch task list`."
     )
     return result

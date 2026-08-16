@@ -48,22 +48,25 @@ todo  ->  running  ->  ready  ->  merged  ->  archived
 - **archived** — the spec has left `tasks/`; git history and the merge commit are the
   record of what was done.
 
-## The completion signal: the worktree tells you
+## The completion signal: the git state tells you
 
-The agent does **not** commit, and the agent does **not** decide when it is done.
-The `session-idle` hook — the project's verification hook — does both:
+The working agent declares done by committing its work to the branch — git is the only
+state that records it, and nothing is stored anywhere else. The daemon still judges
+*acceptance*: the `session-idle` hook — the project's verification hook — verifies, and on a
+pass also commits anything the agent left uncommitted (idempotent), so a passing task always
+leaves a clean, committed, diffing branch:
 
 - **Non-zero exit** → failed; the output is fed back to the agent.
-- **Zero exit** → the hook *commits the work* (`git add -A && git commit` only if
+- **Zero exit** → the hook commits any remaining work (`git add -A && git commit` only if
   anything is dirty — idempotent), then passes.
 
-So the observable state of the worktree is the whole story when a task settles
+So the observable git state of the branch is the whole story when a task settles
 (session idle or gone):
 
 | Worktree state | Meaning | Daemon does |
 | --- | --- | --- |
-| dirty (untracked/staged/modified) | the verification hook never passed, so nothing was committed | run the hook → retrigger or `needs-review` |
-| clean + diff vs base | the hook passed and committed | run the hook → **merge + archive + teardown** |
+| dirty (untracked/staged/modified) | work the agent did not commit; the hook will commit it on a pass | run the hook → retrigger or `needs-review` |
+| clean + diff vs base | the agent (or a passed hook) committed the work | run the hook → **merge + archive + teardown** |
 | clean + identical to base | nothing was produced | **remove + archive** (no verification needed) |
 
 ## The loop lives in the daemon
@@ -125,9 +128,10 @@ reviewable; editing it mid-task buys nothing. This is the sharpest lesson this
 design learned, and it still holds with the router gone: there is simply no plugin
 inside the agent's server left to trust or distrust — the daemon runs every verification hook.
 
-The commit-on-pass is inside the hook, so a passing verification hook is the only
-thing that can produce a clean, diffing branch. A dirty worktree at settle time is
-therefore unambiguous: the hook never passed.
+The commit-on-pass is inside the hook, so a passing verification run always leaves a
+clean, committed branch even when the agent did not commit everything. A dirty worktree at
+settle time means work the agent did not commit; the daemon still verifies it and the hook
+commits the stragglers on a pass.
 
 ## State: one authority per question
 
@@ -406,9 +410,9 @@ so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
    down; the resolution agent is detected by worktree + task title so a task agent in
    a sibling worktree is never mistaken for it.
 
-The agent may assert it is done; the verification hook verifies and commits. Neither side can
-declare success alone — and there is no side inside the agent's server that reports
-a verdict at all.
+The agent declares done by committing its work; the daemon's verification run judges
+acceptance, and the merge is the verdict. Neither side declares success alone — and there is
+no side inside the agent's server that reports a verdict at all.
 
 ## Flow C — observation and failure handling
 
@@ -453,15 +457,15 @@ built on the daemon's log + scan rather than on a verdict table.
 2. The scan never writes. The daemon holds all authority.
 3. One authority per question: git for intent, live system for runtime, memory for
    transient bookkeeping.
-4. The agent is never trusted for state. The worktree and the daemon's own
-   verification decide.
+4. The agent is never trusted for state. Git records what the agent committed; the
+   daemon's own verification decides what is accepted and merged.
 5. The verification hook's entry point comes from the base branch; the working-tree
    copy is never the judge, and a diverging copy is flagged.
 6. Verification is opt-in: a project without a committed hook accepts its tasks
    without verification. A present hook that fails never passes.
-7. A dirty worktree is not done. Only a committed, diffing branch can merge, and it is
-   produced either by a verification hook the daemon ran itself or, when no hook is
-   committed, by the daemon's own implicit acceptance commit.
+7. The agent declares done by committing; only a committed, diffing branch can merge,
+   and it merges only after the daemon's own verification run passed it (or, when no
+   hook is committed, after the daemon's implicit acceptance commit).
 8. Kill by recorded pid (a specific process found by exact cmdline), never by pattern.
 9. Unavailability never produces a pass. Store gone (there is none), server down,
    verification hook timed out, worktree gone: each lands on `needs-review`.

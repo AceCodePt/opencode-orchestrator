@@ -43,9 +43,11 @@ TEMPLATE_SESSION_IDLE_SAMPLE = """#!/usr/bin/env bash
 # enable verification. Only the version committed on the base branch runs - edit,
 # then commit, before dispatching.
 #
-# Contract (full version in .orchestration/README.md): exit 0 commits the work
-# and passes; non-zero fails and everything written to stdout/stderr is fed back
-# to the agent as its next instructions.
+# Contract (full version in .orchestration/README.md): the agent declares a task
+# done by committing its work to the branch. This hook verifies that committed
+# work; exit 0 passes and commits anything the agent left uncommitted, non-zero
+# fails and everything written to stdout/stderr is fed back to the agent as its
+# next instructions.
 
 set -euo pipefail
 cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
@@ -56,8 +58,9 @@ cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
 echo "no verification configured yet - edit .orchestration/hooks/session-idle" >&2
 exit 1
 
-# Verification passed: commit the work (idempotent - an empty tree has nothing to
-# commit, and it still passes so the daemon can re-run it safely).
+# Verification passed: commit the work (idempotent - the agent usually committed
+# already, so an empty tree has nothing to commit, and it still passes so the
+# daemon can re-run it safely).
 if [ -n "$(git status --porcelain)" ]; then
   git add -A
   git -c user.name=orch -c user.email=orch@localhost \\
@@ -83,8 +86,10 @@ from this one directory under one env-var contract (`TASK_NAME`, `BRANCH_NAME`,
 - the **daemon** fires agent-lifecycle events: `session-idle` - the verification hook, run
   when a task's session settles
 
-`session-idle` is the verification hook: exit 0 passes **and commits the work**; non-zero fails
-and the output is fed back to the agent by the daemon, which retries up to
+The working agent declares a task done by **committing its work to the branch** - git is
+the only state that records it. `session-idle` is the verification hook the daemon runs on
+that committed branch: exit 0 passes **and commits anything the agent left uncommitted**;
+non-zero fails and the output is fed back to the agent by the daemon, which retries up to
 `verify.retryCap` before marking the task needs-review. A **missing** hook means
 the work is accepted without verification - the hook is the opt-in, and its
 absence is the implicit unverified state.

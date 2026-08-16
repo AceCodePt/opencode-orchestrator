@@ -127,6 +127,49 @@ def test_start_creates_a_session_via_the_server_api() -> None:
     print("ok: start creates a task session via the server API, no run loop")
 
 
+def test_start_configures_agent_identity_and_prompts_for_the_commit() -> None:
+    root, tmp = _repo()
+    _task_file(root, "probe")
+    _commit(root)
+
+    orig_start = dispatch.server.start
+    orig_create = dispatch.harness.create_session
+    orig_prompt = dispatch.harness.prompt_async
+
+    class _Srv:
+        pid = 1234
+        port = 4099
+        url = "http://127.0.0.1:4099"
+
+    dispatch.server.start = lambda: _Srv()
+    dispatch.harness.create_session = lambda port, directory, title=None: {
+        "id": "ses_abc"}
+    calls: list = []
+
+    def prompt_async(port, sid, text, agent=None, model=None):
+        calls.append(text)
+
+    dispatch.harness.prompt_async = prompt_async
+    try:
+        r = dispatch.start(root, "probe")
+        assert r.ok, r.problems
+        wt = r.worktree
+        assert wt is not None and wt.is_dir()
+        name = subprocess.run(
+            ["git", "-C", str(wt), "config", "user.name"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        assert name == "orch", name
+        assert calls, "the task must have been prompted"
+        assert "committing your work" in calls[0], calls[0]
+        assert "tasks/probe/task.md" in calls[0], calls[0]
+    finally:
+        dispatch.server.start = orig_start
+        dispatch.harness.create_session = orig_create
+        dispatch.harness.prompt_async = orig_prompt
+    tmp.cleanup()
+    print("ok: start sets the worktree identity and prompts for the done-commit")
+
+
 def test_branch_exists_detects_a_claim() -> None:
     root, tmp = _repo()
     _task_file(root, "probe")

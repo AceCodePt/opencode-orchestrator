@@ -21,16 +21,21 @@ no generated backlog file: nothing can drift because there is nothing stored.
 
 ```
 task.md committed (base)  →  branch exists (claimed)  →  agent dispatched
-     →  session settles  →  daemon runs the session-idle verification hook
-          → pass: the hook commits the work  →  merge + archive + teardown
+     →  agent commits its work to the branch  →  session settles
+     →  daemon runs the session-idle verification hook
+          → pass: the hook commits any stragglers  →  merge + archive + teardown
           → fail:  daemon injects the failure back, bounded by retryCap
           → no-op: clean branch identical to base  →  removed + archived
      →  needs-review: dirty work, retries exhausted, or a missing worktree
 ```
 
-The agent never commits and never decides completion. The `session-idle` hook — the
-project's verification hook — verifies and, on a pass, commits the work. A clean, committed,
-diffing branch is the sign of done, and only the daemon's own verification run can produce it.
+**Done is a git state, and git is the only state.** The working agent declares the task
+done by committing its work to the branch — a committed, clean, diffing branch is the sign
+of done, and nothing is stored anywhere else to say so. The agent decides when it believes
+the work is done and commits; the daemon decides whether the task is *accepted*: it runs the
+committed `session-idle` verification hook (which, on a pass, also idempotently commits any
+files the agent left uncommitted) and merges only a branch that passed its own verification
+run. A dirty branch at settle time is simply work the agent did not commit.
 
 ## Usage
 
@@ -257,8 +262,10 @@ agent always has its instructions. The task-lifecycle hooks (`pre-task-create` a
 follow the same rule: only the copy committed on the base branch runs, so commit them
 before dispatching.
 
-**The dispatch process exiting is not the task finishing.** Completion is derived from
-the worktree state by the daemon, after the session settles. Watch `orch task list`.
+**The dispatch process exiting is not the task finishing.** The agent declares done by
+committing its work to the branch; completion is then derived from the git state by the
+daemon — the committed branch is verified and merged, nothing is stored anywhere else.
+Watch `orch task list`.
 
 **The daemon can dispatch `todo` tasks itself (opt-in).** Add a `scheduler` block to
 `.orchestration/config.json` and the daemon fills free slots with the next unclaimed
@@ -391,12 +398,15 @@ worktree to resolve and commit on its own (up to `retryCap` tries, then it escal
 a human). Either way, once the merge lands the daemon archives the task. The policy is
 a pure function of a snapshot, so those cases are tested rather than hoped for.
 
-**Stopped, finished and done are different things, and all three are derived.** Stopped
-means the session is idle. Finished means the verification loop settled — a passing hook commits
-the work, a failing one drives the agent back until the retry cap is spent. Done means
-a clean, committed, diffing branch passed the daemon's own verification and was merged. A task
-with a dirty tree at settle time is `needs-review`, because a passing verification hook would have
-committed it.
+**Stopped, finished and done are different things, and all three are derived from git.**
+Stopped means the session is idle. The agent declares done by committing its work — a
+committed, clean, diffing branch is the signal, and nothing is stored elsewhere to record
+it. Finished means the verification loop settled — the daemon's run of the hook passes (the
+hook also commits any files the agent left uncommitted), a failing one drives the agent back
+until the retry cap is spent. Done means a branch the agent committed passed the daemon's
+own verification and was merged. A task with a dirty tree at settle time is the work the
+agent did not commit — the daemon still verifies it, and the hook commits the stragglers on
+a pass.
 
 Not built yet: routing `needs-review` onwards or unblocking a parent agent.
 

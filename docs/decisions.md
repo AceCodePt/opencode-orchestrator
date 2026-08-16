@@ -56,14 +56,14 @@ in one source file has one place to check.
   actions; the verification hook runs, the injection happens, the merge lands in
   `apply()`. That
   is the only reason budgets, retries and settle rules are testable at all.
-- **The worktree state is the verdict.** Dirty → uncommitted (the verification hook
-  never passed).
-  Clean+diff → verified, merge. Clean+no-diff → nothing was produced, remove. The
-  daemon still runs the verification hook itself before merging — "clean + diff"
-  alone never stands in for a verification the daemon performed.
+- **The git state is the verdict.** The agent declares done by committing its work;
+  a committed, clean, diffing branch is the signal, and nothing is stored anywhere else
+  to record it. The daemon still runs the verification hook itself before merging —
+  "clean + committed" alone never stands in for a verification the daemon performed.
 - **The hook commits on pass** (idempotently), so a passing task leaves
-  a clean, committed, diffing branch. The agent never commits and never decides
-  completion.
+  a clean, committed, diffing branch even when the agent did not commit everything. The
+  agent decides when it believes the work is done and commits; the daemon decides
+  acceptance.
 - **A running verification hook is not an unexamined agent** — the old problem is
   gone because the daemon runs it itself and knows it is running; a settle budget
   (~30s) only
@@ -159,8 +159,14 @@ in one source file has one place to check.
   detach or kill at teardown. The trade that buys the permission gate: the headless
   `opencode run` loop that used to auto-answer every ask is gone, so asks stay pending
   until a human answers them.
-- **Completion is never the dispatch call's return.** Completion is derived from the
-  worktree (clean + committed + diffing) once the session idles.
+- **Completion is never the dispatch call's return.** The agent declares done by
+  committing its work; the daemon then derives completion from the git state (clean +
+  committed + diffing) once the session idles.
+- **Task worktrees get their own git identity at dispatch.** Because committing is now
+  the agent's declaration of done, `dispatch.start` enables per-worktree config
+  (`extensions.worktreeConfig`) and sets `user.name`/`user.email` to the orch identity on
+  the task worktree — never the shared repo config, so the human's base-worktree commits
+  keep their own author. Fail-open: a machine with a global identity does not need it.
 
 ## `verify.py`
 
@@ -226,10 +232,11 @@ in one source file has one place to check.
 
 ## `merge.py`
 
-- **Only a clean, committed branch merges.** The old "commit uncommitted work before
-  merging" step is gone: uncommitted work is now `needs-review`, and auto-committing
-  it would manufacture the exact "verified" stamp the verification hook is
-  supposed to produce.
+- **Only a clean, committed branch merges.** The agent is expected to commit its work as
+  the declaration of done; the old "commit uncommitted work before merging" step is gone,
+  and the daemon never auto-commits a dirty branch as a shortcut past its own
+  verification — the verification hook's pass-commit (and the no-hook implicit acceptance)
+  are the only commits that stand in for a verification the daemon performed.
 - **The archive is `git mv tasks/<name>/task.md archive/<name>/task.md` + a commit.**
   The spec survives, the merge commit is the log, and the active `tasks/` tree stays
   light. `git mv` needs the destination directory to exist first.
