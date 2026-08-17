@@ -237,7 +237,7 @@ string cannot do this job.
 | `orch task merge <name>` | re-run a merge after a conflict |
 | `orch verify` | inspect whether the committed verification hook is trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
-| `orch verify-run` | run the committed verification hook here and say why |
+| `orch verify --run` | run the committed verification hook here and say why |
 | `orch attach` | attach the interactive TUI on the shared server — from inside a claimed task worktree to that task's session (create it on first use), otherwise to the project's primary agent (create the `orch:agent` session on first use) |
 | `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a daemon no-op), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
 
@@ -248,7 +248,7 @@ unverified project.
 ### 4. Project `.orchestration/` — project knowledge
 
 - `hooks/session-idle` — the verification hook: verify, and on success commit the
-  work. The daemon fires it on settle; the CLI fires it via `verify-run`. `orch init`
+  work. The daemon fires it on settle; the CLI fires it via `orch verify --run`. `orch init`
   scaffolds
   `hooks/session-idle.sample` — inert until copied to the real name, made
   executable, and committed.

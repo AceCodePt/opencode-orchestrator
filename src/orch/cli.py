@@ -816,9 +816,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print(err or "not in a worktree", file=sys.stderr)
         return 2
     findings = verify_mod.inspect(top)
-    if not findings:
-        print("no verification hook committed - tasks are accepted without verification")
-        return 0
     worst = 0
     for f in findings:
         mark = {"ok": "  ", "diverged": "~ ", "uncommitted": "! ",
@@ -829,22 +826,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
             worst = max(worst, 1)
         elif not f.trustworthy:
             worst = max(worst, 2)
-    return worst
-
-
-def cmd_verify_run(args: argparse.Namespace) -> int:
-    wt = Path(args.directory) if args.directory else Path.cwd()
-    v = verify_mod.run(wt, args.event)
-    print(f"{v.event}: {v.summary}")
-    if v.diverged:
-        print("  ! the worktree's hook differs from the committed one; the committed "
-              "one ran")
-    if v.detail:
-        for line in v.detail.strip().splitlines()[-20:]:
-            print(f"  {line}")
-    if v.outcome == verify_mod.NO_VERIFY:
+    if args.run:
+        v = verify_mod.run(top, args.event)
+        print(f"{v.event}: {v.summary}")
+        if v.diverged:
+            print("  ! the worktree's hook differs from the committed one; the "
+                  "committed one ran")
+        if v.detail:
+            for line in v.detail.strip().splitlines()[-20:]:
+                print(f"  {line}")
+        if v.outcome == verify_mod.NO_VERIFY:
+            return 0
+        return 0 if v.justifies_done else 1
+    if any(f.state in (verify_mod.OK, verify_mod.DIVERGED)
+           and f.name in verify_mod.VERIFY_HOOKS for f in findings):
+        print("    run it: orch verify --run")
+    if not findings:
+        print("no verification hook committed - tasks are accepted without verification")
         return 0
-    return 0 if v.justifies_done else 1
+    return worst
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -1314,12 +1314,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("verify", help="can this project's verification hook be trusted")
     g.add_argument("-C", "--directory")
+    g.add_argument("--run", action="store_true",
+                   help="also run the committed verification hook here and report")
+    g.add_argument("--event", default="session-idle",
+                   help="which committed hook to run (default: session-idle)")
     g.set_defaults(func=cmd_verify)
-
-    gr = sub.add_parser("verify-run", help="run the committed verification hook here and report")
-    gr.add_argument("-C", "--directory")
-    gr.add_argument("--event", default="session-idle")
-    gr.set_defaults(func=cmd_verify_run)
 
     at = sub.add_parser(
         "attach",

@@ -49,8 +49,8 @@ bin/orch project create <name>    # new project in a supervised dir: git init + 
 bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
 bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
 bin/orch project list             # every discovered project and its trust status
-bin/orch verify                  # can this project's verification hook be trusted
-bin/orch verify-run              # run the committed verification hook here and report
+bin/orch verify                 # can this project's verification hook be trusted
+bin/orch verify --run           # run the committed verification hook here and report
 bin/orch doctor                  # verify the contracts that fail silently
 
 bin/orch server start|status|stop|restart

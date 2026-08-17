@@ -42,7 +42,8 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
 
 
 def _args(**kw) -> argparse.Namespace:
-    a = argparse.Namespace(directory=None, global_=False, json=False)
+    a = argparse.Namespace(directory=None, global_=False, json=False,
+                           run=False, event="session-idle")
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -288,6 +289,97 @@ def test_project_scheduler_rejects_non_numbers() -> None:
     finally:
         tmp.cleanup()
     print("ok: `project scheduler` validates its argument")
+
+
+def _commit_hook(root: Path, body: str) -> None:
+    rel = root / ".orchestration" / "hooks" / "session-idle"
+    rel.parent.mkdir(parents=True, exist_ok=True)
+    rel.write_text(body)
+    rel.chmod(0o755)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "hook")
+
+
+def test_verify_run_flag_runs_the_committed_hook() -> None:
+    root, tmp = _repo()
+    try:
+        _commit_hook(root, "#!/usr/bin/env bash\nexit 0\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_verify(_args(directory=str(root), run=True,
+                                      event="session-idle"))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "session-idle: passed" in out, out
+    finally:
+        tmp.cleanup()
+    print("ok: `verify --run` executes the committed hook")
+
+
+def test_verify_audit_hints_when_a_committed_hook_exists() -> None:
+    root, tmp = _repo()
+    try:
+        _commit_hook(root, "#!/usr/bin/env bash\nexit 0\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_verify(_args(directory=str(root)))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "run it: orch verify --run" in out, \
+            "a committed hook surfaces the run flag for discoverability"
+    finally:
+        tmp.cleanup()
+    print("ok: the audit view hints at `verify --run`")
+
+
+def test_verify_run_flag_failure_exits_1() -> None:
+    root, tmp = _repo()
+    try:
+        _commit_hook(root, "#!/usr/bin/env bash\necho no\nexit 1\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_verify(_args(directory=str(root), run=True,
+                                      event="session-idle"))
+        out = buf.getvalue()
+        assert rc == 1, (rc, out)
+        assert "failed" in out, out
+    finally:
+        tmp.cleanup()
+    print("ok: a failing hook under `verify --run` exits 1")
+
+
+def test_verify_audit_hint_only_for_a_committed_hook() -> None:
+    root, tmp = _repo()
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_verify(_args(directory=str(root)))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        assert "no verification hook committed" in out, out
+        assert "run it" not in out, \
+            "no hint to run when there is nothing to run"
+    finally:
+        tmp.cleanup()
+    print("ok: the run hint appears only when a committed hook exists")
+
+
+def test_verify_no_hint_for_config_only_findings() -> None:
+    root, tmp = _repo()
+    try:
+        (root / ".orchestration" / "config.json").write_text(
+            '{"baseBranch": "main", "verify": {"retryCap": 9}}\n')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_verify(_args(directory=str(root)))
+        out = buf.getvalue()
+        assert rc == 1, (rc, out)
+        assert "diverged" in out, out
+        assert "run it" not in out, \
+            "a diverged config alone is no reason to hint at running the hook"
+    finally:
+        tmp.cleanup()
+    print("ok: a config-only divergence does not hint at `verify --run`")
 
 
 def test_daemon_budget_writes_the_machine_config() -> None:
