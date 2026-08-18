@@ -46,6 +46,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 ```bash
 bin/orch init                    # scaffold .orchestration/ (config + verification hook template + a hook sample per opencode event) and trust the project
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
+bin/orch project clone <url>      # clone an existing repo into orch's layout (bare store + base worktree); initializes it if it has no .orchestration, otherwise trusts only with --trust
 bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
 bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
 bin/orch project list             # every discovered project and its trust status
@@ -218,6 +219,36 @@ base worktree with the fail-closed verification hook; copy `.orchestration/hooks
 to `hooks/session-idle` and edit it to real checks before dispatching, and keep the
 project under `$HOME`/`/mnt`
 (`ORCH_ROOTS`) so the daemon supervises it.
+
+## Cloning an existing repository
+
+`orch project clone <url>` brings an **existing** repo into orch's layout — the
+same on-disk shape `project create` produces: a bare store (`<name>.git`) with a
+base worktree checked out beside it, so the daemon can supervise it. The project
+name is taken from the URL's repo name (`--name` overrides), `--dir` chooses the
+parent (prompted when omitted), and the bare store keeps `origin` → `<url>` for
+provenance and manual pulls (orch itself is local-only and never fetches).
+
+The base branch follows the rule the rest of orch uses everywhere: `main` if the
+clone has one; otherwise you are **told and asked to pick** one of its branches
+(`--base <branch>` makes it non-interactive). Whatever is chosen becomes
+`baseBranch` in `.orchestration/config.json`.
+
+Two kinds of repo are cloned, handled differently:
+
+- **Never initialized** (no `.orchestration/` in the clone): `orch init` runs in
+  the base worktree and the scaffolding is committed to the base branch. The
+  project is **trusted immediately** — you created the orchestration, exactly as
+  `project create` trusts its own scaffold.
+- **Already orchestrated** (`.orchestration/` is committed in the clone): the
+  clone's orchestration is left untouched. Because that code is third-party, the
+  project is **not trusted by default** — it is discovered and only alerts until
+  you `orch project trust` it, or clone with `--trust`. `--trust` is the explicit
+  opt-in for repos that already ship orchestration; interactively you are asked.
+
+As everywhere, only the verification hook committed on the base branch ever runs,
+and a trusted clone's hook runs under the filtered environment — review a cloned
+repo's `.orchestration/hooks/session-idle` before trusting it.
 
 ## Task intake: opencode custom tools
 

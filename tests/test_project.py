@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -58,6 +60,70 @@ def _capture_create(captured: dict):
                         allow_unsupervised=allow_unsupervised)
         return _Result()
     return create
+
+
+def _capture_clone(captured: dict):
+    def clone(url, name=None, path=None, base=None, trust=False, version="0",
+              roots=None, allow_unsupervised=False, pick_branch=None,
+              ask_trust=None):
+        captured.update(url=url, name=name, path=path, base=base, trust=trust,
+                        version=version,
+                        allow_unsupervised=allow_unsupervised,
+                        pick_branch=pick_branch, ask_trust=ask_trust)
+        return _Result()
+    return clone
+
+
+def _clone_args(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(url=None, flag_name=None, path=None, base=None,
+                           trust=False, allow_unsupervised=None)
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def _make_source(root: Path, name: str = "src", branch: str = "main",
+                 with_orch: bool = False) -> str:
+    """Build a real local git repo to clone from; returns its path."""
+    src = root / name
+    src.mkdir()
+    (src / "README.md").write_text("# source\n")
+    if with_orch:
+        orch = src / ".orchestration"
+        orch.mkdir()
+        (orch / "config.json").write_text('{\n  "baseBranch": "main"\n}\n')
+    for args in (
+        ["git", "init", "-q", "-b", branch, str(src)],
+        ["git", "-C", str(src), "config", "user.name", "tester"],
+        ["git", "-C", str(src), "config", "user.email", "t@test"],
+        ["git", "-C", str(src), "add", "-A"],
+        ["git", "-C", str(src), "commit", "-q", "-m", "initial commit"],
+    ):
+        p = subprocess.run(args, capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"{args} failed: {p.stderr}")
+    return str(src)
+
+
+def _set_state_env(tmp: Path) -> tuple[str | None, str | None]:
+    import os as _os
+    old = _os.environ.get("XDG_STATE_HOME")
+    old_cfg = _os.environ.get("XDG_CONFIG_HOME")
+    _os.environ["XDG_STATE_HOME"] = str(tmp / "state")
+    _os.environ["XDG_CONFIG_HOME"] = str(tmp / "config")
+    return old, old_cfg
+
+
+def _restore_state_env(old: str | None, old_cfg: str | None) -> None:
+    import os as _os
+    if old is None:
+        _os.environ.pop("XDG_STATE_HOME", None)
+    else:
+        _os.environ["XDG_STATE_HOME"] = old
+    if old_cfg is None:
+        _os.environ.pop("XDG_CONFIG_HOME", None)
+    else:
+        _os.environ["XDG_CONFIG_HOME"] = old_cfg
 
 
 def _fake_run(calls: list) -> None:
@@ -500,6 +566,286 @@ def test_cmd_project_create_supervised_dir_never_asks_override() -> None:
         cli.project_mod.create = orig
         cli.sys.stdin = orig_stdin
     print("ok: a supervised parent is created without any override prompt")
+
+
+def test_name_from_url() -> None:
+    assert project.name_from_url("https://github.com/a/b.git") == "b"
+    assert project.name_from_url("git@github.com:a/b.git") == "b"
+    assert project.name_from_url("https://github.com/a/b") == "b"
+    assert project.name_from_url("/x/y/b/") == "b"
+    assert project.name_from_url("https://github.com/a/") == "a"
+    print("ok: the project name is the url's repo name without .git")
+
+
+def test_cmd_project_clone_derives_name_and_calls_clone() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.clone
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.clone = _capture_clone(captured)
+    cli.sys.stdin = _FakeTTY([], tty=False)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = cli.cmd_project_clone(_clone_args(
+                url="https://github.com/a/b.git", path=tmp,
+                allow_unsupervised=True))
+        assert rc == 0, rc
+        assert captured["url"] == "https://github.com/a/b.git"
+        assert captured["name"] == "b"
+        assert captured["path"] == tmp
+        assert captured["trust"] is False
+        assert captured["pick_branch"] is None, \
+            "non-interactive must not prompt for a branch"
+        assert captured["ask_trust"] is None, \
+            "non-interactive must not prompt for trust"
+    finally:
+        cli.project_mod.clone = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: `project clone` derives the name from the url non-interactively")
+
+
+def test_cmd_project_clone_noninteractive_missing_url_errors() -> None:
+    called: list = []
+    orig = cli.project_mod.clone
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.clone = lambda *a, **k: called.append(a)
+    cli.sys.stdin = _FakeTTY([], tty=False)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_clone(_clone_args())
+        assert rc == 1, rc
+        assert called == [], "clone must not run without a url"
+    finally:
+        cli.project_mod.clone = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: without a terminal and without a url, clone refuses clearly")
+
+
+def test_cmd_project_clone_prompts_for_base_branch() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.clone
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.clone = _capture_clone(captured)
+    cli.sys.stdin = _FakeTTY(["2", ""], tty=True)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_project_clone(_clone_args(
+                    url="https://github.com/a/b", path=tmp,
+                    allow_unsupervised=True))
+            assert rc == 0, rc
+            pb = captured["pick_branch"]
+            assert pb is not None, "interactive clone must offer a branch pick"
+            assert pb(["master", "develop"]) == "develop"
+            assert pb(["only"]) == "only"
+    finally:
+        cli.project_mod.clone = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: interactive clone lets the user pick the base branch")
+
+
+def test_cmd_project_clone_prompts_for_trust() -> None:
+    captured: dict = {}
+    orig = cli.project_mod.clone
+    orig_stdin = cli.sys.stdin
+    cli.project_mod.clone = _capture_clone(captured)
+    cli.sys.stdin = _FakeTTY(["y", "y"])
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_project_clone(_clone_args(
+                    url="https://github.com/a/b", path=tmp))
+        assert rc == 0, rc
+        at = captured["ask_trust"]
+        assert at is not None, "interactive clone must offer a trust prompt"
+        assert at() is True
+    finally:
+        cli.project_mod.clone = orig
+        cli.sys.stdin = orig_stdin
+    print("ok: interactive clone asks before trusting shipped orchestration")
+
+
+def test_clone_no_main_noninteractive_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="master")
+        r = project.clone(src, name="demo", path=tmp,
+                          allow_unsupervised=True)
+        assert not r.ok
+        assert "--base" in r.problems[0], r.problems
+    print("ok: a clone without main refuses non-interactively without --base")
+
+
+def test_clone_no_main_picks_branch() -> None:
+    picked: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="master")
+        old, old_cfg = _set_state_env(Path(tmp))
+
+        def pick(branches: list[str]) -> str | None:
+            picked.append(branches)
+            return "master"
+
+        try:
+            r = project.clone(src, name="demo", path=tmp, pick_branch=pick,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            assert picked, "the branch pick is consulted when main is absent"
+            target = Path(tmp) / "demo" / "master"
+            rc, branch = project._run(["git", "-C", str(target),
+                                       "branch", "--show-current"])
+            assert rc == 0 and branch == "master", branch
+            cfg = json.loads((target / ".orchestration" / "config.json")
+                             .read_text())
+            assert cfg["baseBranch"] == "master", cfg
+            rc, log = project._run(["git", "-C", str(target), "log",
+                                    "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert lines[0].endswith("orch init: orchestration on master"), log
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a no-main clone picks the branch as the base and records it")
+
+
+def test_clone_produces_a_bare_store_and_base_worktree() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp))
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            project_dir = Path(tmp) / "demo"
+            store = project_dir / "demo.git"
+            target = project_dir / "main"
+
+            assert sorted(p.name for p in project_dir.iterdir()) == \
+                ["demo.git", "main"], \
+                "the project folder holds the bare store and the main worktree"
+            rc, out = project._run(["git", "-C", str(store), "rev-parse",
+                                    "--is-bare-repository"])
+            assert rc == 0 and out == "true", f"store is not bare: {out!r}"
+            rc, branch = project._run(["git", "-C", str(target), "branch",
+                                       "--show-current"])
+            assert rc == 0 and branch == "main", branch
+            rc, log = project._run(["git", "-C", str(target), "log",
+                                    "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert lines[0].endswith("orch init: orchestration on main"), log
+            assert "initial commit" in lines[1], \
+                "the clone's history is preserved under the init commit"
+            rc, st = project._run(["git", "-C", str(target), "status",
+                                   "--porcelain"])
+            assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
+            assert (target / "README.md").read_text() == "# source\n", \
+                "the repo's own content is preserved"
+            assert (target / ".orchestration" / "hooks"
+                    / "session-idle.sample").is_file(), \
+                "the born worktree must hold the gitignored hook templates"
+            rc, origin = project._run(["git", "-C", str(store), "remote",
+                                       "get-url", "origin"])
+            assert rc == 0 and origin == src, \
+                "the bare store keeps origin pointing at the cloned url"
+            assert str(store) in state.discover_projects([tmp]), \
+                "discovery must map the bare store to the base worktree"
+            assert state.is_trusted(store), \
+                "a freshly initialized clone is trusted like project create"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: clone makes a bare store with an initialized base worktree")
+
+
+def test_clone_existing_orch_is_not_trusted_by_default() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), with_orch=True)
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            store = Path(tmp) / "demo" / "demo.git"
+            assert not state.is_trusted(store), \
+                "third-party orchestration must not be trusted by default"
+            rc, log = project._run(["git", "-C", str(store), "log",
+                                    "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert len(lines) == 1, \
+                "no commit is added when the shipped base matches, " + log
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a clone that already ships orchestration stays untrusted")
+
+
+def test_clone_existing_orch_trust_flag_trusts() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), with_orch=True)
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp, trust=True,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            store = Path(tmp) / "demo" / "demo.git"
+            assert state.is_trusted(store), \
+                "--trust opts a shipped-orchestration clone in"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: --trust opts into trusting a clone that ships orchestration")
+
+
+def test_clone_existing_orch_ask_trust_controls() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), with_orch=True)
+        old, old_cfg = _set_state_env(Path(tmp))
+        asked: list[bool] = []
+        try:
+            def ask() -> bool:
+                asked.append(True)
+                return True
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True, ask_trust=ask)
+            assert r.ok, r.problems
+            assert asked, "the trust prompt is consulted when no flag is given"
+            assert state.is_trusted(Path(tmp) / "demo" / "demo.git")
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: ask_trust decides trust when --trust is absent")
+
+
+def test_clone_existing_orch_aligns_base_branch_when_chosen_differs() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="master", with_orch=True)
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp, base="master",
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            store = Path(tmp) / "demo" / "demo.git"
+            rc, log = project._run(["git", "-C", str(store), "log",
+                                    "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert "align" in lines[0], log
+            rc, cfg = project._run(["git", "-C", str(store), "show",
+                                    "master:.orchestration/config.json"])
+            assert rc == 0 and json.loads(cfg)["baseBranch"] == "master", cfg
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a base branch different from the shipped config is aligned")
+
+
+def test_clone_name_flag_overrides_url_derivation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp))
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="renamed", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            assert (Path(tmp) / "renamed" / "renamed.git").is_dir(), \
+                "--name overrides the url-derived name"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: --name overrides the url-derived project name")
 
 
 def main() -> int:

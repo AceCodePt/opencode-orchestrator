@@ -1056,6 +1056,93 @@ def cmd_project_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_clone(args: argparse.Namespace) -> int:
+    interactive = _interactive()
+
+    url = args.url
+    if not url:
+        print("  ! a repository url is required: `orch project clone <url>`",
+              file=sys.stderr)
+        return 1
+
+    name = args.flag_name
+    if not name:
+        name = project_mod.name_from_url(url)
+    if not name:
+        if not interactive:
+            print("  ! cannot derive a project name from the url; pass "
+                  "`--name <name>` (stdin is not a terminal)", file=sys.stderr)
+            return 1
+        name = _prompt("project name: ")
+        if not name:
+            print("  ! no project name given", file=sys.stderr)
+            return 1
+
+    path = args.path
+    if path is None and interactive:
+        default = str(Path.cwd())
+        p = _prompt(f"parent directory [{default}]: ")
+        if p:
+            path = str(Path(p).expanduser())
+    if path is None:
+        path = str(Path.cwd())
+
+    allow = bool(args.allow_unsupervised)
+    if args.allow_unsupervised is None and interactive:
+        parent = Path(path).expanduser()
+        if project_mod._unsupervised(parent, state.default_roots()):
+            allow = _yesno("the parent is outside the supervised roots; "
+                           "clone it anyway", default=False)
+
+    def pick_branch(branches: list[str]) -> str | None:
+        print("the clone has no 'main' branch - pick the base branch:")
+        for i, b in enumerate(branches, 1):
+            print(f"  {i}. {b}")
+        ans = _prompt(f"base branch [{branches[0]}]: ")
+        if ans is None or ans == "":
+            return branches[0]
+        try:
+            idx = int(ans)
+            if 1 <= idx <= len(branches):
+                return branches[idx - 1]
+        except ValueError:
+            pass
+        if ans in branches:
+            return ans
+        print(f"  ! {ans!r} is not one of: " + ", ".join(branches),
+              file=sys.stderr)
+        return None
+
+    def ask_trust() -> bool:
+        return _yesno("the clone already ships .orchestration; trust it so the "
+                      "daemon verifies/merges here", default=False)
+
+    r = project_mod.clone(
+        url,
+        name=name,
+        path=path,
+        base=args.base,
+        trust=bool(args.trust),
+        version=__version__,
+        allow_unsupervised=allow,
+        pick_branch=pick_branch if interactive else None,
+        ask_trust=ask_trust if interactive else None,
+    )
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    if not r.ok:
+        return 1
+    print("\nnext:")
+    print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit (if the clone was initialized)")
+    print("  bin/orch verify                 # can this project's verification hook be trusted")
+    print("  bin/orch project trust          # let the daemon act on an untrusted clone")
+    print("  bin/orch server start && bin/orch install && bin/orch doctor")
+    print("  bin/orch task list && bin/orch task start <name>")
+    return 0
+
+
 def cmd_project_trust(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
     ok, msg = project_mod.trust(start)
@@ -1279,6 +1366,29 @@ def build_parser() -> argparse.ArgumentParser:
                          "will not discover it; prompts if the parent is "
                          "outside the roots)")
     pc.set_defaults(func=cmd_project_create)
+
+    px = pjsub.add_parser(
+        "clone",
+        help="clone an existing repo into orch's layout "
+             "(bare store + base worktree)",
+    )
+    px.add_argument("url", help="the repository url to clone (any git url)")
+    px.add_argument("--name", dest="flag_name", default=None,
+                    help="project name (default: derived from the url)")
+    px.add_argument("--dir", "--path", dest="path", default=None,
+                    help="parent directory (default: current directory; "
+                         "prompts for it if omitted)")
+    px.add_argument("--base", default=None,
+                    help="base branch when the clone has no 'main' "
+                         "(prompts for a pick if omitted and interactive)")
+    px.add_argument("--trust", action="store_true",
+                    help="trust a clone that already ships .orchestration "
+                         "(not trusted by default - it is third-party code)")
+    px.add_argument("--allow-unsupervised", action="store_true", default=None,
+                    help="clone even outside the supervised roots (the daemon "
+                         "will not discover it; prompts if the parent is "
+                         "outside the roots)")
+    px.set_defaults(func=cmd_project_clone)
 
     pt = pjsub.add_parser(
         "trust",

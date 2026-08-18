@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -203,5 +205,183 @@ def create(name: str, path: str | None = None, gh: bool = True,
         if rc != 0:
             return fail(out or "gh repo create failed")
         result.step(f"created a {vis} GitHub repo and pushed origin")
+
+    return result
+
+
+def name_from_url(url: str) -> str:
+    """The last path component of a repo url, minus a trailing `.git`."""
+    base = (url or "").rstrip("/").rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    return base.strip()
+
+
+def _branches(store: Path) -> list[str]:
+    rc, out = _run(["git", "-C", str(store), "for-each-ref",
+                    "--format=%(refname:short)", "refs/heads/"])
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _committed_file(store: Path, base: str, rel: str) -> str | None:
+    rc, out = _run(["git", "-C", str(store), "show", f"{base}:{rel}"])
+    return out if rc == 0 else None
+
+
+def _set_base_branch(worktree: Path, base: str) -> None:
+    cfg = worktree / ".orchestration" / "config.json"
+    try:
+        data = json.loads(cfg.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if data.get("baseBranch") == base:
+        return
+    data["baseBranch"] = base
+    cfg.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def clone(
+    url: str,
+    name: str | None = None,
+    path: str | None = None,
+    base: str | None = None,
+    trust: bool = False,
+    version: str = "0",
+    roots: list[str] | None = None,
+    allow_unsupervised: bool = False,
+    pick_branch: Callable[[list[str]], str | None] | None = None,
+    ask_trust: Callable[[], bool] | None = None,
+) -> CreateResult:
+    """Clone an existing repo into orch's layout: a bare store (`<name>.git`)
+    with a base worktree checked out beside it, so the daemon can supervise it.
+
+    Two kinds of repo are handled differently:
+    - no `.orchestration/` in the clone: `orch init` scaffolding is committed to
+      the base branch and the project is trusted - we created the orchestration,
+      exactly like `project create`.
+    - `.orchestration/` already committed: the clone's orchestration is left
+      as-is and, because that is third-party code, the project is NOT trusted
+      unless `trust` is passed (or `ask_trust()` answers yes).
+    """
+    result = CreateResult(ok=True)
+
+    url = (url or "").strip()
+    if not url:
+        return result.fail("no repository url given")
+
+    name = (name or "").strip() or name_from_url(url)
+    if not name or "/" in name or name in (".", ".."):
+        return result.fail(f"{name!r} is not a usable project name")
+
+    parent = (Path(path).expanduser() if path else Path.cwd()).resolve()
+    project = parent / name
+    store = project / f"{name}.git"
+    if project.exists():
+        return result.fail(f"{project} already exists; pick another name or --path")
+
+    if not allow_unsupervised:
+        supervised = _unsupervised(parent, roots if roots is not None
+                                   else state.default_roots())
+        if supervised:
+            return result.fail(supervised)
+
+    def fail(msg: str) -> CreateResult:
+        shutil.rmtree(project, ignore_errors=True)
+        shutil.rmtree(store, ignore_errors=True)
+        return result.fail(msg)
+
+    parent.mkdir(parents=True, exist_ok=True)
+    project.mkdir(parents=True, exist_ok=True)
+    rc, out = _run(["git", "clone", "--bare", url, str(store)], cwd=parent)
+    if rc != 0:
+        return fail(out or f"git clone --bare failed for {url}")
+    result.step(f"git clone --bare {url} {project.name}/{store.name}")
+    result.step("origin points at the cloned url (provenance; orch is local-only)")
+
+    branches = _branches(store)
+    if not branches:
+        return fail("the clone has no branches to supervise")
+
+    if base is None:
+        if DEFAULT_BASE in branches:
+            base = DEFAULT_BASE
+        elif pick_branch is not None:
+            base = pick_branch(branches)
+            if base is None:
+                return fail("no base branch chosen")
+        else:
+            return fail(
+                f"the clone has no {DEFAULT_BASE!r} branch (branches: "
+                + ", ".join(branches)
+                + "). Pass --base <branch> to pick the base branch."
+            )
+    if base not in branches:
+        return fail(f"{base!r} is not a branch in {url} (branches: "
+                    + ", ".join(branches) + ")")
+    result.step(f"base branch: {base}")
+
+    target = project / base
+    rc, out = _run(["git", "-C", str(store), "worktree", "add",
+                    str(target), base], cwd=parent)
+    if rc != 0:
+        return fail(out or "git worktree add failed")
+    result.step(f"git worktree add {target.relative_to(project)} on "
+                f"{base} (base worktree)")
+
+    rc, out = _run(["git", "-C", str(store), "ls-tree", "-d", base, "--",
+                    ".orchestration"])
+    has_orch = rc == 0 and bool(out.strip())
+
+    def commit(message: str) -> bool:
+        rc, out = _run(["git", "-C", str(target), "add", "-A"], cwd=parent)
+        if rc != 0:
+            return result.fail(out or "git add failed") is None
+        rc, out = _run(["git", "-C", str(target), "-c", "user.name=orch",
+                        "-c", "user.email=orch@localhost", "commit", "-q",
+                        "-m", message], cwd=parent)
+        if rc != 0:
+            return result.fail(out or "git commit failed") is None
+        result.step(message)
+        return True
+
+    if has_orch:
+        result.step("the clone already ships .orchestration - leaving it as-is")
+        committed = _committed_file(store, base, ".orchestration/config.json")
+        cfg_base = None
+        if committed:
+            try:
+                cfg_base = json.loads(committed).get("baseBranch")
+            except ValueError:
+                cfg_base = None
+        if cfg_base and cfg_base != base:
+            _set_base_branch(target, base)
+            if not commit(f"orch: align .orchestration/config.json baseBranch "
+                          f"to {base}"):
+                return result
+
+        do_trust = trust
+        if not do_trust and ask_trust is not None:
+            do_trust = ask_trust()
+        if do_trust:
+            state.trust_project(store)
+            result.step("trusted this project - the daemon will verify, merge "
+                        "and dispatch here")
+        else:
+            result.step("NOT trusted: the clone's orchestration is third-party "
+                        "code. `orch project trust` (or `orch project clone "
+                        "--trust`) opts it in.")
+    else:
+        created, _skipped = init_mod.scaffold(target, version)
+        for c in created:
+            result.step(f"created {c}")
+        if base != DEFAULT_BASE:
+            _set_base_branch(target, base)
+        if not commit(f"orch init: orchestration on {base}"):
+            return result
+        state.trust_project(store)
+        result.step("trusted this project - the daemon will verify, merge and "
+                    "dispatch here")
 
     return result
