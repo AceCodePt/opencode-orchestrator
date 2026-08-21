@@ -225,6 +225,7 @@ string cannot do this job.
 | `orch project trust [--dir]` | machine-level approval that lets the daemon verify, merge, dispatch and resolve in this project. The marker lives in `~/.local/state/orch/trusted.json`, keyed by the repo's git common dir — outside the repo, so a project cannot approve itself |
 | `orch project untrust [--dir]` | revoke that approval; running agents and worktrees are left alone, the daemon just stops settling them |
 | `orch project list` | every discovered project and its trust status (`--json`) |
+| `orch project base <branch>` | repoint an existing project's base branch to `<branch>` so it behaves as if cloned with `--base <branch>` (clone-parity); the branch must already exist and the old base branch stays as an ordinary checkout. A single per-project base repoint, not multi-environment support |
 | `orch project scheduler [<n>\|off]` | show or set the project's auto-dispatch cap (`scheduler.maxConcurrent`). Writes into the base worktree's `.orchestration/config.json` for review and commit; the committed copy is the only one in force |
 | `orch daemon budget [<n>\|off]` | show or set the machine-wide auto-dispatch cap in `~/.config/orch/daemon.json`; `0` disables scheduling machine-wide, `off`/absent means per-project caps only |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |

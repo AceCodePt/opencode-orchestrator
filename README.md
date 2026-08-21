@@ -50,6 +50,7 @@ bin/orch project clone <url>      # clone an existing repo into orch's layout (b
 bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
 bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
 bin/orch project list             # every discovered project and its trust status
+bin/orch project base <branch>    # repoint an existing project's base branch to <branch> (must already exist)
 bin/orch verify                 # can this project's verification hook be trusted
 bin/orch verify --run           # run the committed verification hook here and report
 bin/orch doctor                  # verify the contracts that fail silently
@@ -250,6 +251,20 @@ Two kinds of repo are cloned, handled differently:
 As everywhere, only the verification hook committed on the base branch ever runs,
 and a trusted clone's hook runs under the filtered environment — review a cloned
 repo's `.orchestration/hooks/session-idle` before trusting it.
+
+## Repointing the base branch
+
+`orch project base <branch>` makes an **existing** project behave as if it had been
+cloned with `--base <branch>`: it repoints the project's `baseBranch` so task
+worktrees branch from `<branch>` and the verification hook, config, and task specs
+are read from it. It is the "make an existing main project behave as if cloned with
+`--base preview`" change — a single per-project base branch repoint, not
+multi-environment support.
+
+The branch **must already exist** in the project — `orch project base` never creates
+one. And it is **non-destructive**: the old base branch is not removed; it simply
+stays in place as an ordinary checkout. Only the project's notion of which branch is
+the base moves.
 
 ## Task intake: opencode custom tools
 
