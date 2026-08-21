@@ -38,6 +38,63 @@ committed `session-idle` verification hook (which, on a pass, also idempotently 
 files the agent left uncommitted) and merges only a branch that passed its own verification
 run. A dirty branch at settle time is simply work the agent did not commit.
 
+## The execution flow, start to finish
+
+Walking one task through the whole loop, from a raw idea to archived work:
+
+1. **Intake.** An opencode session in the base worktree — usually `orch attach`'s
+   primary agent — turns the idea into `tasks/<name>/task.md` by calling the
+   machine-global `create_task` custom tool. When the spec is written with
+   `wait_human_start: false` it is committed straight to the base branch, so the
+   daemon sees it and the rest happens unattended; with `wait_human_start: true`
+   it stays an uncommitted draft until you review it.
+2. **Claim and dispatch.** Either the scheduler (opt-in per project) picks the task
+   because its `dependencies:` are all archived, or you run `orch task start <name>`.
+   Dispatch refuses if `refs/heads/<name>` already exists — the branch is the claim,
+   atomically, so two dispatches can never race. A worktree is created
+   (`git worktree add -b <name> <base>`), the `pre-task-create`/`post-task-create`
+   hooks run, and a session is opened on the shared server bound to that worktree,
+   fed the task prompt via `prompt_async`. No `opencode run` subprocess is spawned:
+   the agent *is* the session.
+3. **The agent works.** It reads the spec, edits the worktree, and commits when it
+   believes it is done. If it needs a permission it *blocks* on a pending ask rather
+   than auto-answering — surfaced to you through `orch permissions` /
+   `orch task answer`. The daemon watches every session and classifies it each cycle:
+   **busy** (working), **blocked** (waiting on a human), **interrupted** (a turn the
+   user stopped in the TUI), or **idle** (nothing running).
+4. **Settle.** Once the session is idle past the settle budget, the daemon derives the
+   outcome from the worktree — it does not ask the agent. An interrupted turn with work,
+   a missing worktree, or a dirty tree that keeps failing verification lands on
+   `needs-review` for you. A clean branch with no diff is a no-op: the worktree and
+   branch are removed and the spec archived. Everything else is handed to the
+   committed `session-idle` verification hook.
+5. **Verify and merge.** The daemon runs the verification hook committed on the base
+   branch (never the agent's working-tree copy). On a pass the hook also idempotently
+   commits any files the agent left uncommitted, and the daemon merges the branch
+   `--no-ff` into base, then removes the worktree and branch and archives the spec. On
+   a fail the failure is injected back into the agent's session via `prompt_async` and
+   it retries, bounded by `retryCap`; once the cap is spent the task is `needs-review`.
+   A project with no committed hook accepts work implicitly — absence of a hook is the
+   opt-in.
+6. **Conflict.** A merge that conflicts is left **in progress** (the scan reads
+   `MERGE_HEAD` and shows `needs-review (merge-conflict)`); it is never silently
+   retried. Who resolves it follows `wait_human_start`: a human-started task is resolved
+   by you in the base worktree (`git add`/`git commit`); a machine-started task gets an
+   agent dispatched into the base worktree — a server session titled
+   `<name>-merge-conflict` — to resolve and commit on its own, up to `retryCap` tries
+   before it escalates to you. The daemon detects an in-flight resolver by that session,
+   so it never spawns duplicates. Either way, once the merge lands, the no-op path
+   archives the task.
+7. **Archive.** `tasks/<name>/task.md` is `git mv`'d to `archive/<name>/task.md` and
+   committed. Archiving is what unblocks any task that listed `<name>` in its
+   `dependencies:` — the scheduler's frontier is exactly the set of declared tasks
+   whose every dependency is archived.
+
+Because every step is derived from git and the live server — never from stored verdicts —
+the loop is restart-safe: a daemon restart resets only the in-memory timers, and a task
+still lands where its worktree says it should. One pass handles every claimed task in every
+trusted project; the scheduler fills free slots with the next eligible `todo`.
+
 ## Usage
 
 Stdlib-only Python, no install step. Agents run **headless**: one shared
