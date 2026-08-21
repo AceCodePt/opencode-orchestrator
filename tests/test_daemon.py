@@ -966,6 +966,56 @@ def test_auto_resolution_escalates_to_human_after_retries() -> None:
     print("ok: exhausted auto-resolution escalates to a human")
 
 
+def test_an_in_flight_resolver_session_is_detected_and_not_duplicated() -> None:
+    root, _wt, tmp = _conflicted_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    key = (str(t.project), t.name)
+    mem = daemon.LoopState()
+    mem.resolve_at[key] = NOW - daemon.DISPATCH_BACKOFF_S - 1
+    snap = _snap(now=NOW, tasks=[t], mem=mem)
+    # a live resolver session titled <task>-merge-conflict exists in the base
+    # worktree, so the daemon must not spawn another and must not escalate
+    orig = state.observe.harness.sessions
+    state.observe.harness.sessions = lambda port, directory=None: [
+        {"id": "ses_resolver", "title": "task-a-merge-conflict",
+         "directory": directory, "parentID": None}]
+    try:
+        acts = daemon.decide(snap)
+        assert daemon.RESOLVE not in _kinds(acts), _kinds(acts)
+        assert daemon.NEEDS_REVIEW not in _kinds(acts), _kinds(acts)
+        assert acts == []
+    finally:
+        state.observe.harness.sessions = orig
+    tmp.cleanup()
+    print("ok: an in-flight resolver session is detected; no duplicate resolve "
+          "and no human escalation")
+
+
+def test_a_resolver_session_for_a_different_task_does_not_block_this_one() -> None:
+    root, _wt, tmp = _conflicted_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    key = (str(t.project), t.name)
+    mem = daemon.LoopState()
+    mem.resolve_at[key] = NOW - daemon.DISPATCH_BACKOFF_S - 1
+    snap = _snap(now=NOW, tasks=[t], mem=mem)
+    # a resolver for a DIFFERENT task is running; it must not block task-a
+    orig = state.observe.harness.sessions
+    state.observe.harness.sessions = lambda port, directory=None: [
+        {"id": "ses_resolver", "title": "task-other-merge-conflict",
+         "directory": directory, "parentID": None}]
+    try:
+        acts = daemon.decide(snap)
+        assert _kinds(acts) == [daemon.RESOLVE], _kinds(acts)
+    finally:
+        state.observe.harness.sessions = orig
+    tmp.cleanup()
+    print("ok: a resolver for another task never blocks this task's resolve")
+
+
 def test_auto_resolved_conflict_archives_as_a_noop() -> None:
     root, wt, tmp = _conflicted_repo()
     proj = state.Project.from_dir(root)

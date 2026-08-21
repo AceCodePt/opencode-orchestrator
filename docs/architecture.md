@@ -424,12 +424,16 @@ so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
    `needs-review` (`merge-conflict`)) and never re-runs it. **Who resolves follows
    `wait_human_start`**: a human resolves a human-started task in the base worktree
    (`git add`/`git commit`); a machine-started task gets its own agent dispatched into
-   the base worktree (`opencode run --title <name>-merge-conflict`) to resolve and
-   commit, bounded by the same `retryCap` before it escalates to a human. Once the
+   the base worktree (a **server session** titled `<name>-merge-conflict` via
+   `prompt_async`, not an `opencode run` subprocess) to resolve and commit, bounded
+   by the same `retryCap` before it escalates to a human. Once the
    merge lands either way, the branch is an ancestor of base and the daemon's no-op
    path archives the task. A conflicted task is never re-verified, re-merged, or torn
-   down; the resolution agent is detected by worktree + task title so a task agent in
-   a sibling worktree is never mistaken for it.
+   down. **In-flight detection is a session check, not a `run`-process check**: a
+   live session titled `<name>-merge-conflict` in the base worktree means a resolver
+   is already working, so the daemon must not spawn another (the old
+   `resolution_pid` run-process lookup was blind to the resolver's session and
+   re-spawned resolvers until escalation — see `tasks/outcome-routing/task.md`).
 
 The agent declares done by committing its work; the daemon's verification run judges
 acceptance, and the merge is the verdict. Neither side declares success alone — and there is

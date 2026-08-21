@@ -262,8 +262,8 @@ def decide(snap: Snapshot) -> list[Action]:
                 continue
 
             base_wt = state._base_worktree(Path(t.project), t.base)
-            res = state.resolution_pid(str(base_wt), t.name) if base_wt else None
-            if res is not None:
+            if state.resolution_alive(snap.port, str(base_wt) if base_wt else None,
+                                      t.name):
                 _reset_loop(mem, key)
                 continue
             if snap.now - mem.resolve_at.get(key, 0) < DISPATCH_BACKOFF_S:
