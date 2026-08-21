@@ -1200,6 +1200,53 @@ def cmd_project_scheduler(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_project_base(args: argparse.Namespace) -> int:
+    interactive = _interactive()
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree", file=sys.stderr)
+        return 2
+
+    branch = args.branch
+    if not branch:
+        if not interactive:
+            print("  ! a branch is required: `orch project base <branch>` "
+                  "(stdin is not a terminal)", file=sys.stderr)
+            return 1
+        branches = project_mod._branches(proj.common)
+        print("pick the new base branch:")
+        for i, b in enumerate(branches, 1):
+            print(f"  {i}. {b}")
+        ans = _prompt(f"base branch [{branches[0]}]: ")
+        if ans is None or ans == "":
+            branch = branches[0]
+        else:
+            if ans in branches:
+                branch = ans
+            else:
+                try:
+                    idx = int(ans)
+                    if 1 <= idx <= len(branches):
+                        branch = branches[idx - 1]
+                except ValueError:
+                    pass
+        if branch not in branches:
+            print(f"  ! {branch!r} is not one of: " + ", ".join(branches),
+                  file=sys.stderr)
+            return 1
+
+    r = project_mod.base(proj.common, branch)
+    for s in r.steps:
+        print(f"  {s}")
+    for p in r.problems:
+        print(f"  ! {p}", file=sys.stderr)
+    if not r.ok:
+        return 1
+    print("\nnext: bin/orch server start")
+    return 0
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     return 0
@@ -1412,6 +1459,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "the committed policy")
     ps.add_argument("-C", "--directory")
     ps.set_defaults(func=cmd_project_scheduler)
+
+    pb = pjsub.add_parser(
+        "base",
+        help="repoint this project's base worktree onto an existing branch",
+    )
+    pb.add_argument("branch", nargs="?", default=None,
+                    help="the branch to make the base (prompts for a pick "
+                         "if omitted and interactive)")
+    pb.add_argument("-C", "--directory")
+    pb.set_defaults(func=cmd_project_base)
 
     g = sub.add_parser("verify", help="can this project's verification hook be trusted")
     g.add_argument("-C", "--directory")
