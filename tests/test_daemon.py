@@ -1038,6 +1038,58 @@ def test_auto_resolved_conflict_archives_as_a_noop() -> None:
     print("ok: a resolved conflict falls through to the no-op archive path")
 
 
+def test_clean_task_is_held_while_the_base_is_mid_merge() -> None:
+    root, wt, tmp = _conflicted_repo()
+    # a second clean merge-ready task, built from the pre-conflict base
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-b",
+                    str(root.parent / "task-b"), "main"], check=True)
+    wtb = root.parent / "task-b"
+    subprocess.run(["git", "-C", str(wtb), "config", "user.email", "t@t"],
+                   check=True)
+    subprocess.run(["git", "-C", str(wtb), "config", "user.name", "t"],
+                   check=True)
+    (wtb / "task_b.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(wtb), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wtb), "commit", "-q", "-m",
+                    "work for task-b"], check=True)
+
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    assert state._base_merging(root, "main") is not None, \
+        "the base must still be mid-merge"
+    t = next(x for x in proj.scan() if x.name == "task-b")
+    assert not t.conflicted, "task-b is not the conflicted merge"
+    assert t.status == state.MERGE_READY, t.status
+
+    mem = daemon.LoopState()
+    acts = daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.NOTE], _kinds(acts)
+    assert "held: base branch is mid-merge" in acts[0].reason, acts[0].reason
+    assert daemon.VERIFY not in _kinds(acts), _kinds(acts)
+    assert daemon.MERGE not in _kinds(acts), _kinds(acts)
+
+    # still held on the next sweep: no re-notification, no verify/merge
+    acts2 = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                                tasks=[t], mem=mem))
+    assert _kinds(acts2) == [], _kinds(acts2)
+
+    # resolve the base conflict; the held task resumes its settle-and-verify path
+    (root / "task.py").write_text("x = 3\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "resolve"],
+                   check=True)
+    assert state._base_merging(root, "main") is None, "the merge must be complete"
+    t = next(x for x in proj.scan() if x.name == "task-b")
+    assert t.status == state.MERGE_READY, t.status
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    acts3 = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                                tasks=[t], mem=mem))
+    assert _kinds(acts3) == [daemon.VERIFY], _kinds(acts3)
+    tmp.cleanup()
+    print("ok: a clean merge-ready task is held (one NOTE, no verify/merge) while "
+          "the base is mid-merge and resumes to verify once the base resolves")
+
+
 def test_snapshot_builds_the_session_to_worktree_map() -> None:
     saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
     tmp = tempfile.TemporaryDirectory()

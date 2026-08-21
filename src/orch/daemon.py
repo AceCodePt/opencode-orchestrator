@@ -68,6 +68,7 @@ class LoopState:
     dispatch_escaped: set[tuple[str, str]] = field(default_factory=set)
     resolve_retries: dict[tuple[str, str], int] = field(default_factory=dict)
     resolve_at: dict[tuple[str, str], int] = field(default_factory=dict)
+    merge_held_notified: set[tuple[str, str]] = field(default_factory=set)
 
 
 @dataclass
@@ -298,6 +299,22 @@ def decide(snap: Snapshot) -> list[Action]:
             mem.resolve_at.pop(key, None)
             _reset_loop(mem, key)
             continue
+
+        if t.status in (state.MERGE_READY, state.NOOP):
+            if state._base_merging(Path(t.project), t.base):
+                if key not in mem.merge_held_notified:
+                    mem.merge_held_notified.add(key)
+                    actions.append(Action(
+                        NOTE, t.name, "held: base branch is mid-merge",
+                        "another task's merge into base is unresolved; this "
+                        "branch was built from the pre-conflict base, so it is "
+                        "held until the base is healthy",
+                        project=t.project, worktree=t.worktree,
+                        branch=t.branch, base=t.base,
+                    ))
+                _reset_loop(mem, key)
+                continue
+            mem.merge_held_notified.discard(key)
 
         if snap.now < mem.wait_until.get(key, 0):
             # A backoff (e.g. from a failed merge) must not freeze a clean,
