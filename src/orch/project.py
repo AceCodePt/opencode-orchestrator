@@ -232,16 +232,35 @@ def _committed_file(store: Path, base: str, rel: str) -> str | None:
     return out if rc == 0 else None
 
 
-def _set_base_branch(worktree: Path, base: str) -> None:
+def _set_base_branch(worktree: Path, base: str) -> bool:
     cfg = worktree / ".orchestration" / "config.json"
     try:
         data = json.loads(cfg.read_text())
     except (OSError, ValueError):
         data = {}
     if data.get("baseBranch") == base:
-        return
+        return False
     data["baseBranch"] = base
     cfg.write_text(json.dumps(data, indent=2) + "\n")
+    return True
+
+
+def _current_base(store: Path) -> tuple[str | None, Path | None]:
+    """The branch a worktree currently declares as the project's base: the
+    first worktree whose working-tree config names its own branch. A task
+    worktree never self-declares (its config names the base it branched from),
+    and repoint re-aligns the worktrees it supersedes, so this stays
+    unambiguous across chained repoints."""
+    for path, br in state._worktrees(store):
+        if br is None:
+            continue
+        try:
+            data = json.loads((path / ".orchestration" / "config.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if data.get("baseBranch") == br:
+            return br, path
+    return None, None
 
 
 def clone(
@@ -408,6 +427,7 @@ def base(common: Path | str, target_branch: str) -> CreateResult:
             + (", ".join(branches) if branches else "none")
             + "). Create the branch in the store first.")
     result.step(f"base branch: {branch}")
+    old_base, _ = _current_base(store)
 
     target = project / branch
     if state._base_worktree(store, branch) is None:
@@ -443,5 +463,17 @@ def base(common: Path | str, target_branch: str) -> CreateResult:
     else:
         result.step(f"baseBranch is already {branch} on {branch} - "
                     "nothing to commit")
+
+    if old_base is not None and old_base != branch:
+        aligned: list[str] = []
+        for path, br in state._worktrees(store):
+            if br is None or path == target:
+                continue
+            if not (path / ".orchestration" / "config.json").exists():
+                continue
+            if _set_base_branch(path, branch):
+                aligned.append(path.name)
+        result.step(f"aligned {', '.join(aligned) or 'no'} worktree config(s) to "
+                    f"baseBranch={branch}")
 
     return result
