@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import dispatch
+from . import hooks
 from . import init as init_mod
 from . import state
 
@@ -369,6 +370,12 @@ def clone(
 
     if has_orch:
         result.step("the clone already ships .orchestration - leaving it as-is")
+        # Drop the inert .example references in, gitignored and uncommitted, so
+        # the hook directory matches the global one. Real hooks remain a
+        # copy-to-real-name + chmod +x + commit action, and trust is untouched.
+        p_created, p_skipped = hooks.write_project_examples(target)
+        for name in p_created:
+            result.step(f"created .orchestration/hooks/{name}")
         committed = _committed_file(store, base, ".orchestration/config.json")
         cfg_base = None
         if committed:

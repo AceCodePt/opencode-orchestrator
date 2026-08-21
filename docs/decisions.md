@@ -229,10 +229,13 @@ in one source file has one place to check.
 - **A bare target is refused, not silently written beside.** Hook definitions must
   live inside a worktree and be tracked.
 - **Templates are never hooks.** `orch init` writes every template as an inert
-  `*.example` in `~/.config/orch/hooks/`; nothing template-shaped is ever scaffolded
-  into a repo, and `.gitignore` rules (`*.sample`, `*.example`) keep even copied-in
-  template files untracked. A project has no verification hook at all until it copies
-  a template to the real name,
+  `*.example` in `~/.config/orch/hooks/`, and scaffolds the project-relevant set
+  (session-idle, the lifecycle hooks, and one per opencode server event — never the
+  machine-level notification hooks) into a project's `.orchestration/hooks/` as the
+  same inert, gitignored, non-executable references, so the hook directory matches
+  the global one. `.gitignore` rules (`*.sample`, `*.example`) keep the copies
+  untracked. A project has no verification hook at all until it copies a template
+  to the real name,
   makes it executable, and commits it. Nothing is overwritten without `--force`.
 - **Every opencode event gets a hook, and the daemon fires it from the SSE stream.**
   `orch init` installs one template per event type (machine-level `.example`),

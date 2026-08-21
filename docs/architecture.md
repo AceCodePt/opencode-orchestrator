@@ -252,7 +252,12 @@ unverified project.
   work. The daemon fires it on settle; the CLI fires it via `orch verify --run`. `orch init`
   installs the template machine-level as
   `~/.config/orch/hooks/session-idle.example` — inert until copied to the real name, made
-  executable, and committed.
+  executable, and committed. On init the project-relevant `.example` references
+  (session-idle, the lifecycle hooks, and one per opencode server event — never the
+  machine-level notification hooks) are also scaffolded into the project's
+  `.orchestration/hooks/`, gitignored and non-executable, so the hook directory
+  matches the global one. Enabling one is still a copy-to-real-name, `chmod +x`,
+  and commit.
 - Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
   `pre-branch-delete`, `post-task-cleanup`. `orch init` installs one inert
   `~/.config/orch/hooks/*.example` template per hook — inert until copied to the real name,

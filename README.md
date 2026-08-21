@@ -44,7 +44,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                     # scaffold .orchestration/ (config + docs + ignore rules) and install the machine-level hook templates; takes the project's trust
+bin/orch init                     # scaffold .orchestration/ (config + docs + ignore rules + inert hook .example references) and install the machine-level hook templates; takes the project's trust
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
 bin/orch project clone <url>      # clone an existing repo into orch's layout (bare store + base worktree); initializes it if it has no .orchestration, otherwise trusts only with --trust
 bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)

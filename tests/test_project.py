@@ -99,6 +99,7 @@ def _make_source(root: Path, name: str = "src", branch: str = "main",
         orch = src / ".orchestration"
         orch.mkdir()
         (orch / "config.json").write_text('{\n  "baseBranch": "main"\n}\n')
+        (orch / ".gitignore").write_text(".state/\n*.sample\n*.example\n")
     for args in (
         ["git", "init", "-q", "-b", branch, str(src)],
         ["git", "-C", str(src), "config", "user.name", "tester"],
@@ -377,9 +378,23 @@ def test_create_produces_a_bare_store_and_base_worktree() -> None:
                 rc, st = project._run(["git", "-C", str(target), "status",
                                        "--porcelain"])
                 assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
-                assert not list((target / ".orchestration" / "hooks"
-                                 ).glob("*.sample")), \
-                    "the born worktree must hold no inert hook templates"
+                hooks_dir = target / ".orchestration" / "hooks"
+                assert (hooks_dir / "session-idle.example").is_file(), \
+                    "the born worktree holds the session-idle .example reference"
+                assert (hooks_dir / "pre-task-create.example").is_file(), \
+                    "the born worktree holds the task-lifecycle .example references"
+                event_examples = list(hooks_dir.glob("*.example"))
+                assert len(event_examples) > 90, \
+                    "the born worktree holds the ~90 event .example references"
+                import os as _os2
+                assert all(not _os2.access(p, _os2.X_OK)
+                           for p in event_examples), \
+                    "the .example references are non-executable"
+                rc, tracked = project._run(
+                    ["git", "-C", str(target), "ls-files", "--",
+                     ".orchestration/hooks"])
+                assert rc == 0 and tracked == "", \
+                    "the .example references are gitignored and untracked"
                 assert str(store) in state.discover_projects([tmp]), \
                     "discovery must map the bare store to the base worktree"
                 assert state.is_trusted(store), \
@@ -811,9 +826,21 @@ def test_clone_produces_a_bare_store_and_base_worktree() -> None:
             assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
             assert (target / "README.md").read_text() == "# source\n", \
                 "the repo's own content is preserved"
-            assert not list((target / ".orchestration" / "hooks"
-                                     ).glob("*.sample")), \
-                "the born worktree must hold no inert hook templates"
+            hooks_dir = target / ".orchestration" / "hooks"
+            assert (hooks_dir / "session-idle.example").is_file(), \
+                "the initialized clone holds the session-idle .example reference"
+            assert (hooks_dir / "pre-task-create.example").is_file(), \
+                "the initialized clone holds the task-lifecycle .example references"
+            event_examples = list(hooks_dir.glob("*.example"))
+            assert len(event_examples) > 90, \
+                "the initialized clone holds the ~90 event .example references"
+            import os as _os2
+            assert all(not _os2.access(p, _os2.X_OK) for p in event_examples), \
+                "the .example references are non-executable"
+            rc, tracked = project._run(["git", "-C", str(target), "ls-files",
+                                        "--", ".orchestration/hooks"])
+            assert rc == 0 and tracked == "", \
+                "the .example references are gitignored and untracked"
             rc, origin = project._run(["git", "-C", str(store), "remote",
                                        "get-url", "origin"])
             assert rc == 0 and origin == src, \
@@ -846,6 +873,48 @@ def test_clone_existing_orch_is_not_trusted_by_default() -> None:
         finally:
             _restore_state_env(old, old_cfg)
     print("ok: a clone that already ships orchestration stays untrusted")
+
+
+def test_clone_existing_orch_drops_example_references_untrusted() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), with_orch=True)
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            store = Path(tmp) / "demo" / "demo.git"
+            target = Path(tmp) / "demo" / "main"
+            assert not state.is_trusted(store), \
+                "third-party orchestration must not be trusted by default"
+            hooks_dir = target / ".orchestration" / "hooks"
+            assert (hooks_dir / "session-idle.example").is_file(), \
+                "the shipped-orchestration clone drops the .example references in"
+            assert (hooks_dir / "pre-task-create.example").is_file(), \
+                "the task-lifecycle .example references are dropped in"
+            event_examples = list(hooks_dir.glob("*.example"))
+            assert len(event_examples) > 90, \
+                "the ~90 event .example references are dropped in"
+            import os as _os2
+            assert all(not _os2.access(p, _os2.X_OK)
+                       for p in event_examples), \
+                "the dropped .example references are non-executable"
+            rc, st = project._run(["git", "-C", str(target), "status",
+                                   "--porcelain"])
+            assert rc == 0 and st == "", \
+                f"the dropped references stay ignored, git clean: {st!r}"
+            rc, tracked = project._run(["git", "-C", str(target), "ls-files",
+                                        "--", ".orchestration/hooks"])
+            assert rc == 0 and tracked == "", \
+                "the dropped references are not committed"
+            rc, log = project._run(["git", "-C", str(store), "log",
+                                    "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert len(lines) == 1, \
+                "no commit is added for the dropped references, " + log
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a shipped-orchestration clone drops ignored .example references untrusted")
 
 
 def test_clone_existing_orch_trust_flag_trusts() -> None:
