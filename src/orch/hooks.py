@@ -11,7 +11,10 @@ from . import server
 # every notification hook, the session-idle verification hook, the task-lifecycle
 # hooks, and one per opencode server event. They are inert - you copy one into a
 # project's .orchestration/hooks/<name>, make it executable, and commit it.
-# Nothing hooks-related is ever scaffolded into a repo.
+# The project-relevant set (session-idle, the task-lifecycle hooks, and one per
+# opencode server event - never the machine-level notification hooks) is also
+# scaffolded into a fresh project's .orchestration/hooks/ as the same inert,
+# gitignored *.example references, so the hook directory matches the global one.
 #
 # The executable copies in a project's .orchestration/hooks/ follow the same
 # contract - named after what happened, fired with an env-var contract - but
@@ -195,12 +198,48 @@ def run(event: str, env: Mapping[str, str] | None = None,
     return proc.pid
 
 
+def _example_bodies() -> list[tuple[str, str]]:
+    """(fname, body) pairs for every inert `.example` template, from one source:
+    the global hooks, the session-idle verification hook, the task-lifecycle
+    hooks, and one per opencode server event. The machine-level install and the
+    project-level scaffold both write from this list, so the copies cannot
+    drift."""
+    from . import opencode_events
+
+    bodies: list[tuple[str, str]] = []
+    for event, when in GLOBAL_HOOKS.items():
+        bodies.append((f"{event}.example",
+                       EXAMPLE_TEMPLATE.format(event=event, when=when)))
+    bodies.append(("session-idle.example",
+                   SESSION_IDLE_TEMPLATE.replace("{ext}", "example")))
+    for name, when in TASK_HOOKS.items():
+        bodies.append((f"{name}.example",
+                       TASK_HOOK_TEMPLATE.format(name=name, when=when,
+                                                 ext="example")))
+    for event, props in opencode_events.OPENCODE_EVENTS.items():
+        name = opencode_events.hook_name(event)
+        if name == "session-idle":
+            continue
+        bodies.append((f"{name}.example",
+                       event_hook_template(name, "example", event, props)))
+    return bodies
+
+
+def project_example_bodies() -> list[tuple[str, str]]:
+    """The project-relevant `.example` set (session-idle + the task-lifecycle
+    hooks + one per opencode server event), excluding the machine-level
+    GLOBAL_HOOKS advisory templates which are not per-project. Written into a
+    project's `.orchestration/hooks/` so a fresh repo's hook directory matches
+    the global one, with each sample carrying its env-var contract."""
+    global_names = {f"{e}.example" for e in GLOBAL_HOOKS}
+    return [(name, body) for name, body in _example_bodies()
+            if name not in global_names]
+
+
 def install_examples(force: bool = False) -> tuple[list[str], list[str]]:
     """Write an inert `.example` template for every global hook, the
     session-idle verification hook, every task-lifecycle hook, and every
     opencode server event. Returns (created, skipped) file names."""
-    from . import opencode_events
-
     created: list[str] = []
     skipped: list[str] = []
     d = config_dir()
@@ -213,19 +252,30 @@ def install_examples(force: bool = False) -> tuple[list[str], list[str]]:
         p.write_text(body)
         created.append(fname)
 
-    for event, when in GLOBAL_HOOKS.items():
-        write_example(f"{event}.example",
-                      EXAMPLE_TEMPLATE.format(event=event, when=when))
-    write_example("session-idle.example",
-                  SESSION_IDLE_TEMPLATE.replace("{ext}", "example"))
-    for name, when in TASK_HOOKS.items():
-        write_example(f"{name}.example",
-                      TASK_HOOK_TEMPLATE.format(name=name, when=when,
-                                                ext="example"))
-    for event, props in opencode_events.OPENCODE_EVENTS.items():
-        name = opencode_events.hook_name(event)
-        if name == "session-idle":
-            continue
-        write_example(f"{name}.example",
-                      event_hook_template(name, "example", event, props))
+    for fname, body in _example_bodies():
+        write_example(fname, body)
     return created, skipped
+
+
+def write_project_examples(target: Path, force: bool = False
+                           ) -> tuple[list[str], list[str]]:
+    """Write the project-relevant inert `.example` templates (session-idle, the
+    task-lifecycle hooks, and one per opencode server event - never the
+    machine-level GLOBAL_HOOKS) into `target/.orchestration/hooks/`. Each copy
+    is non-executable and stays gitignored (`.orchestration/.gitignore` already
+    ignores `*.example`). Returns (created, skipped) file names. Idempotent: an
+    existing file is skipped unless `force`."""
+    created: list[str] = []
+    skipped: list[str] = []
+    d = target / ".orchestration" / "hooks"
+    d.mkdir(parents=True, exist_ok=True)
+
+    for fname, body in project_example_bodies():
+        p = d / fname
+        if p.exists() and not force:
+            skipped.append(fname)
+            continue
+        p.write_text(body)
+        created.append(fname)
+    return created, skipped
+

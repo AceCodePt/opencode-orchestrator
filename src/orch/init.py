@@ -91,9 +91,11 @@ review and commit. A machine-wide cap across all projects lives outside the repo
 Reference templates for every hook live outside the repo in
 `~/.config/orch/hooks/*.example` (installed by `orch init`) — one per lifecycle
 hook, the `session-idle` verification hook, and one per opencode server event
-(the vocabulary in `src/orch/opencode_events.py`). They are inert until you copy
-one to its real name under `hooks/`, make it executable, and commit it. Nothing
-template-shaped is scaffolded into this directory.
+(the vocabulary in `src/orch/opencode_events.py`). On init, the project-relevant
+set of those `.example` references (session-idle, the five task-lifecycle hooks,
+and one per opencode server event) is also dropped into this `hooks/` directory,
+so the two match. They are inert and gitignored (`*.example` below), not real
+hooks: enabling one is still a copy-to-real-name, `chmod +x`, and commit.
 """
 
 
@@ -170,6 +172,12 @@ def scaffold(target: Path, version: str = "0", force: bool = False
     write(orch / ".gitignore", TEMPLATE_GITIGNORE)
     write(orch / ".version", version + "\n")
 
+    p_created, p_skipped = hooks.write_project_examples(target, force=force)
+    for name in p_created:
+        created.append(f".orchestration/hooks/{name}")
+    for name in p_skipped:
+        skipped.append(f".orchestration/hooks/{name}")
+
     g_created, g_skipped = hooks.install_examples(force=force)
     for name in g_created:
         created.append(f"global-hooks/{name}")
@@ -192,9 +200,10 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
         f"    - {name} - {when}" for name, when in TASK_HOOKS.items()
     )
     notes.append(
-        "hook templates are installed machine-level in ~/.config/orch/hooks/*.example - "
-        "nothing template-shaped is written into this repo. To enable one, copy it "
-        "to .orchestration/hooks/<name>, chmod +x, and commit it:\n"
+        "inert hook .example references are scaffolded into .orchestration/hooks/ "
+        "(session-idle, the task-lifecycle hooks, and one per opencode server event), "
+        "gitignored and non-executable. Enabling one is still a real copy-to-real-name, "
+        "chmod +x, and commit:\n"
         "    - session-idle - the verification hook: verify and, on a pass, commit the work. "
         "Nothing is verified until hooks/session-idle exists.\n"
         + project_hooks

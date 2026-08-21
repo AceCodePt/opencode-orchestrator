@@ -158,6 +158,39 @@ def test_install_examples_is_idempotent() -> None:
     print("ok: install_examples is idempotent and the examples are inert")
 
 
+def test_write_project_examples_matches_global_excluding_global_hooks() -> None:
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        cfg, _state = _env(tmp)
+        from orch import opencode_events
+        hooks.install_examples()
+        target = Path(tmp.name) / "proj"
+        (target / ".orchestration").mkdir(parents=True)
+        created, skipped = hooks.write_project_examples(target)
+        assert created and skipped == []
+        pdir = target / ".orchestration" / "hooks"
+        for g in hooks.GLOBAL_HOOKS:
+            assert not (pdir / f"{g}.example").exists(), \
+                "the machine-level GLOBAL_HOOKS advisory templates are not copied"
+        for name, _body in hooks.project_example_bodies():
+            p = pdir / name
+            assert p.exists(), name
+            assert not os.access(p, os.X_OK), f"{name} must be non-executable"
+        created2, skipped2 = hooks.write_project_examples(target)
+        assert created2 == [] and skipped2, \
+            "writing the project examples is idempotent"
+        assert len(skipped2) == len(hooks.project_example_bodies())
+        # the global dir and the project dir carry the same session-idle body
+        g_verify = (cfg / "orch" / "hooks" / "session-idle.example").read_text()
+        p_verify = (pdir / "session-idle.example").read_text()
+        assert g_verify == p_verify, "the copies must not drift"
+    finally:
+        tmp.cleanup()
+        _restore(saved)
+    print("ok: write_project_examples matches the global set minus GLOBAL_HOOKS")
+
+
 def test_opencode_event_examples_are_reference_templates() -> None:
     saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
     tmp = tempfile.TemporaryDirectory()

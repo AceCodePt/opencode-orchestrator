@@ -81,17 +81,31 @@ def test_init_writes_global_hook_examples() -> None:
     print("ok: orch init writes the global hook .example templates")
 
 
-def test_init_does_not_scaffold_project_samples() -> None:
+def test_init_scaffolds_project_example_references() -> None:
     saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
     tmp = tempfile.TemporaryDirectory()
     os.environ["XDG_CONFIG_HOME"] = tmp.name
     os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
     try:
+        from orch import hooks, opencode_events
         root, repo_tmp = _repo()
         r = init_mod.run(root)
         hooks_dir = root / ".orchestration" / "hooks"
-        assert list(hooks_dir.glob("*.sample")) == [], \
-            "no hook templates may be scaffolded into the repo"
+
+        names = [e + ".example" for e in hooks.TASK_HOOKS]
+        names.append("session-idle.example")
+        for e in opencode_events.OPENCODE_EVENTS:
+            n = opencode_events.hook_name(e)
+            if n != "session-idle":
+                names.append(n + ".example")
+        for n in names:
+            p = hooks_dir / n
+            assert p.exists(), f"project hook example not scaffolded: {n}"
+            assert not os.access(p, os.X_OK), f"{n} must be non-executable"
+        global_names = {f"{e}.example" for e in hooks.GLOBAL_HOOKS}
+        assert not any((hooks_dir / g).exists() for g in global_names), \
+            "the machine-level GLOBAL_HOOKS advisory templates are not copied"
+
         gi = (root / ".orchestration" / ".gitignore").read_text()
         assert "*.sample" in gi and "*.example" in gi, \
             "the repo-side gitignore must exclude every inert template"
@@ -110,7 +124,7 @@ def test_init_does_not_scaffold_project_samples() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    print("ok: orch init installs hook templates machine-level, never in the repo")
+    print("ok: orch init scaffolds inert .example references into .orchestration/hooks")
 
 
 def main() -> int:

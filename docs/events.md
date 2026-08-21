@@ -126,9 +126,12 @@ map holds the emitted vocabulary.
 stdin and `ORCH_EVENT=<dashed-name>` set. A session-scoped event fires its
 project hook in the worktree that owns the session; a copied executable global
 hook fires for every event. The vocabulary lives in `src/orch/opencode_events.py`
-and all templates come from one source, so they cannot drift. Nothing template-shaped
-is scaffolded into a repo; copy a template into `.orchestration/hooks/<name>`, make it
-executable, and commit it to enable it. One asymmetry: `session.idle` is the
+and all templates come from one source, so they cannot drift. On init the
+project-relevant `.example` references (session-idle, the lifecycle hooks, and one
+per opencode server event) are also scaffolded into the project's
+`.orchestration/hooks/`, gitignored and non-executable, matching the global set;
+copy one to its real name, make it executable, and commit it to enable it. One
+asymmetry: `session.idle` is the
 verification hook's name, so it keeps the verification template instead of a
 generic event one; globally, where there is no
 verification hook, it
