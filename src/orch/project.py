@@ -387,3 +387,61 @@ def clone(
                     "dispatch here")
 
     return result
+
+
+def base(common: Path | str, target_branch: str) -> CreateResult:
+    """Repoint an existing project's base branch onto <target_branch>: the
+    base worktree becomes the one checked out on <target_branch> and its
+    committed .orchestration/config.json records baseBranch=<target_branch>.
+    The branch must already exist (parity with clone's --base). The old base
+    branch and its worktree are left untouched as an ordinary checkout, and
+    trust is not modified."""
+    result = CreateResult(ok=True)
+    store = Path(common)
+    project = store.parent
+    branch = (target_branch or "").strip()
+
+    branches = _branches(store)
+    if branch not in branches:
+        return result.fail(
+            f"{branch!r} is not a branch in {store} (branches: "
+            + (", ".join(branches) if branches else "none")
+            + "). Create the branch in the store first.")
+    result.step(f"base branch: {branch}")
+
+    target = project / branch
+    if state._base_worktree(store, branch) is None:
+        rc, out = _run(["git", "-C", str(store), "worktree", "add",
+                        str(target), branch], cwd=project)
+        if rc != 0:
+            return result.fail(out or "git worktree add failed")
+        result.step(f"git worktree add {target.relative_to(project)} on "
+                    f"{branch} (base worktree)")
+    else:
+        result.step(f"worktree {target} already checked out on {branch}")
+
+    _set_base_branch(target, branch)
+
+    def commit(message: str) -> bool:
+        rc, out = _run(["git", "-C", str(target), "add", "-A"],
+                       cwd=project)
+        if rc != 0:
+            return result.fail(out or "git add failed") is None
+        rc, out = _run(["git", "-C", str(target), "-c", "user.name=orch",
+                        "-c", "user.email=orch@localhost", "commit", "-q",
+                        "-m", message], cwd=project)
+        if rc != 0:
+            return result.fail(out or "git commit failed") is None
+        result.step(message)
+        return True
+
+    rc, st = _run(["git", "-C", str(target), "status", "--porcelain"],
+                   cwd=project)
+    if rc == 0 and st:
+        if not commit(f"orch: base branch is now {branch}"):
+            return result
+    else:
+        result.step(f"baseBranch is already {branch} on {branch} - "
+                    "nothing to commit")
+
+    return result
