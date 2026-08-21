@@ -45,6 +45,14 @@ in one source file has one place to check.
   same shared server and cannot create a second claim — the branch is the claim.
 - **The base branch is excluded from the task set.** `main` is an integration branch,
   not a task; only branches other than base are claims.
+- **`project base` is clone-parity, and it is non-destructive.** Repointing an
+  existing project's base branch (`orch project base <branch>`) makes it behave as if
+  it had been cloned with `--base <branch>` — the same semantics, so there is one
+  rule for what the base branch means no matter how the project got it. The branch
+  must **already exist** (the command never auto-creates one) and the old base branch
+  is **not removed** — it stays in place as an ordinary checkout, which is a deliberate
+  choice: repointing changes only which branch is *base*, never the branch's existence.
+  It is a single per-project base repoint, not multi-environment support.
 - **Archived tasks still scan.** The spec moves to `archive/`, so `task list` shows
   them as archived rather than silently forgetting the project's history.
 - **The scan never writes** — it is the sensing half, safe to run when the daemon is
