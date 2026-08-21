@@ -82,6 +82,13 @@ def _clone_args(**kw) -> argparse.Namespace:
     return a
 
 
+def _base_args(**kw) -> argparse.Namespace:
+    a = argparse.Namespace(branch=None, directory=None)
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
 def _make_source(root: Path, name: str = "src", branch: str = "main",
                  with_orch: bool = False) -> str:
     """Build a real local git repo to clone from; returns its path."""
@@ -665,6 +672,70 @@ def test_cmd_project_clone_prompts_for_trust() -> None:
         cli.project_mod.clone = orig
         cli.sys.stdin = orig_stdin
     print("ok: interactive clone asks before trusting shipped orchestration")
+
+
+def test_parser_accepts_project_base_branch_and_directory() -> None:
+    p = cli.build_parser()
+    ns = p.parse_args(["project", "base", "feature-x", "-C", "/lab/demo"])
+    assert ns.cmd == "project"
+    assert ns.project_cmd == "base"
+    assert ns.func is cli.cmd_project_base
+    assert ns.branch == "feature-x"
+    assert ns.directory == "/lab/demo"
+    print("ok: `project base <branch> -C <dir>` parses")
+
+
+def test_cmd_project_base_calls_backend_and_returns_0() -> None:
+    captured: dict = {}
+    orig_base = cli.project_mod.base
+    orig_from_dir = cli.state.Project.from_dir
+    orig_stdin = cli.sys.stdin
+    cli.state.Project.from_dir = lambda start: state.Project(
+        common=Path("/lab/demo.git"), base="main")
+    cli.project_mod.base = lambda common, target_branch: captured.update(
+        common=str(common), branch=target_branch) or _Result()
+    cli.sys.stdin = _FakeTTY([], tty=False)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_base(
+                _base_args(branch="feature-x", directory="/lab/wt"))
+        assert rc == 0, rc
+        assert captured["branch"] == "feature-x"
+        assert captured["common"] == "/lab/demo.git"
+    finally:
+        cli.project_mod.base = orig_base
+        cli.state.Project.from_dir = orig_from_dir
+        cli.sys.stdin = orig_stdin
+    print("ok: `project base` drives the backend and returns 0 on success")
+
+
+def test_cmd_project_base_returns_1_on_unknown_branch() -> None:
+    orig_base = cli.project_mod.base
+    orig_from_dir = cli.state.Project.from_dir
+    orig_stdin = cli.sys.stdin
+    cli.state.Project.from_dir = lambda start: state.Project(
+        common=Path("/lab/demo.git"), base="main")
+
+    def bad_base(common, target_branch):
+        r = _Result()
+        r.ok = False
+        r.problems = ["'foo' is not a branch in /lab/demo.git"]
+        return r
+
+    cli.project_mod.base = bad_base
+    cli.sys.stdin = _FakeTTY([], tty=False)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_project_base(
+                _base_args(branch="foo", directory="/lab/wt"))
+        assert rc == 1, rc
+    finally:
+        cli.project_mod.base = orig_base
+        cli.state.Project.from_dir = orig_from_dir
+        cli.sys.stdin = orig_stdin
+    print("ok: `project base` returns 1 on an unknown branch")
 
 
 def test_clone_no_main_noninteractive_fails() -> None:
