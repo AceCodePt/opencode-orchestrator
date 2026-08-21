@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 # The opencode server's event vocabulary (event name -> property names). This is
-# the single source of truth for the per-event hook samples `orch init` scaffolds
-# (project hooks/*.sample and global ~/.config/orch/hooks/*.example). Extracted
+# the single source of truth for the per-event hook templates `orch init` installs
+# (machine-level ~/.config/orch/hooks/*.example). Extracted
 # from the server's /doc OpenAPI document plus a live SSE stream (docs/events.md).
 # `server.heartbeat` has no schema; it was observed on the wire.
 

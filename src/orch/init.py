@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .hooks import TASK_HOOKS
+
 TEMPLATE_CONFIG = {
     "$comment": (
         "Project knowledge only. Anything here that every project would copy "
@@ -29,44 +31,12 @@ TEMPLATE_CONFIG = {
     },
 }
 
-TEMPLATE_GITIGNORE = """# Generated scaffolding and runtime state, not project intent.
-# Real hooks (a copy of hooks/*.sample made executable and committed) ARE tracked;
-# only the inert samples are ignored.
+TEMPLATE_GITIGNORE = """# Inert template files and runtime state, not project intent.
+# Real hooks (a copy of a machine-level template committed as .orchestration/hooks/<name>)
+# ARE tracked; only the inert .sample/.example templates are ignored.
 .state/
-hooks/*.sample
-"""
-
-TEMPLATE_SESSION_IDLE_SAMPLE = """#!/usr/bin/env bash
-# session-idle.sample - what "verify" means for this project.
-#
-# Copy this file to hooks/session-idle, make it executable, and commit it to
-# enable verification. Only the version committed on the base branch runs - edit,
-# then commit, before dispatching.
-#
-# Contract (full version in .orchestration/README.md): the agent declares a task
-# done by committing its work to the branch. This hook verifies that committed
-# work; exit 0 passes and commits anything the agent left uncommitted, non-zero
-# fails and everything written to stdout/stderr is fed back to the agent as its
-# next instructions.
-
-set -euo pipefail
-cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
-
-# Put this project's real checks above the commit block, e.g. `pnpm check && pnpm test`.
-# `set -e` aborts on the first failing command, and the output becomes the agent's
-# next instructions, so keep it useful and bounded.
-echo "no verification configured yet - edit .orchestration/hooks/session-idle" >&2
-exit 1
-
-# Verification passed: commit the work (idempotent - the agent usually committed
-# already, so an empty tree has nothing to commit, and it still passes so the
-# daemon can re-run it safely).
-if [ -n "$(git status --porcelain)" ]; then
-  git add -A
-  git -c user.name=orch -c user.email=orch@localhost \\
-      commit -q -m "orch: session-idle verification passed"
-fi
-exit 0
+*.sample
+*.example
 """
 
 TEMPLATE_README = """# `.orchestration/`
@@ -96,10 +66,11 @@ absence is the implicit unverified state.
 
 The verification hook that runs is the version **committed on the base branch**, never the
 working-tree copy, so edit the hook and commit it before dispatching. To configure
-it, copy `hooks/session-idle.sample` to `hooks/session-idle`, make it executable,
+it, copy the machine-level `session-idle` template (`~/.config/orch/hooks/session-idle.example`)
+to `hooks/session-idle`, make it executable,
 and put the project's real checks above the commit block (e.g.
 `pnpm check && pnpm test`, `cargo clippy -- -D warnings && cargo test`,
-`ruff check . && pytest -q`); the sample exits non-zero on purpose until then.
+`ruff check . && pytest -q`); the template exits non-zero on purpose until then.
 
 A project with no database legitimately needs no `post-task-create`. Absent hooks
 are fine, and so is a missing `session-idle`: it means the project's tasks are
@@ -117,39 +88,12 @@ authority: `orch project scheduler <n>` writes the working-tree copy for you to
 review and commit. A machine-wide cap across all projects lives outside the repo in
 `~/.config/orch/daemon.json` (`orch daemon budget`).
 
-Reference samples for the hooks live in `hooks/*.sample` — inert until
-you copy one to its real name, make it executable, and commit it. The
-`session-idle.sample` is the verification hook template: copy it to `hooks/session-idle` for
-the daemon to verify anything at all.
-
-The remaining `hooks/*.sample` files are one per opencode server event
-(the vocabulary in `src/orch/opencode_events.py`), fired by the daemon's SSE
-consumer when the server emits that event — the event's JSON arrives on stdin.
-Copy one to its real name, make it executable, and commit it to react to the
-event. `session.idle` has no event sample here — that name is the verification
-hook, so it keeps the verification template above.
-"""
-
-TASK_HOOKS = {
-    "pre-task-create": "before the task worktree is created, from the dispatching "
-                       "worktree; non-zero refuses the dispatch",
-    "post-task-create": "right after the task worktree is created, from the new "
-                        "worktree",
-    "pre-task-cleanup": "before the task worktree is removed at teardown",
-    "post-task-cleanup": "after the worktree and branch are gone",
-    "pre-branch-delete": "before the task branch is deleted",
-}
-
-
-TEMPLATE_HOOK_SAMPLE = """#!/usr/bin/env bash
-# {name}.sample - {when}.
-# Copy this file to hooks/{name}, make it executable, and commit it to enable.
-# Fired with TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME  BASE_BRANCH.
-# Exit 0 lets the event proceed; non-zero aborts it and the failure is logged.
-
-set -uo pipefail
-echo "{name} (sample): no-op"
-exit 0
+Reference templates for every hook live outside the repo in
+`~/.config/orch/hooks/*.example` (installed by `orch init`) — one per lifecycle
+hook, the `session-idle` verification hook, and one per opencode server event
+(the vocabulary in `src/orch/opencode_events.py`). They are inert until you copy
+one to its real name under `hooks/`, make it executable, and commit it. Nothing
+template-shaped is scaffolded into this directory.
 """
 
 
@@ -197,8 +141,8 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
 
 def scaffold(target: Path, version: str = "0", force: bool = False
              ) -> tuple[list[str], list[str]]:
-    """Write the .orchestration scaffolding (and machine-level global-hook
-    examples) into `target`, which need not be a git worktree. Returns
+    """Write the .orchestration scaffolding (config, README, .gitignore, version)
+    into `target`, and install the machine-level hook templates. Returns
     (created, skipped) relative paths. Does no repo resolution and no trust -
     the caller decides what to do with the files (e.g. `project create` commits
     them straight into a bare store)."""
@@ -206,7 +150,6 @@ def scaffold(target: Path, version: str = "0", force: bool = False
     skipped: list[str] = []
 
     from . import hooks
-    from . import opencode_events
 
     orch = target / ".orchestration"
     hooks_dir = orch / "hooks"
@@ -225,17 +168,6 @@ def scaffold(target: Path, version: str = "0", force: bool = False
     write(orch / "README.md", TEMPLATE_README)
     write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
     write(orch / ".gitignore", TEMPLATE_GITIGNORE)
-    write(hooks_dir / "session-idle.sample", TEMPLATE_SESSION_IDLE_SAMPLE)
-    for name, when in TASK_HOOKS.items():
-        write(hooks_dir / f"{name}.sample", TEMPLATE_HOOK_SAMPLE.format(
-            name=name, when=when))
-    for event, props in opencode_events.OPENCODE_EVENTS.items():
-        name = opencode_events.hook_name(event)
-        if name == "session-idle":
-            continue
-        write(hooks_dir / f"{name}.sample",
-              hooks.event_hook_template(name, "sample", event, props,
-                                        commit=True))
     write(orch / ".version", version + "\n")
 
     g_created, g_skipped = hooks.install_examples(force=force)
@@ -260,16 +192,17 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
         f"    - {name} - {when}" for name, when in TASK_HOOKS.items()
     )
     notes.append(
-        "project hooks scaffold as hooks/*.sample, inert until copied to the "
-        "real name, made executable, and committed:\n"
+        "hook templates are installed machine-level in ~/.config/orch/hooks/*.example - "
+        "nothing template-shaped is written into this repo. To enable one, copy it "
+        "to .orchestration/hooks/<name>, chmod +x, and commit it:\n"
         "    - session-idle - the verification hook: verify and, on a pass, commit the work. "
         "Nothing is verified until hooks/session-idle exists.\n"
         + project_hooks
     )
     notes.append(
-        f"one sample per opencode server event is scaffolded too "
-        f"({len(opencode_events.OPENCODE_EVENTS) - 1} in hooks/*.sample; "
-        "session-idle is the verification hook above). The daemon's SSE consumer fires the "
+        "the templates cover one hook per opencode server event too "
+        f"({len(opencode_events.OPENCODE_EVENTS) - 1} event templates; "
+        "session-idle keeps the verification template above). The daemon's SSE consumer fires the "
         "real hook when the server emits the event, with the event's JSON on "
         "stdin; the vocabulary lives in src/orch/opencode_events.py."
     )
@@ -286,8 +219,8 @@ def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
     )
 
     notes.append(
-        "the scaffolded session-idle.sample exits non-zero on purpose: an "
-        "unconfigured verification hook must not report success. Copy it to hooks/session-idle "
+        "the session-idle template exits non-zero on purpose: an "
+        "unconfigured verification hook must not report success. Copy it to .orchestration/hooks/session-idle "
         "and edit it before dispatching real work."
     )
     notes.append(

@@ -104,13 +104,20 @@ def check_project(cwd: Path) -> list[Check]:
             Check(OK, "task hooks absent (fine)",
                   ", ".join(missing_task) + " - a project with no database needs none")
         )
-    samples = sorted(p.name for p in hooks_dir.glob("*.sample"))
-    if samples:
-        shown = ", ".join(samples[:8])
-        extra = f" and {len(samples) - 8} more" if len(samples) > 8 else ""
+    templates = sorted(p.name for p in hooks.config_dir().glob("*.example"))
+    if templates:
+        shown = ", ".join(templates[:8])
+        extra = f" and {len(templates) - 8} more" if len(templates) > 8 else ""
         out.append(
-            Check(OK, "hook samples present (inert)",
-                  shown + extra + " - copy one to its real name to enable it")
+            Check(OK, f"hook templates installed ({len(templates)})",
+                  shown + extra + " - copy one into .orchestration/hooks/<name> "
+                  "and commit it to enable it")
+        )
+    else:
+        out.append(
+            Check(WARN, "no hook templates installed",
+                  "run `orch init` to install the .example templates machine-level "
+                  "in ~/.config/orch/hooks/")
         )
     return out
 
@@ -229,9 +236,9 @@ def check_verification(cwd: Path) -> list[Check]:
     if not findings:
         out.append(Check(
             OK, "no verification hook",
-            "tasks are accepted without verification. To verify, copy "
-            "hooks/session-idle.sample to hooks/session-idle, make it executable, "
-            "and commit it on the base branch",
+            "tasks are accepted without verification. To verify, copy the "
+            "machine-level template ~/.config/orch/hooks/session-idle.example to "
+            "hooks/session-idle, make it executable, and commit it on the base branch",
         ))
         return out
     for f in findings:

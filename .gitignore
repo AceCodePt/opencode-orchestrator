@@ -6,5 +6,7 @@ __pycache__/
 # orch runtime state (not intent)
 .orchestration/.state/
 
-# sample hooks scaffolded by `orch init` (a real hook is a copy committed as hooks/<name>)
-.orchestration/hooks/*.sample
+# inert hook templates are never tracked; a real hook is a copy of a
+# machine-level template committed as .orchestration/hooks/<name>
+*.sample
+*.example

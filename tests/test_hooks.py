@@ -130,19 +130,26 @@ def test_install_examples_is_idempotent() -> None:
     try:
         cfg, _state = _env(tmp)
         from orch import opencode_events
-        n_events = len(opencode_events.OPENCODE_EVENTS)
         created, skipped = hooks.install_examples()
         assert created, "the first init writes the examples"
         assert skipped == []
-        assert all((cfg / "orch" / "hooks" / f"{e}.example").exists()
+        hooks_dir = cfg / "orch" / "hooks"
+        assert all((hooks_dir / f"{e}.example").exists()
                    for e in hooks.GLOBAL_HOOKS)
-        assert all(
-            (cfg / "orch" / "hooks" / f"{opencode_events.hook_name(e)}.example").exists()
-            for e in opencode_events.OPENCODE_EVENTS
-        )
+        assert all((hooks_dir / f"{t}.example").exists()
+                   for t in hooks.TASK_HOOKS)
+        assert (hooks_dir / "session-idle.example").exists(), \
+            "the session-idle verification template must be installed"
+        for e in opencode_events.OPENCODE_EVENTS:
+            name = opencode_events.hook_name(e)
+            if name == "session-idle":
+                continue
+            assert (hooks_dir / f"{name}.example").exists(), e
+        n_files = (len(hooks.GLOBAL_HOOKS) + len(hooks.TASK_HOOKS)
+                   + len(opencode_events.OPENCODE_EVENTS))
         created2, skipped2 = hooks.install_examples()
         assert created2 == [] and skipped2
-        assert len(skipped2) == len(hooks.GLOBAL_HOOKS) + n_events
+        assert len(skipped2) == n_files
         # examples are inert: not executable, and not a fired event name
         assert hooks.run("alert", {}) is None
     finally:
@@ -158,12 +165,18 @@ def test_opencode_event_examples_are_reference_templates() -> None:
         cfg, _state = _env(tmp)
         from orch import opencode_events
         hooks.install_examples()
-        p = cfg / "orch" / "hooks" / "permission-asked.example"
+        hooks_dir = cfg / "orch" / "hooks"
+        p = hooks_dir / "permission-asked.example"
         body = p.read_text()
         assert "permission.asked" in body, "the example documents its event type"
         assert "SSE consumer" in body, "an event example must describe its firing"
         assert "stdin" in body, "an event example must document the payload channel"
-        assert hooks.run("permission-asked", {}) is None, "examples stay inert"
+        verify = (hooks_dir / "session-idle.example").read_text()
+        assert "no verification configured" in verify and "commit" in verify, \
+            "session-idle.example must be the verification template, not an event one"
+        pre = (hooks_dir / "pre-task-create.example").read_text()
+        assert "pre-task-create" in pre and "TASK_NAME" in pre, \
+            "task-lifecycle templates must be installed with the fired env contract"
     finally:
         tmp.cleanup()
         _restore(saved)

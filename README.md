@@ -9,7 +9,7 @@ project-owned verification hook, and merges it — unattended, with no database 
 
 `orch` is a **globally installed tool** — one CLI and one daemon per machine. Projects
 keep a small tracked `.orchestration/` directory holding only what that project knows
-(the verification hook, hook samples, and config), and nothing is installed into the project's
+(the verification hook and config), and nothing is installed into the project's
 `.opencode/`.
 
 The state is the repo. Tasks are derived from git — `tasks/<name>/task.md` declares a
@@ -44,7 +44,7 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                    # scaffold .orchestration/ (config + verification hook template + a hook sample per opencode event) and trust the project
+bin/orch init                     # scaffold .orchestration/ (config + docs + ignore rules) and install the machine-level hook templates; takes the project's trust
 bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
 bin/orch project clone <url>      # clone an existing repo into orch's layout (bare store + base worktree); initializes it if it has no .orchestration, otherwise trusts only with --trust
 bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
@@ -215,8 +215,9 @@ intake is a conversation: `orch attach` (or any opencode session in the
 base worktree) turns an idea — or a whole pasted spec — into `tasks/<name>/task.md`
 specs via the machine's `create_task` custom tool, for you to review and commit. Both
 commands leave the project on the
-base worktree with the fail-closed verification hook; copy `.orchestration/hooks/session-idle.sample`
-to `hooks/session-idle` and edit it to real checks before dispatching, and keep the
+base worktree with the fail-closed verification hook; copy the machine-level template
+`~/.config/orch/hooks/session-idle.example` to `hooks/session-idle` and edit it to real checks
+before dispatching, and keep the
 project under `$HOME`/`/mnt`
 (`ORCH_ROOTS`) so the daemon supervises it.
 
@@ -444,8 +445,8 @@ Not built yet: routing `needs-review` onwards or unblocking a parent agent.
 
 The per-event hooks are live: the daemon's SSE consumer reads the server's
 `GET /event` stream and fires a copied, executable hook per event type in
-`src/orch/opencode_events.py` (project `hooks/*.sample` and global
-`hooks/*.example`), with the event JSON on stdin.
+`src/orch/opencode_events.py` (templated machine-level as `~/.config/orch/hooks/*.example`),
+with the event JSON on stdin.
 
 When an agent needs you, `orch` *exposes* it — `orch task list` shows blocked and
 `needs-review` tasks from the scan, `orch task list --global` gathers that from
@@ -459,7 +460,7 @@ the phone add-on in `~/stuff/phone-approval` (`notify-phone` → Termux) polls
 
 Tests: `for t in tests/test_*.py; do python3 "$t"; done`.
 
-The opencode-event hook samples are covered by unit tests too: `tests/test_opencode_events.py`
+The opencode-event hook templates are covered by unit tests too: `tests/test_opencode_events.py`
 sanity-checks the catalog — well-formed event names, unique dots-to-dashes hook names, and no
 collisions with the lifecycle or global hooks. The SSE consumer itself is covered by
 `tests/test_sse.py`: stream parsing, global + project hook firing, session routing, and the

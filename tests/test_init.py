@@ -81,26 +81,27 @@ def test_init_writes_global_hook_examples() -> None:
     print("ok: orch init writes the global hook .example templates")
 
 
-def test_init_scaffolds_opencode_event_samples() -> None:
+def test_init_does_not_scaffold_project_samples() -> None:
     saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
     tmp = tempfile.TemporaryDirectory()
     os.environ["XDG_CONFIG_HOME"] = tmp.name
     os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
     try:
         root, repo_tmp = _repo()
-        from orch import opencode_events
         r = init_mod.run(root)
         hooks_dir = root / ".orchestration" / "hooks"
-        for event in ("permission.asked", "session.next.tool.called",
-                      "session.status"):
-            name = opencode_events.hook_name(event)
-            assert (hooks_dir / f"{name}.sample").exists(), r.created
-        sample = (hooks_dir / "session-idle.sample").read_text()
-        assert "session-idle" in sample and "commit" in sample, \
-            "session.idle must keep the verification hook sample, not a generic event one"
-        assert "permission.asked" in (hooks_dir / "permission-asked.sample").read_text()
+        assert list(hooks_dir.glob("*.sample")) == [], \
+            "no hook templates may be scaffolded into the repo"
+        gi = (root / ".orchestration" / ".gitignore").read_text()
+        assert "*.sample" in gi and "*.example" in gi, \
+            "the repo-side gitignore must exclude every inert template"
+        cfg_hooks = Path(tmp.name) / "orch" / "hooks"
+        assert (cfg_hooks / "session-idle.example").exists(), r.created
+        verify = (cfg_hooks / "session-idle.example").read_text()
+        assert "no verification configured" in verify and "commit" in verify, \
+            "the machine-level session-idle template must be the verification one"
         r2 = init_mod.run(root)
-        assert not r2.created, "a second init skips the existing samples"
+        assert not r2.created, "a second init skips the existing examples"
         repo_tmp.cleanup()
     finally:
         tmp.cleanup()
@@ -109,7 +110,7 @@ def test_init_scaffolds_opencode_event_samples() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    print("ok: orch init scaffolds an inert sample per opencode event")
+    print("ok: orch init installs hook templates machine-level, never in the repo")
 
 
 def main() -> int:

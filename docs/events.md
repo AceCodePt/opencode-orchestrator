@@ -119,15 +119,17 @@ map holds the emitted vocabulary.
 
 ## Hooks for these events
 
-`orch init` scaffolds one hook sample per event type — `hooks/<event>.sample`
-(project) and `~/.config/orch/hooks/<event>.example` (global), dots mapped to
-dashes (`session.idle` → `session-idle`). The daemon's SSE consumer reads
+`orch init` installs one inert hook template per event type —
+`~/.config/orch/hooks/<event>.example`, dots mapped to dashes
+(`session.idle` → `session-idle`). The daemon's SSE consumer reads
 `GET /event` and fires the copied hook for each event, with the event's JSON on
 stdin and `ORCH_EVENT=<dashed-name>` set. A session-scoped event fires its
 project hook in the worktree that owns the session; a copied executable global
 hook fires for every event. The vocabulary lives in `src/orch/opencode_events.py`
-and the project and global samples come from one template, so they cannot drift.
-One asymmetry: `session.idle` is the verification hook's name, so in a project it
-keeps the verification sample instead of a generic event one; globally, where there
-is no verification hook, it
+and all templates come from one source, so they cannot drift. Nothing template-shaped
+is scaffolded into a repo; copy a template into `.orchestration/hooks/<name>`, make it
+executable, and commit it to enable it. One asymmetry: `session.idle` is the
+verification hook's name, so it keeps the verification template instead of a
+generic event one; globally, where there is no
+verification hook, it
 still gets an event example.

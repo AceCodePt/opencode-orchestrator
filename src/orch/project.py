@@ -18,6 +18,8 @@ dist/
 build/
 .DS_Store
 *.log
+*.sample
+*.example
 """
 
 

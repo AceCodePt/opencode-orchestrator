@@ -1048,11 +1048,7 @@ def cmd_project_create(args: argparse.Namespace) -> int:
         print(f"  ! {p}", file=sys.stderr)
     if not r.ok:
         return 1
-    print("\nnext:")
-    print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit")
-    print('  bin/orch attach                      # attach the interactive TUI to the primary agent, or to a task\'s session from its worktree')
-    print("  bin/orch server start && bin/orch install && bin/orch doctor")
-    print("  bin/orch task list && bin/orch task start <name>")
+    print("\nnext: bin/orch server start")
     return 0
 
 
@@ -1134,12 +1130,7 @@ def cmd_project_clone(args: argparse.Namespace) -> int:
         print(f"  ! {p}", file=sys.stderr)
     if not r.ok:
         return 1
-    print("\nnext:")
-    print("  copy .orchestration/hooks/session-idle.sample to hooks/session-idle, edit to this project's real checks, then commit (if the clone was initialized)")
-    print("  bin/orch verify                 # can this project's verification hook be trusted")
-    print("  bin/orch project trust          # let the daemon act on an untrusted clone")
-    print("  bin/orch server start && bin/orch install && bin/orch doctor")
-    print("  bin/orch task list && bin/orch task start <name>")
+    print("\nnext: bin/orch server start")
     return 0
 
 

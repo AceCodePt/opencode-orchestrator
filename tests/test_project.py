@@ -370,9 +370,9 @@ def test_create_produces_a_bare_store_and_base_worktree() -> None:
                 rc, st = project._run(["git", "-C", str(target), "status",
                                        "--porcelain"])
                 assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
-                assert (target / ".orchestration" / "hooks"
-                        / "session-idle.sample").is_file(), \
-                    "the born worktree must hold the gitignored hook templates"
+                assert not list((target / ".orchestration" / "hooks"
+                                 ).glob("*.sample")), \
+                    "the born worktree must hold no inert hook templates"
                 assert str(store) in state.discover_projects([tmp]), \
                     "discovery must map the bare store to the base worktree"
                 assert state.is_trusted(store), \
@@ -404,8 +404,8 @@ def test_cmd_project_create_prints_next_steps() -> None:
             rc = cli.cmd_project_create(_args(name="demo"))
         out = buf.getvalue()
         assert rc == 0, rc
-        assert "git init" in out and "next:" in out
-        assert "orch attach" in out
+        assert "git init" in out and "next: bin/orch server start" in out
+        assert "server start" in out
     finally:
         cli.project_mod.create = orig
         cli.sys.stdin = orig_stdin
@@ -740,9 +740,9 @@ def test_clone_produces_a_bare_store_and_base_worktree() -> None:
             assert rc == 0 and st == "", f"worktree must be clean: {st!r}"
             assert (target / "README.md").read_text() == "# source\n", \
                 "the repo's own content is preserved"
-            assert (target / ".orchestration" / "hooks"
-                    / "session-idle.sample").is_file(), \
-                "the born worktree must hold the gitignored hook templates"
+            assert not list((target / ".orchestration" / "hooks"
+                                     ).glob("*.sample")), \
+                "the born worktree must hold no inert hook templates"
             rc, origin = project._run(["git", "-C", str(store), "remote",
                                        "get-url", "origin"])
             assert rc == 0 and origin == src, \

@@ -7,13 +7,17 @@ from pathlib import Path
 
 from . import server
 
-# Machine-level notification hooks. Same contract as the project hooks in
-# .orchestration/hooks/ - named after what happened, executable, fired with an
-# env-var contract - but global: they live in ~/.config/orch/hooks/, belong to
-# the machine owner, and cannot be edited by any project's agent.
+# Hook templates live here, machine-level, in ~/.config/orch/hooks/*.example:
+# every notification hook, the session-idle verification hook, the task-lifecycle
+# hooks, and one per opencode server event. They are inert - you copy one into a
+# project's .orchestration/hooks/<name>, make it executable, and commit it.
+# Nothing hooks-related is ever scaffolded into a repo.
 #
-# Unlike the project verification hook, they are advisory: fired detached and async, a
-# non-zero exit (or a missing hook) never blocks the daemon or the CLI.
+# The executable copies in a project's .orchestration/hooks/ follow the same
+# contract - named after what happened, fired with an env-var contract - but
+# unlike the machine-level notification hooks (advisory: fired detached and async,
+# a non-zero exit never blocks the daemon or the CLI), the project hooks run from
+# the committed base-branch copy and can gate the workflow.
 
 GLOBAL_HOOKS = {
     "alert": "a task is blocked on a permission/question (or a project is untrusted)",
@@ -29,6 +33,61 @@ GLOBAL_HOOKS = {
     "archived": "a task was closed and archived",
 }
 
+TASK_HOOKS = {
+    "pre-task-create": "before the task worktree is created, from the dispatching "
+                      "worktree; non-zero refuses the dispatch",
+    "post-task-create": "right after the task worktree is created, from the new "
+                        "worktree",
+    "pre-task-cleanup": "before the task worktree is removed at teardown",
+    "post-task-cleanup": "after the worktree and branch are gone",
+    "pre-branch-delete": "before the task branch is deleted",
+}
+
+SESSION_IDLE_TEMPLATE = """#!/usr/bin/env bash
+# session-idle.{ext} - what "verify" means for this project.
+#
+# Copy this file to .orchestration/hooks/session-idle, make it executable, and
+# commit it to enable verification. Only the version committed on the base branch
+# runs - edit, then commit, before dispatching.
+#
+# Contract (full version in .orchestration/README.md): the agent declares a task
+# done by committing its work to the branch. This hook verifies that committed
+# work; exit 0 passes and commits anything the agent left uncommitted, non-zero
+# fails and everything written to stdout/stderr is fed back to the agent as its
+# next instructions.
+
+set -euo pipefail
+cd "${WORKTREE_PATH:-$(git rev-parse --show-toplevel)}" || exit 1
+
+# Put this project's real checks above the commit block, e.g. `pnpm check && pnpm test`.
+# `set -e` aborts on the first failing command, and the output becomes the agent's
+# next instructions, so keep it useful and bounded.
+echo "no verification configured yet - edit .orchestration/hooks/session-idle" >&2
+exit 1
+
+# Verification passed: commit the work (idempotent - the agent usually committed
+# already, so an empty tree has nothing to commit, and it still passes so the
+# daemon can re-run it safely).
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A
+  git -c user.name=orch -c user.email=orch@localhost \\
+      commit -q -m "orch: session-idle verification passed"
+fi
+exit 0
+"""
+
+TASK_HOOK_TEMPLATE = """#!/usr/bin/env bash
+# {name}.{ext} - {when}.
+# Copy this file to .orchestration/hooks/{name}, make it executable, and commit
+# it to enable. Fired with TASK_NAME  BRANCH_NAME  WORKTREE_PATH  WORKTREE_NAME
+# BASE_BRANCH. Exit 0 lets the event proceed; non-zero aborts it and the failure
+# is logged.
+
+set -uo pipefail
+echo "{name} ({ext}): no-op"
+exit 0
+"""
+
 EXAMPLE_TEMPLATE = """#!/usr/bin/env bash
 # {event}.example - {when}.
 # Copy this file to hooks/{event} (same directory), make it executable, and the
@@ -43,19 +102,17 @@ echo "{event} (example): no-op"
 exit 0
 """
 
-def event_hook_template(name: str, ext: str, event: str, props: str,
-                        commit: bool) -> str:
-    """One reference template for an opencode server event, shared by the
-    project hooks/*.sample (`commit=True`) and the global
-    ~/.config/orch/hooks/*.example (`commit=False`) so the two cannot drift.
-    The daemon's SSE consumer fires the real hook when the server emits the
-    event, with the event's JSON on stdin."""
-    enable = " and commit it" if commit else ""
+def event_hook_template(name: str, ext: str, event: str, props: str) -> str:
+    """One reference template for an opencode server event, installed machine-level
+    as ~/.config/orch/hooks/{name}.example (and shared with nothing else - the
+    template is the single source). The daemon's SSE consumer fires the real hook
+    when the server emits the event, with the event's JSON on stdin."""
     return f"""#!/usr/bin/env bash
 # {name}.{ext} - opencode server event "{event}".
 # The daemon's SSE consumer fires this when the server emits "{event}": copy this
-# file to hooks/{name}, make it executable{enable}. The event arrives as JSON on
-# stdin, with ORCH_EVENT={name} (plus session/project env when one applies).
+# file to .orchestration/hooks/{name}, make it executable, and commit it. The
+# event arrives as JSON on stdin, with ORCH_EVENT={name} (plus session/project env
+# when one applies).
 # Fire-and-forget: a non-zero exit is logged to ~/.local/state/orch, never
 # blocking the stream.
 # Properties: {props}
@@ -139,29 +196,36 @@ def run(event: str, env: Mapping[str, str] | None = None,
 
 
 def install_examples(force: bool = False) -> tuple[list[str], list[str]]:
-    """Write an inert `.example` template for every documented global hook and
-    every opencode server event. Returns (created, skipped) file names."""
+    """Write an inert `.example` template for every global hook, the
+    session-idle verification hook, every task-lifecycle hook, and every
+    opencode server event. Returns (created, skipped) file names."""
     from . import opencode_events
 
     created: list[str] = []
     skipped: list[str] = []
     d = config_dir()
-    for event, when in GLOBAL_HOOKS.items():
-        name = f"{event}.example"
-        p = d / name
-        if p.exists() and not force:
-            skipped.append(name)
-            continue
-        p.write_text(EXAMPLE_TEMPLATE.format(event=event, when=when))
-        created.append(name)
-    for event, props in opencode_events.OPENCODE_EVENTS.items():
-        name = opencode_events.hook_name(event)
-        fname = f"{name}.example"
+
+    def write_example(fname: str, body: str) -> None:
         p = d / fname
         if p.exists() and not force:
             skipped.append(fname)
-            continue
-        p.write_text(event_hook_template(name, "example", event, props,
-                                         commit=False))
+            return
+        p.write_text(body)
         created.append(fname)
+
+    for event, when in GLOBAL_HOOKS.items():
+        write_example(f"{event}.example",
+                      EXAMPLE_TEMPLATE.format(event=event, when=when))
+    write_example("session-idle.example",
+                  SESSION_IDLE_TEMPLATE.replace("{ext}", "example"))
+    for name, when in TASK_HOOKS.items():
+        write_example(f"{name}.example",
+                      TASK_HOOK_TEMPLATE.format(name=name, when=when,
+                                                ext="example"))
+    for event, props in opencode_events.OPENCODE_EVENTS.items():
+        name = opencode_events.hook_name(event)
+        if name == "session-idle":
+            continue
+        write_example(f"{name}.example",
+                      event_hook_template(name, "example", event, props))
     return created, skipped

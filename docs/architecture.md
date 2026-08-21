@@ -249,23 +249,24 @@ unverified project.
 
 - `hooks/session-idle` — the verification hook: verify, and on success commit the
   work. The daemon fires it on settle; the CLI fires it via `orch verify --run`. `orch init`
-  scaffolds
-  `hooks/session-idle.sample` — inert until copied to the real name, made
+  installs the template machine-level as
+  `~/.config/orch/hooks/session-idle.example` — inert until copied to the real name, made
   executable, and committed.
 - Lifecycle hooks: `pre-task-create`, `post-task-create`, `pre-task-cleanup`,
-  `pre-branch-delete`, `post-task-cleanup`. `orch init` scaffolds git-style
-  `hooks/*.sample` references for all five — inert until copied to the real name,
+  `pre-branch-delete`, `post-task-cleanup`. `orch init` installs one inert
+  `~/.config/orch/hooks/*.example` template per hook — inert until copied to the real name,
   made executable, and committed. Like the verification hook, they run the version
   **committed on
   the base branch** (never a working-tree edit or a hook committed only on a task
   branch), so an agent cannot change what runs at cleanup by editing a hook.
-- One `hooks/*.sample` per opencode server event (the vocabulary in
+- One `~/.config/orch/hooks/<event>.example` template per opencode server event (the
+  vocabulary in
   `src/orch/opencode_events.py`, the single source of truth). The daemon's SSE
   consumer reads the shared server's `GET /event` stream and fires a copied,
   executable hook for each event, with the event's JSON on stdin and
   `ORCH_EVENT=<dashed-name>` set; a session-scoped event also fires in the
-  worktree that owns the session. `session.idle` is the one project-side
-  exception: that name is the verification hook, so it keeps the verification sample.
+  worktree that owns the session. `session.idle` is the one exception:
+  that name is the verification hook, so it keeps the verification template.
 - `config.json` — `baseBranch`, `verify.retryCap`, `scheduler`
   (`enabled`/`maxConcurrent`). Like the verification hook, the **committed copy on
   the base branch**

@@ -215,29 +215,31 @@ in one source file has one place to check.
 - **The scaffolded verification hook is fail-closed** and documents the contract:
   on pass it
   commits the work (idempotently); on failure the output is fed back by the daemon.
-  `orch init` writes it as `hooks/session-idle.sample`, inert until the project
-  copies it to the real name and commits it — the same opt-in contract as the
-  lifecycle hooks.
+  `orch init` installs it machine-level as `~/.config/orch/hooks/session-idle.example`,
+  inert until the project copies it to `hooks/session-idle`, makes it executable, and
+  commits it — the same opt-in contract as the lifecycle hooks.
 - **A bare target is refused, not silently written beside.** Hook definitions must
   live inside a worktree and be tracked.
-- **Samples are never a verification hook.** `orch init` writes every hook as an
-  inert `*.sample`; a project has no verification hook at all until it copies one
-  to the real name,
+- **Templates are never hooks.** `orch init` writes every template as an inert
+  `*.example` in `~/.config/orch/hooks/`; nothing template-shaped is ever scaffolded
+  into a repo, and `.gitignore` rules (`*.sample`, `*.example`) keep even copied-in
+  template files untracked. A project has no verification hook at all until it copies
+  a template to the real name,
   makes it executable, and commits it. Nothing is overwritten without `--force`.
 - **Every opencode event gets a hook, and the daemon fires it from the SSE stream.**
-  `orch init` scaffolds one hook per event type (project `.sample` + global
-  `.example`), dots mapped to dashes, from `src/orch/opencode_events.py` — the
+  `orch init` installs one template per event type (machine-level `.example`),
+  dots mapped to dashes, from `src/orch/opencode_events.py` — the
   single source of truth for the vocabulary, replacing `docs/events-raw.tsv`;
-  with nothing left to mirror there is no drift test. The project and global
-  samples come from one template (`hooks.event_hook_template`), so the two copies
+  with nothing left to mirror there is no drift test. All templates come from one
+  source (`hooks.event_hook_template` for events, `SESSION_IDLE_TEMPLATE` for the
+  verification hook, `TASK_HOOK_TEMPLATE` for the lifecycle hooks), so the copies
   cannot drift either. The daemon's `EventWatcher` thread reads the shared
   server's `GET /event` stream and fires a copied, executable hook per event,
   with the event JSON on stdin; a session-scoped event routes to the project
   whose worktree owns the session. Hooks are fire-and-forget: a slow hook never
   blocks the stream, and a non-zero exit only lands in the log. One reservation,
-  not an omission: `session.idle` is the verification hook's name, so in a project
-  it keeps the verification sample instead of a generic event one (globally, where
-  there is no verification hook, it still gets an event example) — and the consumer
+  not an omission: `session.idle` is the verification hook's name, so its template is
+  the verification one (there is no separate event template for it) — and the consumer
   never fires the verification hook
   from the stream, because the daemon already runs it on settle.
 - **The stream is a trigger, not a truth source.** The SSE consumer fires hooks;
