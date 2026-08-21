@@ -848,6 +848,89 @@ def test_clone_name_flag_overrides_url_derivation() -> None:
     print("ok: --name overrides the url-derived project name")
 
 
+def _test_base_setup(tmp: Path, name: str = "demo") -> tuple[Path, Path]:
+    """A real created project; returns (project_dir, store)."""
+    orig_run = project._run
+    orig_init = project.init_mod.run
+    orig_scaffold = project.init_mod.scaffold
+    project._run, project.init_mod.run = _REAL_RUN, _REAL_INIT
+    project.init_mod.scaffold = _REAL_SCAFFOLD
+    try:
+        r = project.create(name, path=str(tmp), gh=False,
+                           allow_unsupervised=True)
+        assert r.ok, r.problems
+    finally:
+        project._run = orig_run
+        project.init_mod.run = orig_init
+        project.init_mod.scaffold = orig_scaffold
+    project_dir = Path(tmp) / name
+    return project_dir, project_dir / f"{name}.git"
+
+
+def test_base_repoints_the_base_worktree() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            project_dir, store = _test_base_setup(Path(tmp))
+            assert state.is_trusted(store), "create trusts the project"
+
+            rc, out = project._run(["git", "-C", str(store), "branch", "new"])
+            assert rc == 0, out
+
+            r = project.base(store, "new")
+            assert r.ok, r.problems
+
+            new_wt = project_dir / "new"
+            assert (new_wt / ".orchestration" / "config.json").is_file(), \
+                "the new base worktree exists and holds orchestration"
+            rc, branch = project._run(["git", "-C", str(new_wt), "branch",
+                                       "--show-current"])
+            assert rc == 0 and branch == "new", branch
+            rc, wt = project._run(["git", "-C", str(store), "worktree",
+                                   "list"])
+            assert rc == 0 and f"{new_wt} " in wt and "[new]" in wt, wt
+
+            rc, cfg = project._run(["git", "-C", str(store), "show",
+                                    "new:.orchestration/config.json"])
+            assert rc == 0 and json.loads(cfg)["baseBranch"] == "new", cfg
+
+            assert state._base_worktree(store, "new") == new_wt, \
+                "the new base worktree resolves as the project's base worktree"
+
+            rc, branches = project._run(["git", "-C", str(store), "branch"])
+            assert rc == 0 and "main" in branches.split(), \
+                "the old base branch still exists"
+            assert (project_dir / "main").is_dir(), \
+                "the old base worktree remains as an ordinary checkout"
+            rc, cfg = project._run(["git", "-C", str(store), "show",
+                                    "main:.orchestration/config.json"])
+            assert rc == 0 and json.loads(cfg)["baseBranch"] == "main", cfg
+            assert state.is_trusted(store), \
+                "base must not touch trust"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: base repoints the base worktree onto the new branch")
+
+
+def test_base_unknown_branch_fails_cleanly() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            project_dir, store = _test_base_setup(Path(tmp))
+            r = project.base(store, "nope")
+            assert not r.ok
+            assert "nope" in r.problems[0] and "branch" in r.problems[0], \
+                r.problems
+            assert not (project_dir / "nope").exists(), \
+                "no worktree is created for an unknown branch"
+            assert state._base_worktree(store, "nope") is None
+            assert state.is_trusted(store), \
+                "a failed repoint must not touch trust"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: an unknown target branch fails cleanly with no worktree")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
