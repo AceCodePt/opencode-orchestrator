@@ -272,6 +272,20 @@ def test_update_amends_a_committed_spec_and_commits() -> None:
     print("ok: update_task amends a committed spec and commits by default")
 
 
+def test_update_flips_wait_human_start_true_to_false() -> None:
+    root, tmp = _repo()
+    tasktool.create(root, root, "main", {
+        "name": "auto", "wait_human_start": True, "wait_human_merge": False})
+    r = tasktool.update(root, root, "main",
+                        {"name": "auto", "wait_human_start": False})
+    assert r["frontMatter"]["wait_human_start"] is False, r
+    body = _created(root, "auto")
+    assert "wait_human_start: false" in body
+    assert "wait_human_start: true" not in body
+    tmp.cleanup()
+    print("ok: update_task flips wait_human_start true to false")
+
+
 def test_update_requires_at_least_one_field() -> None:
     root, tmp = _repo()
     tasktool.create(root, root, "main", {

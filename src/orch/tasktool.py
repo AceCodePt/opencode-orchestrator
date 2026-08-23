@@ -349,6 +349,8 @@ def update(top: Path, common: Path, base: str, args: dict) -> dict:
             value = [str(v).strip() for v in (value or []) if str(v).strip()]
         elif key in ("complexity", "priority"):
             value = str(value or "").title()
+        elif key in ("wait_human_start", "wait_human_merge"):
+            value = bool(value)
         else:
             value = str(value).strip()
         spec[key] = value
