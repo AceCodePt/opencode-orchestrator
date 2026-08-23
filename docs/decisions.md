@@ -305,7 +305,7 @@ in one source file has one place to check.
   `create_task`, `update_task`, `archive_task`, `delete_task` — installed by orch
   into `~/.config/opencode/tools/` (the same config dir the shared server loads, so
   headless sessions and any local TUI get them). The tools are thin zod-validated
-  bridges to a Python backend (`bin/orch tasktool` — a hidden dispatcher
+  bridges to a Python backend (`orch tasktool` — a hidden dispatcher
   subcommand), so slugs, front matter, dependencies and refusals share orch's code.
   **The tools commit their change to the base branch by default.** The
   human-in-the-loop gates are the wait flags — `wait_human_start` (a human starts

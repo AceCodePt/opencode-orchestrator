@@ -16,7 +16,7 @@ TOOL_BIN_PLACEHOLDER = "{{ORCH_BIN}}"
 
 
 def _tool_bin() -> Path:
-    """The orch dispatcher the tools shell to (`bin/orch tasktool ...`). The
+    """The orch dispatcher the tools shell to (`orch tasktool ...`). The
     repo-local bin wins so a checkout works uninstalled."""
     local = Path(__file__).resolve().parents[2] / "bin" / "orch"
     if local.exists():

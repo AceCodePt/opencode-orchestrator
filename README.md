@@ -101,41 +101,41 @@ Stdlib-only Python, no install step. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
-bin/orch init                     # scaffold .orchestration/ (config + docs + ignore rules + inert hook .example references) and install the machine-level hook templates; takes the project's trust
-bin/orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
-bin/orch project clone <url>      # clone an existing repo into orch's layout (bare store + base worktree); initializes it if it has no .orchestration, otherwise trusts only with --trust
-bin/orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
-bin/orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
-bin/orch project list             # every discovered project and its trust status
-bin/orch project base <branch>    # repoint an existing project's base branch to <branch> (must already exist)
-bin/orch verify                 # can this project's verification hook be trusted
-bin/orch verify --run           # run the committed verification hook here and report
-bin/orch doctor                  # verify the contracts that fail silently
+orch init                     # scaffold .orchestration/ (config + docs + ignore rules + inert hook .example references) and install the machine-level hook templates; takes the project's trust
+orch project create <name>    # new project in a supervised dir: git init + orch init + a private gh repo, pushed (or --name/--dir; asks when omitted; refuses outside the supervised roots)
+orch project clone <url>      # clone an existing repo into orch's layout (bare store + base worktree); initializes it if it has no .orchestration, otherwise trusts only with --trust
+orch project trust [--dir]    # let the daemon verify/merge/dispatch this project (created projects are trusted automatically)
+orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
+orch project list             # every discovered project and its trust status
+orch project base <branch>    # repoint an existing project's base branch to <branch> (must already exist)
+orch verify                 # can this project's verification hook be trusted
+orch verify --run           # run the committed verification hook here and report
+orch doctor                  # verify the contracts that fail silently
 
-bin/orch server start|status|stop|restart
-bin/orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md) and trust the project
-bin/orch task start <name>       # claim (branch+worktree), run hooks, dispatch
-bin/orch task start <name> --dry-run
-bin/orch task list               # render the backlog + status from the scan
-bin/orch task list --global      # every project: what is waiting on you (blocked, stuck, unmerged)
-bin/orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
-bin/orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
-bin/orch task archive <name>     # close a reviewed needs-review task
-bin/orch task merge <name>       # re-run a merge after a conflict
+orch server start|status|stop|restart
+orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md) and trust the project
+orch task start <name>       # claim (branch+worktree), run hooks, dispatch
+orch task start <name> --dry-run
+orch task list               # render the backlog + status from the scan
+orch task list --global      # every project: what is waiting on you (blocked, stuck, unmerged)
+orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
+orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
+orch task archive <name>     # close a reviewed needs-review task
+orch task merge <name>       # re-run a merge after a conflict
 
-bin/orch attach                  # attach the interactive TUI to the primary agent, or to a task's session from its worktree (created on first use)
+orch attach                  # attach the interactive TUI to the primary agent, or to a task's session from its worktree (created on first use)
 
-bin/orch permissions             # approve/deny pending permission asks interactively (auto-picks the project you're in; --global picks a project first, then a task)
-bin/orch permissions --task <name> allow|deny [--reason "..."]   # scriptable one-shot for one task (a deny explains itself to the agent)
-bin/orch permissions -C <dir>    # non-interactive: list the project's pending asks (a flag makes it non-interactive)
-bin/orch permissions --json      # list every pending permission ask, machine-readable
+orch permissions             # approve/deny pending permission asks interactively (auto-picks the project you're in; --global picks a project first, then a task)
+orch permissions --task <name> allow|deny [--reason "..."]   # scriptable one-shot for one task (a deny explains itself to the agent)
+orch permissions -C <dir>    # non-interactive: list the project's pending asks (a flag makes it non-interactive)
+orch permissions --json      # list every pending permission ask, machine-readable
 
-bin/orch install                 # systemd user unit, enabled, with linger
-bin/orch uninstall                # remove config-level traces, keep projects alone
-bin/orch daemon status            # is anything actually supervising
-bin/orch daemon run --once --dry-run # decide and print, change nothing
-bin/orch daemon run --no-sse         # skip the /event stream consumer
-bin/orch version                  # show the orch version
+orch install                 # systemd user unit, enabled, with linger
+orch uninstall                # remove config-level traces, keep projects alone
+orch daemon status            # is anything actually supervising
+orch daemon run --once --dry-run # decide and print, change nothing
+orch daemon run --no-sse         # skip the /event stream consumer
+orch version                  # show the orch version
 ```
 
 `orch daemon` is one supervisor per machine covering every discovered project. It scans
@@ -161,7 +161,7 @@ Requires opencode **1.18.11 or newer** — see Prerequisites.
 
 - **Linux.** orch reads `/proc` for runtime facts and drives detached processes, and
   assumes a POSIX shell for hooks.
-- **Python 3.10+** — stdlib only, no install step (`bin/orch` is a plain script).
+- **Python 3.10+** — stdlib only, no install step (`orch` is a plain script).
 - **git** — worktrees, branches, and the bare repo *are* the state store.
 - **opencode 1.18.11 or newer** on `PATH` — agents run headless against one shared
   `opencode serve`; `doctor` checks the live version against the floor.
@@ -338,7 +338,7 @@ you draft in the conversation itself.
 | `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. Commits the move by default (`commit: false` leaves it staged). |
 | `delete_task` | Remove a task. Commits the removal by default (`commit: false` leaves it staged). Refuses claimed tasks and tasks other open tasks depend on. |
 
-The tools are thin bridges to a Python backend (`bin/orch tasktool` — a hidden
+The tools are thin bridges to a Python backend (`orch tasktool` — a hidden
 dispatcher subcommand), so slugs, front matter, dependencies, and refusals are
 validated by the same code the rest of orch uses. **The tools commit their changes
 to the base branch by default** — the human-in-the-loop gates are the wait flags

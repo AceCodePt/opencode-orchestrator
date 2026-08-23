@@ -1048,7 +1048,6 @@ def cmd_project_create(args: argparse.Namespace) -> int:
         print(f"  ! {p}", file=sys.stderr)
     if not r.ok:
         return 1
-    print("\nnext: bin/orch server start")
     return 0
 
 
@@ -1130,7 +1129,6 @@ def cmd_project_clone(args: argparse.Namespace) -> int:
         print(f"  ! {p}", file=sys.stderr)
     if not r.ok:
         return 1
-    print("\nnext: bin/orch server start")
     return 0
 
 
@@ -1243,7 +1241,6 @@ def cmd_project_base(args: argparse.Namespace) -> int:
         print(f"  ! {p}", file=sys.stderr)
     if not r.ok:
         return 1
-    print("\nnext: bin/orch server start")
     return 0
 
 
@@ -1254,7 +1251,7 @@ def cmd_version(_: argparse.Namespace) -> int:
 
 def cmd_tasktool(args: argparse.Namespace) -> int:
     """Internal backend for the machine's create/update/archive/delete custom
-    tools. Hidden from help; called as `bin/orch tasktool <op> ...`."""
+    tools. Hidden from help; called as `orch tasktool <op> ...`."""
     from . import tasktool as tasktool_mod
 
     return tasktool_mod.main(list(args.rest))

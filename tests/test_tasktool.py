@@ -476,7 +476,7 @@ def test_orch_tasktool_subcommand_routes_to_the_backend() -> None:
     assert payload["path"] == "tasks/route-test/task.md"
     assert "wait_human_start: false" in _created(root, "route-test")
     tmp.cleanup()
-    print("ok: `bin/orch tasktool <op> ...` routes to the backend")
+    print("ok: `orch tasktool <op> ...` routes to the backend")
 
 
 def main() -> int:

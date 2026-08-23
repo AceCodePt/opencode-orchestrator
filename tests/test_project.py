@@ -415,7 +415,7 @@ def test_create_produces_a_bare_store_and_base_worktree() -> None:
     print("ok: create makes a bare store with a base worktree on main")
 
 
-def test_cmd_project_create_prints_next_steps() -> None:
+def test_cmd_project_create_prints_steps_and_no_server_hint() -> None:
     orig = cli.project_mod.create
     orig_stdin = cli.sys.stdin
     cli.project_mod.create = lambda *a, **k: _Result()
@@ -426,12 +426,12 @@ def test_cmd_project_create_prints_next_steps() -> None:
             rc = cli.cmd_project_create(_args(name="demo"))
         out = buf.getvalue()
         assert rc == 0, rc
-        assert "git init" in out and "next: bin/orch server start" in out
-        assert "server start" in out
+        assert "git init" in out
+        assert "server start" not in out
     finally:
         cli.project_mod.create = orig
         cli.sys.stdin = orig_stdin
-    print("ok: `project create` prints the project steps and next actions")
+    print("ok: `project create` prints the project steps and no server hint")
 
 
 def test_cmd_project_create_prompts_when_flags_missing() -> None:
