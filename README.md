@@ -291,8 +291,10 @@ project under `$HOME`/`/mnt`
 same on-disk shape `project create` produces: a bare store (`<name>.git`) with a
 base worktree checked out beside it, so the daemon can supervise it. The project
 name is taken from the URL's repo name (`--name` overrides), `--dir` chooses the
-parent (prompted when omitted), and the bare store keeps `origin` → `<url>` for
-provenance and manual pulls (orch itself is local-only and never fetches).
+parent (prompted when omitted), and the bare store keeps `origin` → `<url>` and
+**tracks it at setup**: the store gets a fetch refspec, fetches origin, and points
+the base branch at its upstream, so the remote is tracked by default. orch never
+fetches inside the daemon loop; refresh is a manual `git fetch`.
 
 The base branch follows the rule the rest of orch uses everywhere: `main` if the
 clone has one; otherwise you are **told and asked to pick** one of its branches

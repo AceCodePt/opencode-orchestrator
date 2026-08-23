@@ -208,6 +208,11 @@ def create(name: str, path: str | None = None, gh: bool = True,
         if rc != 0:
             return fail(out or "gh repo create failed")
         result.step(f"created a {vis} GitHub repo and pushed origin")
+        err = _track_remote(store, base)
+        if err:
+            return fail(err)
+        result.step("tracks origin - fetch refspec, fetch, and the base "
+                    "branch's upstream")
 
     return result
 
@@ -262,6 +267,33 @@ def _current_base(store: Path) -> tuple[str | None, Path | None]:
         if data.get("baseBranch") == br:
             return br, path
     return None, None
+
+
+def _track_remote(store: Path, base: str) -> str | None:
+    """Point the project at origin so the base branch is remotely tracked:
+    ensure the fetch refspec, fetch origin (a hard requirement - a project
+    with an origin that cannot be fetched fails), and set the base branch's
+    upstream when the remote has it. Returns an error string or None. A
+    project with no origin is left untracked, not failed."""
+    rc, _ = _run(["git", "-C", str(store), "config", "--get",
+                  "remote.origin.url"])
+    if rc != 0:
+        return None
+    rc, out = _run(["git", "-C", str(store), "config", "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*"])
+    if rc != 0:
+        return out or "git config remote.origin.fetch failed"
+    rc, out = _run(["git", "-C", str(store), "fetch", "origin"])
+    if rc != 0:
+        return out or "git fetch origin failed"
+    rc, _ = _run(["git", "-C", str(store), "show-ref", "--verify", "-q",
+                  f"refs/remotes/origin/{base}"])
+    if rc == 0:
+        rc, out = _run(["git", "-C", str(store), "branch",
+                        "--set-upstream-to", f"origin/{base}", base])
+        if rc != 0:
+            return out or f"git branch --set-upstream-to origin/{base} failed"
+    return None
 
 
 def clone(
@@ -320,7 +352,7 @@ def clone(
     if rc != 0:
         return fail(out or f"git clone --bare failed for {url}")
     result.step(f"git clone --bare {url} {project.name}/{store.name}")
-    result.step("origin points at the cloned url (provenance; orch is local-only)")
+    result.step("origin points at the cloned url (tracks the remote at setup)")
 
     branches = _branches(store)
     if not branches:
@@ -412,6 +444,12 @@ def clone(
         result.step("trusted this project - the daemon will verify, merge and "
                     "dispatch here")
 
+    err = _track_remote(store, base)
+    if err:
+        return result.fail(err)
+    result.step("tracks origin - fetch refspec, fetch, and the base "
+                "branch's upstream")
+
     return result
 
 
@@ -434,6 +472,11 @@ def base(common: Path | str, target_branch: str) -> CreateResult:
             + (", ".join(branches) if branches else "none")
             + "). Create the branch in the store first.")
     result.step(f"base branch: {branch}")
+    err = _track_remote(store, branch)
+    if err:
+        return result.fail(err)
+    result.step("tracks origin - fetch refspec, fetch, and the base "
+                "branch's upstream")
     old_base, _ = _current_base(store)
 
     target = project / branch

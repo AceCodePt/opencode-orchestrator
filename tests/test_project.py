@@ -247,6 +247,16 @@ def test_create_gh_private_happy_path_order() -> None:
         gh_idx = next(i for i, entry in enumerate(calls)
                       if isinstance(entry[0], list) and entry[0][:2] == ["gh", "repo"])
         assert wt_idx < gh_idx, "the base worktree must exist before the gh push"
+        tracking = [i for i, (a, _c) in enumerate(calls)
+                    if isinstance(a, list)
+                    and ("remote.origin.fetch" in a or "--set-upstream-to" in a
+                         or (a[:2] == ["git", "-C"] and a[3:4] == ["fetch"]))]
+        assert tracking and min(tracking) > gh_idx, \
+            "remote tracking (refspec + fetch + upstream) must run after the gh push"
+        config_fetch = next(a for a, _ in calls if "remote.origin.fetch" in a)
+        assert config_fetch[-1] == "+refs/heads/*:refs/remotes/origin/*", config_fetch
+        upstream = next(a for a, _ in calls if "--set-upstream-to" in a)
+        assert "origin/main" in upstream, upstream
     print("ok: gh path runs git init -> orch init -> commit -> gh push")
 
 
@@ -284,6 +294,56 @@ def test_create_fails_when_gh_push_fails() -> None:
         project._run = orig
         project.gh_ready = orig_ready
     print("ok: a failed gh repo create fails the create")
+
+
+def test_create_fails_when_tracking_fetch_fails() -> None:
+    orig = project._run
+    orig_ready = project.gh_ready
+    _fake_init([])
+    project.gh_ready = lambda: (True, None)
+
+    def run(args, cwd=None, timeout=120.0):
+        if args[:2] == ["gh", "repo"]:
+            return 0, ""
+        if args[:2] == ["git", "-C"] and "fetch" in args:
+            return 1, "could not fetch origin"
+        return 0, ""
+    project._run = run
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = project.create("demo", path=tmp, gh=True, roots=[tmp])
+            assert not r.ok
+            assert any("fetch" in p for p in r.problems), r.problems
+    finally:
+        project._run = orig
+        project.gh_ready = orig_ready
+    print("ok: a failed tracking fetch is a hard error that fails the create")
+
+
+def test_clone_tracks_origin_and_sets_upstream() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp))
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            store = Path(tmp) / "demo" / "demo.git"
+            rc, out = project._run(["git", "-C", str(store), "config",
+                                    "--get", "remote.origin.fetch"])
+            assert rc == 0 and "+refs/heads/*:refs/remotes/origin/*" in out, out
+            rc, _ = project._run(["git", "-C", str(store), "rev-parse",
+                                  "--verify", "refs/remotes/origin/main"])
+            assert rc == 0, "the setup fetch populated the origin tracking ref"
+            rc, out = project._run(["git", "-C", str(store), "config",
+                                    "--get", "branch.main.remote"])
+            assert rc == 0 and out == "origin", out
+            rc, out = project._run(["git", "-C", str(store), "config",
+                                    "--get", "branch.main.merge"])
+            assert rc == 0 and out == "refs/heads/main", out
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: clone tracks origin and points the base branch at its upstream")
 
 
 def test_create_refuses_bad_names_and_existing_targets() -> None:
@@ -1050,6 +1110,34 @@ def test_base_repoints_the_base_worktree() -> None:
         finally:
             _restore_state_env(old, old_cfg)
     print("ok: base repoints the base worktree onto the new branch")
+
+
+def test_base_repoints_sets_upstream_when_origin_present() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            project_dir, store = _test_base_setup(Path(tmp))
+            src = _make_source(Path(tmp))
+            rc, out = project._run(["git", "-C", str(store), "remote", "add",
+                                    "origin", src])
+            assert rc == 0, out
+            rc, out = project._run(["git", "-C", str(store), "branch", "new"])
+            assert rc == 0, out
+            rc, out = project._run(["git", "-C", src, "branch", "new"])
+            assert rc == 0, out
+            r = project.base(store, "new")
+            assert r.ok, r.problems
+            rc, out = project._run(["git", "-C", str(store), "config",
+                                    "--get", "branch.new.remote"])
+            assert rc == 0 and out == "origin", out
+            rc, out = project._run(["git", "-C", str(store), "config",
+                                    "--get", "branch.new.merge"])
+            assert rc == 0 and out == "refs/heads/new", out
+            assert (project_dir / "new").is_dir(), \
+                "the repoint still creates the new base worktree"
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: repointing the base sets the new base branch's upstream")
 
 
 def test_base_unknown_branch_fails_cleanly() -> None:

@@ -473,6 +473,17 @@ in one source file has one place to check.
   process holds what it imported at startup.
 - **Linger is checked**, because it is easy to miss and silently defeats the point.
 
+## `project.py`
+
+- **Projects track origin by default.** `create`, `clone`, and `base` configure the
+  fetch refspec (`+refs/heads/*:refs/remotes/origin/*`), fetch origin, and point the
+  base branch at its upstream, so the base and any branch pushed with `-u` from a
+  worktree is remotely tracked. The fetch is a hard requirement: a project with an
+  origin that cannot be fetched fails setup, because an untracked remote silently
+  rotted into the unknown-sync marker and per-worktree pushes had nothing to compare
+  against. A project with no origin is left untracked, not failed. The daemon loop
+  still never fetches; refresh is a manual `git fetch`.
+
 ## Removed with the store and the router
 
 - **Leases are gone.** "Definitely dead" no longer needs a lease; the settle budget
