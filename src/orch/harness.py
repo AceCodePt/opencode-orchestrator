@@ -8,7 +8,7 @@ from typing import Any
 
 MIN_VERSION = (1, 18, 11)
 
-DEFAULT_TIMEOUT = 5.0
+DEFAULT_TIMEOUT = 30.0
 
 
 class HarnessError(Exception):
