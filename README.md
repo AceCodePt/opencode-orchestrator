@@ -97,7 +97,11 @@ trusted project; the scheduler fills free slots with the next eligible `todo`.
 
 ## Usage
 
-Stdlib-only Python, no install step. Agents run **headless**: one shared
+Stdlib-only Python, no dependency install step. `orch install` copies the
+whole tree (minus `.git`) to one canonical path (`$XDG_DATA_HOME/orch`,
+default `~/.local/share/orch`) and puts a real launcher on `PATH` at
+`~/.local/bin/orch`, so `orch` resolves machine-wide even when no checkout is
+present. Agents run **headless**: one shared
 `opencode serve` hosts every worktree.
 
 ```bash
@@ -130,8 +134,8 @@ orch permissions --task <name> allow|deny [--reason "..."]   # scriptable one-sh
 orch permissions -C <dir>    # non-interactive: list the project's pending asks (a flag makes it non-interactive)
 orch permissions --json      # list every pending permission ask, machine-readable
 
-orch install                 # systemd user unit, enabled, with linger
-orch uninstall                # remove config-level traces, keep projects alone
+orch install                 # copy orch to ~/.local/share/orch, write a ~/.local/bin/orch launcher, then the systemd user unit, enabled, with linger
+orch uninstall                # remove the launcher and the install dir, plus config-level traces; keep projects alone
 orch daemon status            # is anything actually supervising
 orch daemon run --once --dry-run # decide and print, change nothing
 orch daemon run --no-sse         # skip the /event stream consumer
@@ -161,7 +165,9 @@ Requires opencode **1.18.11 or newer** — see Prerequisites.
 
 - **Linux.** orch reads `/proc` for runtime facts and drives detached processes, and
   assumes a POSIX shell for hooks.
-- **Python 3.10+** — stdlib only, no install step (`orch` is a plain script).
+- **Python 3.10+** — stdlib only; `orch install` makes the tool global (a copy at
+  `~/.local/share/orch` plus a `~/.local/bin/orch` launcher), but `bin/orch` stays a
+  plain script that works straight from a checkout.
 - **git** — worktrees, branches, and the bare repo *are* the state store.
 - **opencode 1.18.11 or newer** on `PATH` — agents run headless against one shared
   `opencode serve`; `doctor` checks the live version against the floor.

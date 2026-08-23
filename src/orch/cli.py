@@ -849,11 +849,24 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_install(args: argparse.Namespace) -> int:
     from . import custom_tools
+    from . import install as install_mod
+
+    status, lines = install_mod.install()
+    for line in lines:
+        print(line)
+    if status == "refused":
+        return 1
+    for line in install_mod.path_hint():
+        print(line)
 
     if custom_tools.ensure():
-        server_mod.restart()
-        print("custom tools installed to "
-              f"{custom_tools.TOOLS_DIR}; shared server restarted")
+        try:
+            server_mod.restart()
+            print("custom tools installed to "
+                  f"{custom_tools.TOOLS_DIR}; shared server restarted")
+        except (OSError, RuntimeError, TimeoutError) as e:
+            print(f"custom tools installed to {custom_tools.TOOLS_DIR}, but "
+                  f"could not restart the shared server: {e}")
     else:
         print(f"custom tools current in {custom_tools.TOOLS_DIR}")
     for line in daemon_mod.install(interval=args.interval,
@@ -864,6 +877,10 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    from . import install as install_mod
+
+    for line in install_mod.uninstall():
+        print(line)
     for line in daemon_mod.uninstall(wipe_state=not args.keep_state):
         print(line)
     return 0
@@ -1554,7 +1571,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     inst = sub.add_parser(
         "install",
-        help="write and enable the systemd user unit supervising every project")
+        help="copy orch to the canonical location and write a launcher on PATH, "
+             "then enable the systemd user unit supervising every project")
     inst.add_argument("-n", "--interval", type=float, default=1.0)
     inst.add_argument("--no-enable", action="store_true",
                       help="write the systemd unit but do not enable it")
@@ -1562,8 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     un = sub.add_parser(
         "uninstall",
-        help="remove every config-level trace of orch (never a project's "
-             ".orchestration/)")
+        help="remove the launcher and the canonical install dir (never a "
+             "project's .orchestration/), plus every config-level trace of orch")
     un.add_argument("--keep-state", action="store_true",
                     help="stop the daemon and server but keep the database and "
                          "task history in ~/.local/state/orch")

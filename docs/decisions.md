@@ -423,6 +423,34 @@ in one source file has one place to check.
 - **`server.heartbeat` separates "stream alive, agent quiet" from "stream dead"** —
   the absence problem the daemon has to solve.
 
+## `install.py`
+
+- **The global install is a physical copy, not a symlink to a checkout.** A
+  symlink-to-checkout was considered and rejected: moving or deleting the checkout
+  leaves a dangling link and a generic `no such file or directory` error. Instead
+  `orch install` copies the entire repo tree minus `.git` to exactly one canonical
+  path — `$XDG_DATA_HOME/orch`, default `~/.local/share/orch` — so the copy is a
+  static, `.git`-free snapshot. `server.orch_bin()` and `custom_tools._tool_bin()`
+  resolve the installed copy's own `bin/orch` by walking up from `__file__`, which
+  is why the copy preserves the `bin/` + `src/` sibling layout.
+- **There is exactly one canonical path, and the launcher is a real file.** `orch`
+  resolves on `PATH` through `~/.local/bin/orch`, a non-symlink file that imports
+  `orch.cli.main` from the installed `src` (recomputing the canonical dir from
+  `XDG_DATA_HOME` at runtime, like `install_dir()` does). `orch update` takes no
+  path argument because there is only one canonical path; update later fetches the
+  canonical repo into a temp dir and swaps the verified tree in (clone-to-temp +
+  swap), which is why update never needs `.git` inside the install.
+- **Install is idempotent and reports `created` / `updated` / `already current`.**
+  A tree manifest (relative path → content hash, excluding `.git`) decides whether
+  the copy is current; the launcher is compared byte-for-byte. A non-orch file
+  already sitting at `~/.local/bin/orch` is never clobbered — install refuses and
+  exits non-zero so the owner can decide.
+- **`orch uninstall` removes only the launcher and the canonical install dir.** It
+  never writes, modifies, or deletes anything inside any project's `.orchestration/`
+  — that belongs to the project. The repo-local `bin/orch` stays usable for
+  development: the checkout does not require the install and the install does not
+  require the checkout.
+
 ## `server.py`
 
 - **One headless server per machine hosts every worktree.** A server always has a
