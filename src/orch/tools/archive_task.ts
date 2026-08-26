@@ -28,9 +28,11 @@ export default tool({
   description:
     "Archive a declared, unclaimed task: git mv tasks/<name>/task.md to " +
     "archive/<name>/task.md in the base worktree, which unblocks anything that " +
-    "depends on it. Commits the move to base by default; pass commit: false to " +
-    "leave it staged for review. Refuses claimed tasks (the daemon owns claimed " +
-    "work) and uncommitted drafts.",
+    "depends on it. A slug is freely reusable: if an earlier generation of the " +
+    "slug already occupies archive/<name>/task.md, this generation is archived " +
+    "to a timestamped sub-path archive/<name>/<utc-ts>/task.md instead. Commits " +
+    "the move to base by default; pass commit: false to leave it staged for " +
+    "review. Refuses claimed tasks (the daemon owns claimed work) and uncommitted drafts.",
   args: {
     name: tool.schema.string().describe("the task slug to archive (tasks/<name>/task.md)"),
     commit: tool.schema

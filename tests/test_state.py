@@ -213,6 +213,40 @@ def test_archived_tasks_are_listed_as_archived() -> None:
     print("ok: an archived task is not todo")
 
 
+def test_timestamped_archive_generation_scans_as_archived() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    (root / "archive" / "a-task").mkdir(parents=True)
+    _git(root, "mv", "tasks/a-task/task.md", "archive/a-task/task.md")
+    _git(root, "commit", "-q", "-m", "archive")
+    _task(root, "a-task")
+    ts_dir = root / "archive" / "a-task" / "20260826-090412"
+    ts_dir.mkdir(parents=True)
+    _git(root, "mv", "tasks/a-task/task.md", f"archive/a-task/20260826-090412/task.md")
+    _git(root, "commit", "-q", "-m", "archive again")
+    proj = _proj(root)
+    t = next(x for x in proj.scan() if x.name == "a-task")
+    assert t.archived and t.status == state.ARCHIVED
+    tmp.cleanup()
+    print("ok: a timestamped archive generation still scans as archived")
+
+
+def test_reused_slug_with_old_archive_reads_as_declared() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    (root / "archive" / "a-task").mkdir(parents=True)
+    _git(root, "mv", "tasks/a-task/task.md", "archive/a-task/task.md")
+    _git(root, "commit", "-q", "-m", "archive")
+    _task(root, "a-task")
+    proj = _proj(root)
+    t = next(x for x in proj.scan() if x.name == "a-task")
+    assert t.declared and not t.archived, \
+        "a re-created slug is the live task, not ARCHIVED history"
+    assert t.status == state.TODO
+    tmp.cleanup()
+    print("ok: a reused slug with an old archive reads as the live declared task")
+
+
 def test_discover_finds_orchestration_dirs() -> None:
     root, tmp = _repo()
     found = state.discover_projects([str(Path(tmp.name))])

@@ -84,6 +84,36 @@ def test_merge_done_task_folds_branch_archives_and_cleans_up() -> None:
     print("ok: done task merged, archived, worktree + branch cleaned up")
 
 
+def test_merge_archives_a_reused_slug_to_a_timestamped_spot() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    bare = _bare_repo(tmp)
+    wt1 = _claim_task(bare, "task-a")
+    r1 = merge.merge_and_cleanup(bare, "task-a", "task-a", wt1, "main")
+    assert r1.ok, r1.problems
+
+    # Reuse the slug: an old generation sits at archive/task-a/, a fresh
+    # declared task-a is created, claimed, and merged again.
+    main_wt = bare.parent / "main"
+    (main_wt / "tasks" / "task-a").mkdir(parents=True)
+    (main_wt / "tasks" / "task-a" / "task.md").write_text("# Task A gen 2\n")
+    _git(main_wt, "add", "-A")
+    _git(main_wt, "commit", "-q", "-m", "declare task-a again")
+
+    wt2 = _claim_task(bare, "task-a", content="# task-a gen2")
+    r2 = merge.merge_and_cleanup(bare, "task-a", "task-a", wt2, "main")
+    assert r2.ok, r2.problems
+
+    assert (main_wt / "archive" / "task-a" / "task.md").exists(), \
+        "generation 1 must survive the reuse"
+    gens = sorted(p for p in (main_wt / "archive" / "task-a").iterdir()
+                  if p.is_dir() and p.name != "task.md")
+    assert len(gens) == 1, gens
+    assert (gens[0] / "task.md").exists(), \
+        "generation 2 must land in a timestamped archive spot"
+    tmp.cleanup()
+    print("ok: the daemon merge path archives a reused slug without clobbering gen 1")
+
+
 def test_merge_refuses_a_dirty_worktree() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)

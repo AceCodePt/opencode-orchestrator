@@ -394,6 +394,11 @@ def _base_merging(common: Path, base: str) -> str | None:
 
 
 def _names_in(common: Path, base: str, rel: str) -> set[str]:
+    """The task names under <rel>/ on <base>: tasks/<name>/task.md and the
+    archived generations archive/<name>/task.md and archive/<name>/<ts>/task.md
+    (the timestamped sub-path a re-used slug is archived to). The name is always
+    the first path segment after <rel> - the timestamp is a generation
+    discriminator, never part of the slug."""
     rc, out = _git(common, "ls-tree", "-r", "--name-only", base, "--", rel)
     if rc != 0:
         return set()
@@ -402,7 +407,34 @@ def _names_in(common: Path, base: str, rel: str) -> set[str]:
         parts = line.strip().split("/")
         if len(parts) == 3 and parts[0] == rel and parts[2] == "task.md":
             names.add(parts[1])
+        elif len(parts) == 4 and parts[0] == rel and parts[3] == "task.md":
+            names.add(parts[1])
     return names
+
+
+def archive_dest(base_wt: Path, base: str, name: str) -> str:
+    """The archive path for <name>, relative to the base worktree. A task keeps
+    the canonical archive/<name>/task.md unless an earlier generation of the
+    slug already occupies it (committed on <base> or in the working tree) - a
+    slug is freely reusable, so the colliding generation is archived to
+    archive/<name>/<utc-ts>/task.md, retried with -1, -2, ... on a same-second
+    collision. The slug stays the resolution key either way."""
+    def occupied(rel: str) -> bool:
+        if (base_wt / rel).exists():
+            return True
+        rc, _ = _git(base_wt, "show", f"{base}:{rel}")
+        return rc == 0
+
+    plain = f"{ARCHIVE_REL}/{name}/task.md"
+    if not occupied(plain):
+        return plain
+    ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    for i in range(1000):
+        sub = ts if i == 0 else f"{ts}-{i}"
+        cand = f"{ARCHIVE_REL}/{name}/{sub}/task.md"
+        if not occupied(cand):
+            return cand
+    raise ValueError(f"archive/{name}/ is fully occupied by archived generations")
 
 
 def _front_matter(common: Path, base: str, name: str) -> dict:
@@ -632,9 +664,14 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     for name in names:
         claimed = name in branches
         wt = wt_by_branch.get(name) if claimed else None
+        # A re-created slug is the live task even when an earlier generation of
+        # the same slug is archived: the open declaration wins over history, so
+        # the task reads as running/todo rather than ARCHIVED and still blocks
+        # its dependents until this generation settles.
+        archived_now = name in archived and name not in declared
         st = TaskState(
             project=str(common), name=name, base=base, retry_cap=cap,
-            declared=name in declared, archived=name in archived,
+            declared=name in declared, archived=archived_now,
             claimed=claimed, branch=name if claimed else None,
             worktree=str(wt) if wt else None,
         )

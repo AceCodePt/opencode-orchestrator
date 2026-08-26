@@ -10,7 +10,6 @@ from pathlib import Path
 from . import dispatch, server, state, verify
 
 TASKS_REL = "tasks"
-ARCHIVE_REL = "archive"
 
 
 @dataclass
@@ -78,7 +77,7 @@ def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:
     if not (base_wt / src).exists():
         steps.append(f"nothing to archive: {src} is not on {base}")
         return steps
-    dest = Path(ARCHIVE_REL) / name / "task.md"
+    dest = Path(state.archive_dest(base_wt, base, name))
     (base_wt / dest).parent.mkdir(parents=True, exist_ok=True)
     code, out = _git(base_wt, "mv", str(src), str(dest))
     if code != 0:
@@ -94,7 +93,7 @@ def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:
         empty.rmdir()
     except OSError:
         pass
-    steps.append(f"archived {TASKS_REL}/{name} -> {ARCHIVE_REL}/{name}")
+    steps.append(f"archived {TASKS_REL}/{name} -> {dest}")
     return steps
 
 

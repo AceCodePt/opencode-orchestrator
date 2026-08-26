@@ -829,6 +829,32 @@ def test_scheduler_treats_an_undeclared_dependency_as_satisfied() -> None:
     print("ok: a dependency slug that was never declared does not hold the task")
 
 
+def test_scheduler_reused_slug_blocks_until_the_new_generation_archives() -> None:
+    mem = daemon.LoopState()
+    pol = state.SchedulerPolicy(enabled=True, max_concurrent=2,
+                                start=Path("/tmp/lab"))
+    slice_ = _task(name="feature-slice", claimed=False, branch=None, worktree=None,
+                   wait_human_start=False, dependencies=["feature"])
+    # A reused slug collapses to one task: declared (the fresh generation), not
+    # archived - even though an old generation of "feature" sits in archive/.
+    reused_open = _task(name="feature", claimed=False, branch=None, worktree=None,
+                        wait_human_start=False, declared=True, archived=False)
+    acts = daemon.decide(_snap(tasks=[reused_open, slice_], mem=mem,
+                               policies={slice_.project: pol}))
+    dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
+    assert dispatched == ["feature"], \
+        "a reused slug's old archive must not unblock a dependent while it is open"
+
+    archived = _task(name="feature", claimed=False, branch=None, worktree=None,
+                     archived=True, declared=False)
+    acts = daemon.decide(_snap(tasks=[archived, slice_], mem=mem,
+                               policies={slice_.project: pol}))
+    dispatched = [a.task for a in acts if a.kind == daemon.DISPATCH]
+    assert dispatched == ["feature-slice"], \
+        "once the reused generation archives, the slice dispatches"
+    print("ok: an open reused slug blocks dependents until its new generation archives")
+
+
 def test_global_budget_caps_dispatches_across_projects() -> None:
     mem = daemon.LoopState()
     pol = state.SchedulerPolicy(enabled=True, max_concurrent=5,

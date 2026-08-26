@@ -78,6 +78,15 @@ def _claimed(common: Path, name: str) -> bool:
     return dispatch.branch_exists(common, name)
 
 
+def _archived(top: Path, base: str, name: str) -> bool:
+    """An archived record for <name> exists - committed on base or in the
+    working tree. A slug can hold an archived generation and a fresh declared
+    task at once (a reused slug); callers decide which side wins."""
+    if (top / ARCHIVE_REL / name).is_dir():
+        return True
+    return _committed(top, base, f"{ARCHIVE_REL}/{name}/task.md")
+
+
 def _open_dependents(common: Path, name: str) -> list[str]:
     proj = state.Project.from_common(common)
     if proj is None:
@@ -273,6 +282,7 @@ def create(top: Path, common: Path, base: str, args: dict) -> dict:
             f"{rel} already exists in the working tree. Use update_task to amend "
             f"the draft, or delete_task to remove it first."
         )
+    reused = _archived(top, base, name)
 
     spec: dict = {
         "title": str(args.get("title") or name.title()),
@@ -304,6 +314,9 @@ def create(top: Path, common: Path, base: str, args: dict) -> dict:
     else:
         message = (f"created {rel} - uncommitted. Commit it on {base} (or pass "
                    f"commit: true) before the daemon can see it.")
+    if reused:
+        message += (f" This slug is a reuse: an earlier {name} is archived at "
+                    f"{ARCHIVE_REL}/{name}/; this is a fresh generation.")
     return {
         "path": rel,
         "message": message,
@@ -317,10 +330,10 @@ def update(top: Path, common: Path, base: str, args: dict) -> dict:
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
     path = top / rel
-    arch_rel = f"{ARCHIVE_REL}/{name}/task.md"
 
-    if (top / arch_rel).exists() or _committed(top, base, arch_rel):
-        raise ToolError(f"{name} is already archived at {arch_rel} - it is done")
+    declared_live = _committed(top, base, rel) or path.exists()
+    if not declared_live and _archived(top, base, name):
+        raise ToolError(f"{name} is already archived at {ARCHIVE_REL}/{name}/ - it is done")
     if _claimed(common, name):
         raise ToolError(
             f"{name} is claimed (branch {name} exists) - the daemon owns the "
@@ -381,7 +394,7 @@ def archive(top: Path, common: Path, base: str, args: dict) -> dict:
     commit = _commit_flag(args)
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
-    dest = f"{ARCHIVE_REL}/{name}/task.md"
+    dest = state.archive_dest(top, base, name)
 
     if not _committed(top, base, rel):
         if (top / rel).exists():
@@ -400,6 +413,7 @@ def archive(top: Path, common: Path, base: str, args: dict) -> dict:
     code, out = _git(top, "mv", rel, dest)
     if code != 0:
         raise ToolError(f"git mv {rel} -> {dest} failed: {out[:300]}")
+    reused = dest != f"{ARCHIVE_REL}/{name}/task.md"
     committed: str | None = None
     if commit:
         committed, err = _commit(top, [rel, dest], f"task: archive {name}")
@@ -413,6 +427,9 @@ def archive(top: Path, common: Path, base: str, args: dict) -> dict:
         message = (f"moved {rel} -> {dest} (staged, uncommitted). Archiving "
                    f"unblocks anything that depends on {name}; commit on {base} "
                    f"or pass commit: true to make it real.")
+    if reused:
+        message += (f" {name} is a reused slug, so this generation kept its own "
+                    f"timestamped archive spot.")
     return {
         "path": dest,
         "message": message,
@@ -426,7 +443,7 @@ def delete(top: Path, common: Path, base: str, args: dict) -> dict:
     commit = _commit_flag(args)
     name = _slug(str(args.get("name", "")))
     rel = f"{TASKS_REL}/{name}/task.md"
-    arch_rel = f"{ARCHIVE_REL}/{name}/task.md"
+    arch_dir_rel = f"{ARCHIVE_REL}/{name}"
 
     if _claimed(common, name):
         raise ToolError(
@@ -441,18 +458,19 @@ def delete(top: Path, common: Path, base: str, args: dict) -> dict:
         )
 
     path = top / rel
-    if (top / arch_rel).exists() and not path.exists():
-        code, out = _git(top, "rm", "-q", arch_rel)
+    arch_dir = top / arch_dir_rel
+    if arch_dir.is_dir() and not path.exists():
+        code, out = _git(top, "rm", "-q", "-r", arch_dir_rel)
         if code != 0:
-            raise ToolError(f"git rm {arch_rel} failed: {out[:300]}")
+            raise ToolError(f"git rm {arch_dir_rel} failed: {out[:300]}")
         committed: str | None = None
         if commit:
-            committed, err = _commit(top, [arch_rel], f"task: delete {name} (archived)")
+            committed, err = _commit(top, [arch_dir_rel], f"task: delete {name} (archived)")
             if err:
                 raise ToolError(f"could not commit the removal: {err}")
         return {
-            "path": arch_rel,
-            "message": _delete_message("removed archived task", arch_rel,
+            "path": arch_dir_rel,
+            "message": _delete_message("removed archived task", arch_dir_rel,
                                        committed, base, commit),
             "committed": bool(committed),
             "commitSha": committed if isinstance(committed, str) else None,
@@ -486,7 +504,7 @@ def delete(top: Path, common: Path, base: str, args: dict) -> dict:
             "frontMatter": {},
         }
 
-    raise ToolError(f"no task named {name} (neither {rel} nor {arch_rel} exists)")
+    raise ToolError(f"no task named {name} (neither {rel} nor {arch_dir_rel} exists)")
 
 
 def _delete_message(what: str, rel: str, committed, base: str,

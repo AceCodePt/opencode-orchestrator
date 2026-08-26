@@ -359,6 +359,71 @@ def test_archive_refuses_an_uncommitted_draft() -> None:
     print("ok: archive_task wants a committed task, not a draft")
 
 
+def test_archive_timestamps_a_reused_slug() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "dark-mode")
+    r1 = tasktool.archive(root, root, "main", {"name": "dark-mode"})
+    assert r1["path"] == "archive/dark-mode/task.md"
+    assert (root / "archive" / "dark-mode" / "task.md").exists()
+
+    tasktool.create(root, root, "main", {
+        "name": "dark-mode", "wait_human_start": False,
+        "wait_human_merge": False})
+    r2 = tasktool.archive(root, root, "main", {"name": "dark-mode"})
+    assert r2["path"] != "archive/dark-mode/task.md", "a reuse must not clobber gen 1"
+    assert r2["path"].startswith("archive/dark-mode/") and \
+        r2["path"].endswith("/task.md"), r2
+    assert (root / "archive" / "dark-mode" / "task.md").exists(), \
+        "generation 1 must survive the reuse"
+    assert (root / Path(r2["path"])).exists(), "generation 2 must be archived"
+    assert "reused slug" in r2["message"]
+    tmp.cleanup()
+    print("ok: archiving a reused slug lands in a timestamped spot, gen 1 intact")
+
+
+def test_delete_removes_all_archive_generations() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "dark-mode")
+    tasktool.archive(root, root, "main", {"name": "dark-mode"})
+    tasktool.create(root, root, "main", {
+        "name": "dark-mode", "wait_human_start": False,
+        "wait_human_merge": False})
+    tasktool.archive(root, root, "main", {"name": "dark-mode"})
+    assert (root / "archive" / "dark-mode").is_dir()
+    r = tasktool.delete(root, root, "main", {"name": "dark-mode"})
+    assert not (root / "archive" / "dark-mode").exists(), \
+        "delete_task must remove every archived generation"
+    assert r["committed"] is True and r["commitSha"]
+    tmp.cleanup()
+    print("ok: delete_task removes every archived generation of a slug")
+
+
+def test_update_amends_a_reused_live_slug() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "x")
+    tasktool.archive(root, root, "main", {"name": "x"})
+    tasktool.create(root, root, "main", {
+        "name": "x", "wait_human_start": False, "wait_human_merge": False})
+    r = tasktool.update(root, root, "main", {"name": "x", "priority": "high"})
+    assert r["path"] is not None
+    body = _created(root, "x")
+    assert "- **Priority:** High" in body
+    tmp.cleanup()
+    print("ok: update_task still amends a live slug that has an archived generation")
+
+
+def test_create_notes_when_a_slug_is_a_reuse() -> None:
+    root, tmp = _repo()
+    _commit_task(root, "x")
+    tasktool.archive(root, root, "main", {"name": "x"})
+    r = tasktool.create(root, root, "main", {
+        "name": "x", "wait_human_start": False, "wait_human_merge": False})
+    assert "reuse" in r["message"]
+    assert "archive/x/" in r["message"]
+    tmp.cleanup()
+    print("ok: create_task tells the agent where the reused slug's archive lives")
+
+
 # --- delete ---------------------------------------------------------------
 
 def test_delete_removes_an_uncommitted_draft() -> None:

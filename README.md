@@ -85,7 +85,9 @@ Walking one task through the whole loop, from a raw idea to archived work:
    before it escalates to you. The daemon detects an in-flight resolver by that session,
    so it never spawns duplicates. Either way, once the merge lands, the no-op path
    archives the task.
-7. **Archive.** `tasks/<name>/task.md` is `git mv`'d to `archive/<name>/task.md` and
+7. **Archive.** `tasks/<name>/task.md` is `git mv`'d to `archive/<name>/task.md` (a
+   reused slug whose earlier generation still occupies that path is archived to
+   `archive/<name>/<utc-ts>/task.md` instead) and
    committed. Archiving is what unblocks any task that listed `<name>` in its
    `dependencies:` — the scheduler's frontier is exactly the set of declared tasks
    whose every dependency is archived.
@@ -343,7 +345,7 @@ you draft in the conversation itself.
 | --- | --- |
 | `create_task` | Write `tasks/<name>/task.md` from params. `wait_human_start`/`wait_human_merge` are passed as the conversation decided (default `false` — scheduler-eligible, auto-merge). **Commits to base when `wait_human_start` is `false`, so the daemon sees it and the loop runs on its own; with `wait_human_start: true` it stays an uncommitted draft for your review.** Pass `commit` to override. Refuses to overwrite an existing task. |
 | `update_task` | Amend a spec (committed or draft); only the fields you pass change. Commits the amendment unless the spec's `wait_human_start` is `true`. Refuses a **claimed** task and archived tasks. |
-| `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. Commits the move by default (`commit: false` leaves it staged). |
+| `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. Commits the move by default (`commit: false` leaves it staged). A slug is freely reusable: if `archive/<name>/task.md` is already occupied by an earlier generation, this one lands at `archive/<name>/<utc-ts>/task.md`. |
 | `delete_task` | Remove a task. Commits the removal by default (`commit: false` leaves it staged). Refuses claimed tasks and tasks other open tasks depend on. |
 
 The tools are thin bridges to a Python backend (`orch tasktool` — a hidden

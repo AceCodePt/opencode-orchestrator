@@ -422,17 +422,18 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
 def _deps_satisfied(tasks: list[state.TaskState], t: state.TaskState) -> bool:
     """A todo task dispatches only when every dependency is archived (or was
     never declared — a missing slug cannot block). An open task with the same
-    name, or one reset back to `todo`, leaves the dependency unsatisfied."""
+    name, or one reset back to `todo`, leaves the dependency unsatisfied. An
+    open declaration beats an archived generation: a reused slug's old archive
+    does not satisfy a dependent that must wait for the new generation."""
     if not t.dependencies:
         return True
     archived = {x.name for x in tasks if x.archived}
     declared_open = {x.name for x in tasks if x.declared and not x.archived}
     for dep in t.dependencies:
-        if dep in archived:
+        if dep in declared_open:
+            return False
+        if dep not in archived:
             continue
-        if dep not in declared_open:
-            continue
-        return False
     return True
 
 
