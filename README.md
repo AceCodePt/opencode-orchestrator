@@ -128,6 +128,7 @@ orch task answer <name> allow|deny  # answer a blocked permission (or a question
 orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
 orch task archive <name>     # close a reviewed needs-review task
 orch task merge <name>       # re-run a merge after a conflict
+                             # (from the task's own worktree, omit <name> to merge that task)
 
 orch attach                  # attach the interactive TUI to the primary agent, or to a task's session from its worktree (created on first use)
 

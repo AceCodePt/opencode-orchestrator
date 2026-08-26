@@ -235,7 +235,7 @@ string cannot do this job.
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
-| `orch task merge <name>` | re-run a merge after a conflict |
+| `orch task merge <name>` | re-run a merge after a conflict (omit `<name>` from the task's own worktree to merge that task) |
 | `orch verify` | inspect whether the committed verification hook is trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify --run` | run the committed verification hook here and say why |

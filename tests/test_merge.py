@@ -290,6 +290,53 @@ def test_cli_merge_fires_the_merged_global_hook() -> None:
     print("ok: `orch task merge` fires the merged global hook with the env contract")
 
 
+def test_merge_without_name_from_task_worktree() -> None:
+    import argparse
+    from orch import cli
+
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        bare = _bare_repo(tmp)
+        wt = _claim_task(bare, "task-a")
+        main_wt = bare.parent / "main"
+
+        rc = cli.cmd_task_merge(argparse.Namespace(directory=str(wt), name=None))
+        assert rc == 0, rc
+
+        assert "work for task-a" in _git(main_wt, "log", "--oneline")
+        assert not wt.exists(), "worktree should be gone"
+        assert (main_wt / "archive" / "task-a" / "task.md").exists(), \
+            "the spec must be archived"
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: `orch task merge` from a task worktree with no name merges that task")
+
+
+def test_merge_without_name_from_base_refuses() -> None:
+    import argparse
+    from orch import cli
+
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        bare = _bare_repo(tmp)
+        _claim_task(bare, "task-a")
+        main_wt = bare.parent / "main"
+
+        rc = cli.cmd_task_merge(argparse.Namespace(directory=str(main_wt), name=None))
+        assert rc == 2, rc
+    finally:
+        tmp.cleanup()
+    print("ok: `orch task merge` from the base worktree with no name refuses")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

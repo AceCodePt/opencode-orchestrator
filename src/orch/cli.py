@@ -443,11 +443,20 @@ def cmd_task_merge(args: argparse.Namespace) -> int:
         print("not in a worktree", file=sys.stderr)
         return 2
     tasks = proj.scan()
-    t = next((x for x in tasks if x.name == args.name), None)
+    name = args.name
+    if name is None:
+        branch = dispatch_mod.current_branch(start)
+        if branch is None or branch == proj.base:
+            print(f"no task named: run `orch task merge` from the task's own "
+                  f"worktree (you are on {branch or 'a detached HEAD'})",
+                  file=sys.stderr)
+            return 2
+        name = branch
+    t = next((x for x in tasks if x.name == name), None)
     if t is None or not t.claimed or not t.worktree or not t.branch:
-        print(f"no claimed task: {args.name}", file=sys.stderr)
+        print(f"no claimed task: {name}", file=sys.stderr)
         return 2
-    r = merge_mod.merge_and_cleanup(proj.common, args.name, t.branch,
+    r = merge_mod.merge_and_cleanup(proj.common, name, t.branch,
                                     Path(t.worktree), proj.base)
     for s in r.steps:
         print(f"  {s}")
@@ -1388,7 +1397,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     tm = tsub.add_parser("merge",
                          help="merge a done task into base and clean up")
-    tm.add_argument("name")
+    tm.add_argument("name", nargs="?",
+                    help="task to merge; defaults to the task of the worktree "
+                         "you run this from")
     tm.add_argument("-C", "--directory")
     tm.set_defaults(func=cmd_task_merge)
 
