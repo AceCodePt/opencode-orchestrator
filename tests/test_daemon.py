@@ -1127,6 +1127,32 @@ def test_snapshot_builds_the_session_to_worktree_map() -> None:
     print("ok: snapshot derives the session-to-project map for event routing")
 
 
+def test_stale_target_returns_the_installed_bin_when_running_a_checkout() -> None:
+    from orch import install
+
+    saved = {k: os.environ.get(k) for k in ("HOME", "XDG_DATA_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["HOME"] = str(Path(tmp.name) / "home")
+        os.environ["XDG_DATA_HOME"] = str(Path(tmp.name) / "data")
+
+        assert daemon._stale_target() is None, "no install means nothing to re-exec onto"
+
+        install.install()
+        target = daemon._stale_target()
+        assert target is not None, \
+            "running from a checkout with an install present must target the install"
+        assert target == install.install_dir() / "bin" / "orch"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tmp.cleanup()
+    print("ok: a checkout-running daemon re-execs onto the canonical install")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

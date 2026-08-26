@@ -16,8 +16,14 @@ TOOL_BIN_PLACEHOLDER = "{{ORCH_BIN}}"
 
 
 def _tool_bin() -> Path:
-    """The orch dispatcher the tools shell to (`orch tasktool ...`). The
-    repo-local bin wins so a checkout works uninstalled."""
+    """The orch dispatcher the tools shell to. Prefers the canonical install's
+    `bin/orch` when one exists so every process bakes the same path; otherwise
+    the repo-local bin wins so a checkout works uninstalled."""
+    from . import install
+
+    canonical = install.canonical_bin()
+    if canonical is not None:
+        return canonical
     local = Path(__file__).resolve().parents[2] / "bin" / "orch"
     if local.exists():
         return local

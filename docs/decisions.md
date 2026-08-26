@@ -433,6 +433,21 @@ in one source file has one place to check.
   static, `.git`-free snapshot. `server.orch_bin()` and `custom_tools._tool_bin()`
   resolve the installed copy's own `bin/orch` by walking up from `__file__`, which
   is why the copy preserves the `bin/` + `src/` sibling layout.
+- **The baked `ORCH_BIN` is decoupled from the running tree.** A `__file__`-relative
+  walk only agrees across processes when they all run the same copy; a long-lived
+  daemon started from a checkout keeps old code while the CLI runs the installed
+  copy, so each bakes a different path into the custom tools and `orch doctor` flips
+  stale forever. Both resolvers prefer `install_dir()/bin/orch` (via
+  `install.canonical_bin()`) whenever an install exists, falling back to the running
+  tree only when uninstalled — so the config is identical no matter who wrote it.
+- **A daemon started from a checkout re-execs onto the install.** `daemon run`
+  compares its own source tree against the canonical install and, on drift,
+  `os.execv`s the installed binary. It never fires for a dev running the checkout
+  with no install present.
+- **`orch install` and `orch daemon restart` bounce the daemon.** `systemctl enable
+  --now` never restarts a running unit, so a fresh `ExecStart` was ignored by the
+  live supervisor. `daemon.install()` now restarts after enabling, and `orch daemon
+  restart` is a first-class subcommand, so new code always takes effect.
 - **There is exactly one canonical path, and the launcher is a real file.** `orch`
   resolves on `PATH` through `~/.local/bin/orch`, a non-symlink file that imports
   `orch.cli.main` from the installed `src` (recomputing the canonical dir from

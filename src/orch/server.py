@@ -157,6 +157,15 @@ def status() -> dict:
 
 
 def orch_bin() -> str:
+    """The orch dispatcher (server ORCH_BIN env, daemon unit ExecStart). Prefers
+    the canonical install's `bin/orch` when one exists so every process bakes
+    the same path; otherwise the repo-local bin wins so a checkout works
+    uninstalled."""
+    from . import install
+
+    canonical = install.canonical_bin()
+    if canonical is not None:
+        return str(canonical)
     local = Path(__file__).resolve().parents[2] / "bin" / "orch"
     if local.exists():
         return str(local)

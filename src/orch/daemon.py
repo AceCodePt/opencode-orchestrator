@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -749,9 +750,57 @@ class Supervisor:
         return self.apply(decide(self.snapshot()))
 
 
+def _stale_target() -> Path | None:
+    """The installed `bin/orch` to re-exec onto, or None when this daemon
+    already runs the install (or none exists)."""
+    try:
+        from . import install as install_mod
+
+        canonical = install_mod.install_dir() / "bin" / "orch"
+        if not canonical.is_file():
+            return None
+        mine_root = Path(__file__).resolve().parents[2]
+        if mine_root.resolve() == install_mod.install_dir().resolve():
+            return None
+        return canonical
+    except Exception:
+        return None
+
+
+def _reexec_if_stale(project: str | None, interval: float,
+                     once: bool, dry_run: bool, sse: bool) -> None:
+    """Re-exec onto the installed copy when running from a stale tree."""
+    canonical = _stale_target()
+    if canonical is None:
+        return
+    try:
+        from . import custom_tools
+
+        custom_tools.ensure()
+        argv = [str(canonical), "daemon", "run",
+                "--interval", str(interval)]
+        if project:
+            argv += ["--directory", project]
+        if once:
+            argv.append("--once")
+        if dry_run:
+            argv.append("--dry-run")
+        if not sse:
+            argv.append("--no-sse")
+        print(f"orch daemon: running from {Path(__file__).resolve().parents[2]}, "
+              f"canonical install is {canonical.parent.parent}; re-exec'ing so "
+              f"the supervisor enforces the installed code", flush=True)
+        os.execv(str(canonical), argv)
+    except Exception as e:  # never let a re-exec failure take the loop down
+        print(f"orch daemon: could not re-exec onto the installed copy: {e}",
+              file=sys.stderr, flush=True)
+
+
 def run(project: str | None = None, roots: list[str] | None = None,
         interval: float = 1.0, once: bool = False,
         dry_run: bool = False, sse: bool = True) -> int:
+    if not dry_run:
+        _reexec_if_stale(project, interval, once, dry_run, sse)
     sup = Supervisor(project=project, roots=roots, dry_run=dry_run)
     scope = project_label(project) if project else "every discovered project"
     print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
@@ -912,6 +961,14 @@ def install(interval: float = 1.0, enable: bool = True) -> list[str]:
         ["loginctl", "enable-linger", os.environ.get("USER") or ""],
     ):
         _run_config_cmd(cmd, out)
+    out.extend(restart())
+    return out
+
+
+def restart() -> list[str]:
+    """Bounce the daemon so it re-reads the unit and loads the installed code."""
+    out: list[str] = []
+    _run_config_cmd(["systemctl", "--user", "restart", UNIT_NAME], out)
     return out
 
 

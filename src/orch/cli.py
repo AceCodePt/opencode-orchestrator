@@ -908,6 +908,16 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print("linger  yes - survives logout and reboot")
         return 0 if info.get("ActiveState") == "active" else 1
 
+    if args.action == "restart":
+        if not daemon_mod.unit_path().exists():
+            print("no unit installed - nothing to restart. `orch install`",
+                  file=sys.stderr)
+            return 1
+        for line in daemon_mod.restart():
+            print(line)
+        info = daemon_mod.unit_status()
+        return 0 if info.get("ActiveState") == "active" else 1
+
     if args.action == "budget":
         if args.max is None:
             b = state.machine_budget()
@@ -1532,6 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="run the supervision loop (foreground; Ctrl-C stops)")
     ds = da.add_parser("status",
                        help="report what systemd says is supervising")
+    da.add_parser("restart",
+                  help="restart the supervised daemon so it loads the installed code")
     dm.add_argument("-C", "--directory",
                     help="supervise only this project (default: every project)")
     dm.add_argument("--project-only", action="store_true",

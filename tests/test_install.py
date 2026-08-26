@@ -185,6 +185,24 @@ def test_path_hint_offers_the_export_line() -> None:
     print("ok: the PATH hint appears only when the launcher dir is missing")
 
 
+def test_canonical_bin_tracks_the_installed_copy() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    saved = _set_env(Path(tmp.name))
+    try:
+        assert install.canonical_bin() is None, \
+            "no install yet means no canonical bin"
+
+        install.install()
+        canonical = install.canonical_bin()
+        assert canonical is not None
+        assert canonical == install.install_dir() / "bin" / "orch"
+        assert canonical.is_file(), "the canonical bin must be the installed binary"
+    finally:
+        _restore_env(saved)
+        tmp.cleanup()
+    print("ok: canonical_bin points at the installed binary once an install exists")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

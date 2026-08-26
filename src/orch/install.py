@@ -18,6 +18,13 @@ def install_dir() -> Path:
     return data_home() / "orch"
 
 
+def canonical_bin() -> Path | None:
+    """The installed `bin/orch`, when an install exists. Every `ORCH_BIN`/`TASKTOOL`
+    bake should use this one path so writers can't disagree."""
+    cand = install_dir() / "bin" / "orch"
+    return cand if cand.is_file() else None
+
+
 def launcher_dir() -> Path:
     return Path.home() / ".local" / "bin"
 

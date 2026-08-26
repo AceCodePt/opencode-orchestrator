@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import custom_tools  # noqa: E402
+from orch import custom_tools, install  # noqa: E402
 
 
 def test_ensure_installs_tools_with_the_backend_path_baked_in() -> None:
@@ -38,6 +39,29 @@ def test_render_substitutes_the_placeholder() -> None:
     assert b"{{ORCH_BIN}}" not in rendered
     assert rendered.endswith(b"'") and b"bin/orch" in rendered
     print("ok: the tool bridge gets the orch dispatcher path")
+
+
+def test_tool_bin_resolves_to_the_canonical_install_when_one_exists() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    saved = {k: os.environ.get(k) for k in ("HOME", "XDG_DATA_HOME")}
+    os.environ["HOME"] = str(Path(tmp.name) / "home")
+    os.environ["XDG_DATA_HOME"] = str(Path(tmp.name) / "data")
+    try:
+        assert install.canonical_bin() is None
+        assert custom_tools._tool_bin() == Path(__file__).resolve().parents[1] / "bin" / "orch", \
+            "without an install, the running tree's bin/orch is used"
+
+        install.install()
+        assert custom_tools._tool_bin() == install.install_dir() / "bin" / "orch", \
+            "with an install present, every process bakes the same canonical path"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tmp.cleanup()
+    print("ok: _tool_bin() prefers the canonical install so writers can't disagree")
 
 
 def main() -> int:
