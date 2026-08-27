@@ -77,18 +77,28 @@ def test_refuses_outside_a_project() -> None:
     print("ok: the tools refuse a git repo that is not an orch project")
 
 
-def test_refuses_off_base() -> None:
+def test_creates_from_a_non_base_worktree_into_base() -> None:
     root, tmp = _repo()
     wt = Path(tmp.name) / "feature"
     _git(root, "worktree", "add", "-q", "-b", "feature-x", str(wt), "main")
-    try:
-        tasktool._project(wt)
-        assert False, "expected ToolError"
-    except ToolError as e:
-        assert "feature-x" in str(e) and "base" in str(e)
+    before = _head(root)
+    top, common, base = tasktool._project(wt)
+    assert top == root, "the tool must resolve to the base worktree, not the caller"
+    r = tasktool.create(top, common, base, {
+        "name": "from-feature",
+        "requirements": ["landed in base"],
+    })
+    assert r["path"] == "tasks/from-feature/task.md"
+    assert r["committed"] is True and r["commitSha"]
+    assert (root / "tasks" / "from-feature" / "task.md").exists(), \
+        "the spec must land in the base worktree, not the calling worktree"
+    assert _head(root) != before, "the spec must be committed on base"
+    committed = _git(root, "show", "HEAD:tasks/from-feature/task.md")
+    assert "landed in base" in committed, "the commit on base must carry the spec"
+    assert not (wt / "tasks").exists(), "nothing must be written into the non-base worktree"
     _git(root, "worktree", "remove", "-f", str(wt))
     tmp.cleanup()
-    print("ok: the tools refuse a session running off the base branch")
+    print("ok: create_task runs from a non-base worktree and writes into base")
 
 
 # --- create ---------------------------------------------------------------

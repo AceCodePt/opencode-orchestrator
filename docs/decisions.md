@@ -332,7 +332,8 @@ in one source file has one place to check.
 - **Agent control is bounded by the tool, not by config.** Because the tools are
   machine-global, they are callable from any opencode session, so a per-project
   config gate would be theater. The safety invariants live in the tool itself:
-  refuse outside a project, refuse off the base branch, refuse a claimed task,
+  refuse outside a project, resolve the base (primary) worktree so a spec written
+  from any worktree lands and commits on the base branch, refuse a claimed task,
   refuse `delete_task` while any open declared task depends on it.
 
 ## `agent.py`

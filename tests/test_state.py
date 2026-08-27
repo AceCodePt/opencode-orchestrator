@@ -139,6 +139,22 @@ def test_scan_sees_a_claim_and_worktree() -> None:
     print("ok: a branch is a claim, and its worktree is found")
 
 
+def test_scan_does_not_pick_up_a_task_from_a_non_primary_worktree() -> None:
+    root, tmp = _repo()
+    wt = _claim(root, "feature-x")
+    (wt / "tasks" / "ghost").mkdir(parents=True)
+    (wt / "tasks" / "ghost" / "task.md").write_text("# Ghost\n\nDo it.\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "ghost on a feature branch only")
+    proj = _proj(root)
+    tasks = proj.scan()
+    ghost = [t for t in tasks if t.name == "ghost"]
+    assert not ghost or not any(t.declared for t in ghost), \
+        "a spec committed only on a non-primary worktree must not scan as declared"
+    tmp.cleanup()
+    print("ok: the daemon does not pick up a task spec from a non-primary worktree")
+
+
 def test_scan_reports_dirty_and_diff() -> None:
     root, tmp = _repo()
     _task(root, "a-task")

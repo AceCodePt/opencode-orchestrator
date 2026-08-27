@@ -42,12 +42,14 @@ def _slug(name: str) -> str:
 
 
 def _project(dir_: Path) -> tuple[Path, Path, str]:
-    """Resolve the base worktree the tool may write in, or raise.
+    """Resolve the base (primary) worktree the tools write into, or raise.
 
-    The tools write task specs into the working tree of the base branch only.
-    A session running anywhere else (a task worktree, a bare repo, a non-orch
-    checkout) is refused: the daemon judges by the committed base copy, so
-    specs written anywhere else are invisible to it."""
+    The tools write task specs into the working tree of the base branch only,
+    because the daemon picks tasks up from the committed base copy - never from
+    a non-primary worktree. A session may run from any worktree of the project
+    (the base worktree or a task worktree); the base worktree is resolved here
+    and is where the spec lands and gets committed, so the daemon always sees
+    it. A bare repo or a non-orch checkout is still refused."""
     if not dir_.is_dir():
         raise ToolError(f"{dir_} is not a directory")
     top, common, err = dispatch.project_of(dir_)
@@ -60,14 +62,15 @@ def _project(dir_: Path) -> tuple[Path, Path, str]:
             f"worktree of an orch project only."
         )
     base = verify.base_branch(top)
-    branch = dispatch.current_branch(top)
-    if branch != base:
+    common = Path(common)
+    base_wt = state._base_worktree(common, base)
+    if base_wt is None:
         raise ToolError(
-            f"refusing: {top} is on {branch or 'a detached HEAD'}, not the base "
-            f"branch {base}. Task specs only count committed on {base}; run this "
-            f"from the base worktree."
+            f"no worktree is checked out on the base branch {base!r}; the tools "
+            f"write task specs into the base (primary) worktree, so one must "
+            f"exist. Check out {base} in a worktree and try again."
         )
-    return top, Path(common), base
+    return base_wt, common, base
 
 
 def _committed(top: Path, base: str, rel: str) -> bool:

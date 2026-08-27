@@ -26,7 +26,9 @@ async function runTool(op: string, args: Record<string, unknown>, worktree: stri
 
 export default tool({
   description:
-    "Create a task spec at tasks/<name>/task.md in the project's base worktree. " +
+    "Create a task spec at tasks/<name>/task.md in the project's base (primary) " +
+    "worktree. May be run from any worktree of the project - the spec always lands " +
+    "in the base worktree, never the calling worktree. " +
     "Commits it to the base branch when wait_human_start is false, so the daemon sees " +
     "it and the loop can run on its own; with wait_human_start: true it stays an " +
     "uncommitted draft for the human to review. Pass commit to override. " +
