@@ -31,6 +31,21 @@ ALERT = "alert"
 NOTE = "note"
 CLEAR_ORPHANED = "clear-orphaned"
 
+LOG_NAME = "daemon.log"
+
+
+def _emit(line: str) -> None:
+    """Print a daemon log line to stdout (journal) and append it to the
+    persistent daemon log, so the daemon's decisions survive the journal."""
+    ts = time.strftime("%H:%M:%S")
+    print(f"{ts} {line}", flush=True)
+    try:
+        p = server.state_dir() / LOG_NAME
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(f"{ts} {line}\n")
+    except OSError:
+        pass
+
 
 @dataclass
 class Action:
@@ -804,18 +819,18 @@ def run(project: str | None = None, roots: list[str] | None = None,
         _reexec_if_stale(project, interval, once, dry_run, sse)
     sup = Supervisor(project=project, roots=roots, dry_run=dry_run)
     scope = project_label(project) if project else "every discovered project"
-    print(f"orch daemon: supervising {scope}, every {interval:g}s", flush=True)
+    _emit(f"orch daemon: supervising {scope}, every {interval:g}s")
     if sse and not once and not dry_run:
         sup.start_event_watcher()
-        print("orch daemon: listening on the shared server's /event stream for "
-              "per-event hooks", flush=True)
+        _emit("orch daemon: listening on the shared server's /event stream for "
+              "per-event hooks")
     try:
         while True:
             for line in sup.step():
-                print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
+                _emit(line)
             if sup._watcher is not None:
                 for line in list(sup._watcher.lines):
-                    print(f"{time.strftime('%H:%M:%S')} {line}", flush=True)
+                    _emit(line)
                 sup._watcher.lines.clear()
             if once:
                 return 0
