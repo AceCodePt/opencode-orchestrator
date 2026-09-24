@@ -33,6 +33,12 @@ CLEAR_ORPHANED = "clear-orphaned"
 
 LOG_NAME = "daemon.log"
 
+# The persistent log is a convenience mirror of journald, which already rotates.
+# A bug that logs per tick must not be able to fill the disk, so the file is
+# capped: once it passes MAX_LOG_BYTES it is truncated and only the tail kept.
+MAX_LOG_BYTES = 16 * 1024 * 1024
+KEEP_LOG_BYTES = 8 * 1024 * 1024
+
 
 def _emit(line: str) -> None:
     """Print a daemon log line to stdout (journal) and append it to the
@@ -43,6 +49,23 @@ def _emit(line: str) -> None:
         p = server.state_dir() / LOG_NAME
         with open(p, "a", encoding="utf-8") as fh:
             fh.write(f"{ts} {line}\n")
+        if p.stat().st_size > MAX_LOG_BYTES:
+            _trim_log(p)
+    except OSError:
+        pass
+
+
+def _trim_log(p: "Path") -> None:
+    """Keep only the tail of an oversized daemon log."""
+    try:
+        with open(p, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - KEEP_LOG_BYTES))
+            tail = fh.read()
+        with open(p, "wb") as fh:
+            fh.write(b"--- log trimmed (kept the most recent "
+                     b"entries) ---\n" + tail)
     except OSError:
         pass
 
@@ -211,14 +234,15 @@ def decide(snap: Snapshot) -> list[Action]:
 
         if t.interrupted:
             if t.dirty or t.diff:
-                actions.append(Action(
-                    NEEDS_REVIEW, t.name, "interrupted",
-                    "the task's turn was aborted (a user stop, or the turn "
-                    "died); its work is held for you to verify",
-                    project=t.project, worktree=t.worktree, branch=t.branch,
-                    base=t.base,
-                ))
-                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                if snap.now >= mem.wait_until.get(key, 0):
+                    actions.append(Action(
+                        NEEDS_REVIEW, t.name, "interrupted",
+                        "the task's turn was aborted (a user stop, or the turn "
+                        "died); its work is held for you to verify",
+                        project=t.project, worktree=t.worktree, branch=t.branch,
+                        base=t.base,
+                    ))
+                    mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
                 _reset_loop(mem, key, keep=("wait_until",))
                 continue
             # no work produced: fall through to the normal no-op close
@@ -254,13 +278,17 @@ def decide(snap: Snapshot) -> list[Action]:
             mem.dispatch_escaped.discard(key)
 
         if not t.worktree or not os.path.isdir(t.worktree):
-            actions.append(Action(
-                NEEDS_REVIEW, t.name, "worktree-gone",
-                "the worktree recorded for this branch does not exist",
-                project=t.project, worktree=t.worktree,
-                branch=t.branch, base=t.base,
-            ))
-            mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+            # A vanished worktree cannot repair itself, so re-emitting every tick
+            # would flood the log (hundreds of thousands of lines a day). Honour
+            # the review backoff and re-surface only when it expires.
+            if snap.now >= mem.wait_until.get(key, 0):
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name, "worktree-gone",
+                    "the worktree recorded for this branch does not exist",
+                    project=t.project, worktree=t.worktree,
+                    branch=t.branch, base=t.base,
+                ))
+                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
             _reset_loop(mem, key, keep=("wait_until",))
             continue
 

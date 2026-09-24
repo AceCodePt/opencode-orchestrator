@@ -256,6 +256,38 @@ def test_missing_worktree_needs_review() -> None:
     print("ok: a claimed task with no worktree needs review")
 
 
+def test_missing_worktree_is_not_re_reported_every_tick() -> None:
+    # A vanished worktree cannot repair itself; without the review backoff the
+    # daemon would append the same needs-review line on every tick, flooding the
+    # log (hundreds of thousands of lines a day).
+    mem = daemon.LoopState()
+    t = _task(worktree=None)
+    first = daemon.decide(_snap(tasks=[t], mem=mem))
+    assert _kinds(first) == [daemon.NEEDS_REVIEW], _kinds(first)
+
+    for tick in range(1, 60):
+        acts = daemon.decide(_snap(now=NOW + tick, tasks=[t], mem=mem))
+        assert acts == [], acts
+
+    # once the backoff expires it surfaces again, so a human is not forgotten
+    later = daemon.decide(_snap(now=NOW + daemon.REVIEW_BACKOFF_S + 1,
+                                tasks=[t], mem=mem))
+    assert _kinds(later) == [daemon.NEEDS_REVIEW], _kinds(later)
+    print("ok: a vanished worktree is reported once, not every tick")
+
+
+def test_interrupted_with_work_is_not_re_reported_every_tick() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, interrupted=True, diff=True)
+    first = daemon.decide(_snap(tasks=[t], mem=mem))
+    assert _kinds(first) == [daemon.NEEDS_REVIEW], _kinds(first)
+
+    for tick in range(1, 60):
+        acts = daemon.decide(_snap(now=NOW + tick, tasks=[t], mem=mem))
+        assert acts == [], acts
+    print("ok: an interrupted task is held for review once, not every tick")
+
+
 def test_interrupted_with_work_is_held_for_review() -> None:
     acts = daemon.decide(_snap(tasks=[_task(session=state.SESSION_IDLE,
                                             interrupted=True, diff=True)]))
@@ -286,6 +318,18 @@ def test_orphaned_asks_emit_a_clear_action() -> None:
     assert clear.orphaned[0]["id"] == "per_1"
     assert clear.port == 4096
     print("ok: orphaned asks emit a clear action")
+
+
+def test_daemon_log_is_capped() -> None:
+    # A per-tick logging bug must not fill the disk: the persistent log is
+    # trimmed once it passes the cap, keeping the most recent entries.
+    tmp = tempfile.TemporaryDirectory()
+    p = Path(tmp.name) / "daemon.log"
+    p.write_bytes(b"x" * (daemon.MAX_LOG_BYTES + 1))
+    daemon._trim_log(p)
+    assert p.stat().st_size <= daemon.KEEP_LOG_BYTES + 200, p.stat().st_size
+    assert p.read_bytes().startswith(b"--- log trimmed")
+    print("ok: an oversized daemon log is trimmed, not left to grow unbounded")
 
 
 def test_apply_clears_orphaned_asks() -> None:
