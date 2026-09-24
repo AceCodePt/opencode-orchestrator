@@ -216,6 +216,38 @@ def test_scan_marks_a_missing_worktree() -> None:
     print("ok: a claimed task with a missing worktree needs review")
 
 
+def test_scan_ignores_a_long_lived_branch_that_is_not_a_task() -> None:
+    # A project can keep `main` alongside its base (here `preview`). That branch
+    # is not a task, has no declaration and no worktree, and must not be
+    # reported as a stalled task with a missing worktree.
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name) / "wt"
+    root.mkdir(parents=True)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "seed").write_text("x")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+    # base is `preview`; `main` stays as a long-lived branch beside it, with no
+    # worktree of its own
+    _git(root, "branch", "preview")
+    _git(root, "checkout", "-q", "preview")
+    orch = root / ".orchestration"
+    orch.mkdir(parents=True)
+    (orch / "config.json").write_text('{"baseBranch": "preview"}\n')
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "orchestration")
+    _task(root, "a-task")
+
+    proj = _proj(root)
+    names = {t.name for t in proj.scan()}
+    assert "main" not in names, names
+    assert "a-task" in names
+    tmp.cleanup()
+    print("ok: a long-lived branch that is not a task is ignored")
+
+
 def test_archived_tasks_are_listed_as_archived() -> None:
     root, tmp = _repo()
     _task(root, "a-task")

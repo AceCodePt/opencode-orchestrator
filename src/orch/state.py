@@ -654,8 +654,13 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     base = proj.base
     declared = _names_in(common, base, TASKS_REL)
     archived = _names_in(common, base, ARCHIVE_REL)
-    branches = {b for b in _branches(common) if b != base}
     wt_by_branch = {b: p for p, b in _worktrees(common)}
+    # A task claim is a branch that is either a known task slug (declared or
+    # archived) or has a live worktree. A long-lived branch that is neither (a
+    # project's `main` alongside a `preview` base, say) is not a task, and must
+    # not be reported as one stalled with a missing worktree.
+    known = set(declared) | set(archived) | set(wt_by_branch)
+    branches = {b for b in _branches(common) if b != base and b in known}
     cap = int(committed_config(common, base).get("verify", {}).get("retryCap") or 3)
 
     names = sorted(set(declared) | set(branches) | set(archived))
