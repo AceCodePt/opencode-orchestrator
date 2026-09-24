@@ -1,9 +1,17 @@
-import { Plugin } from "@opencode/plugin"
+// No import: OpenCode 2 accepts a plugin as a plain default-exported object
+// `{ id, setup }`. Importing `@opencode/plugin` is documented but the package is
+// not resolvable on every install, which makes the plugin fail to load, so this
+// is written against the raw context to stay loadable everywhere.
 
 // Absolute path to the orch dispatcher, baked in by the orch installer.
 const TASKTOOL = "{{ORCH_BIN}}"
 
 type JsonSchema = Record<string, unknown>
+type ToolEditor = { add: (tool: unknown) => void }
+type PluginContext = {
+  location: { directory: string }
+  tool: { transform: (cb: (editor: ToolEditor) => void) => Promise<unknown> }
+}
 
 // The four task-intake tools, registered through the V2 tool transform. They are
 // thin bridges to the same Python backend as the CLI (`orch tasktool`), so
@@ -69,7 +77,7 @@ const CREATE_DESCRIPTION =
   "checkboxes into Requirements. Never create a TASKS.md and never touch anything " +
   "outside tasks/."
 
-function registerTools(ctx: { location: { directory: string } }, editor: any): void {
+function registerTools(ctx: PluginContext, editor: ToolEditor): void {
   const fallback = ctx.location.directory
 
   const worktreeOf = (context: any): string =>
@@ -210,11 +218,11 @@ function registerTools(ctx: { location: { directory: string } }, editor: any): v
   })
 }
 
-export default Plugin.define({
+export default {
   id: "orch.tasks",
-  async setup(ctx) {
+  async setup(ctx: PluginContext) {
     await ctx.tool.transform((editor) => {
-      registerTools(ctx as any, editor)
+      registerTools(ctx, editor)
     })
   },
-})
+}

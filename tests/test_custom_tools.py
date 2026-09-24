@@ -24,8 +24,12 @@ def test_ensure_installs_the_plugin_with_the_backend_path_baked_in() -> None:
             "the placeholder must be substituted"
         assert '"tasktool", op' in body, \
             "the bridge must spawn `bin/orch tasktool <op> ...`"
-        assert "Plugin.define" in body and "ctx.tool.transform" in body, \
-            "custom tools are registered by a V2 plugin"
+        assert "ctx.tool.transform" in body and "setup" in body, \
+            "custom tools are registered by a V2 plugin's setup()"
+        assert not any(
+            line.startswith("import ") or line.startswith("from ")
+            for line in body.splitlines()
+        ), "the plugin must not import @opencode/plugin (it is not always resolvable)"
         for name in ("create_task", "update_task", "archive_task", "delete_task"):
             assert f'name: "{name}"' in body, name
         assert "wait_human_start" in body, \
