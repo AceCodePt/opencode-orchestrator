@@ -14,7 +14,7 @@ keep a small tracked `.orchestration/` directory holding only what that project 
 
 The state is the repo. Tasks are derived from git — `tasks/<name>/task.md` declares a
 task, a branch named `<name>` claims it, the worktree decides whether it is done.
-Runtime facts come from `/proc` and the shared server. There is no SQLite, no registry,
+Runtime facts come from `/proc` and the shared opencode service. There is no SQLite, no registry,
 no generated backlog file: nothing can drift because there is nothing stored.
 
 ## The loop
@@ -53,8 +53,8 @@ Walking one task through the whole loop, from a raw idea to archived work:
    Dispatch refuses if `refs/heads/<name>` already exists — the branch is the claim,
    atomically, so two dispatches can never race. A worktree is created
    (`git worktree add -b <name> <base>`), the `pre-task-create`/`post-task-create`
-   hooks run, and a session is opened on the shared server bound to that worktree,
-   fed the task prompt via `prompt_async`. No `opencode run` subprocess is spawned:
+   hooks run, and a session is opened on the shared opencode service bound to that worktree,
+   fed the task prompt via `prompt`. No `opencode run` subprocess is spawned:
    the agent *is* the session.
 3. **The agent works.** It reads the spec, edits the worktree, and commits when it
    believes it is done. If it needs a permission it *blocks* on a pending ask rather
@@ -72,7 +72,7 @@ Walking one task through the whole loop, from a raw idea to archived work:
    branch (never the agent's working-tree copy). On a pass the hook also idempotently
    commits any files the agent left uncommitted, and the daemon merges the branch
    `--no-ff` into base, then removes the worktree and branch and archives the spec. On
-   a fail the failure is injected back into the agent's session via `prompt_async` and
+   a fail the failure is injected back into the agent's session via `prompt` and
    it retries, bounded by `retryCap`; once the cap is spent the task is `needs-review`.
    A project with no committed hook accepts work implicitly — absence of a hook is the
    opt-in.
@@ -103,8 +103,8 @@ Stdlib-only Python, no dependency install step. `orch install` copies the
 whole tree (minus `.git`) to one canonical path (`$XDG_DATA_HOME/orch`,
 default `~/.local/share/orch`) and puts a real launcher on `PATH` at
 `~/.local/bin/orch`, so `orch` resolves machine-wide even when no checkout is
-present. Agents run **headless**: one shared
-`opencode serve` hosts every worktree.
+present. Agents run **headless**: one shared opencode background service hosts
+every worktree.
 
 ```bash
 orch init                     # scaffold .orchestration/ (config + docs + ignore rules + inert hook .example references) and install the machine-level hook templates; takes the project's trust
@@ -141,7 +141,7 @@ orch install                 # copy orch to ~/.local/share/orch, write a ~/.loca
 orch uninstall                # remove the launcher and the install dir, plus config-level traces; keep projects alone
 orch daemon status            # is anything actually supervising
 orch daemon run --once --dry-run # decide and print, change nothing
-orch daemon run --no-sse         # skip the /event stream consumer
+orch daemon run --no-sse         # skip the /api/event stream consumer
 orch version                  # show the orch version
 ```
 
@@ -160,7 +160,7 @@ approve itself. A repo you merely clone can never auto-run its verification hook
 they scaffold work into (each is the owner acting); `doctor` fails on an untrusted
 project.
 
-Requires opencode **1.18.11 or newer** — see Prerequisites.
+Requires opencode **2.0 or newer** — see Prerequisites.
 
 `doctor` exits non-zero when the machinery itself is wrong, so it composes in a shell.
 
@@ -172,8 +172,9 @@ Requires opencode **1.18.11 or newer** — see Prerequisites.
   `~/.local/share/orch` plus a `~/.local/bin/orch` launcher), but `bin/orch` stays a
   plain script that works straight from a checkout.
 - **git** — worktrees, branches, and the bare repo *are* the state store.
-- **opencode 1.18.11 or newer** on `PATH` — agents run headless against one shared
-  `opencode serve`; `doctor` checks the live version against the floor.
+- **opencode 2.0 or newer** on `PATH` — agents run headless against the one
+  shared opencode background service (`opencode serve --service`); `doctor`
+  checks the live version against the floor.
 
 ## Optional technologies
 
@@ -191,14 +192,13 @@ Requires opencode **1.18.11 or newer** — see Prerequisites.
 ## The primary agent (`orch attach`)
 
 Separate from tasks, every project can have **one primary agent**: a persistent
-conversation attached to the project's base worktree on the shared server, found
-live by its `orch:agent` session title. `orch attach` creates it on first use,
-then hands you opencode's own interactive attach TUI pointed straight at that
-session (`opencode attach <url> --session <id>` in the base worktree) — so the
-conversation remembers everything, and you type in the same interface you always
-use instead of a CLI-side shim. Compaction, streaming, and every other
-conversation feature are opencode's own; orch only resolves the project's server
-and session for you.
+conversation attached to the project's base worktree on the shared opencode
+service, found live by its `orch:agent` session title. `orch attach` creates it
+on first use, then `exec`s opencode's own TUI pointed straight at that session
+(`opencode <base> --session <id>`) — so the conversation remembers everything,
+and you type in the same interface you always use instead of a CLI-side shim.
+Compaction, streaming, and every other conversation feature are opencode's own;
+orch only resolves the project's service and session for you.
 
 `orch attach` is context-sensitive: run from a **claimed task worktree** and it
 attaches to that task's session instead (creating it on first use, exactly like
@@ -334,13 +334,15 @@ one. And it is **non-destructive**: the old base branch is not removed; it simpl
 stays in place as an ordinary checkout. Only the project's notion of which branch is
 the base moves.
 
-## Task intake: opencode custom tools
+## Task intake: the opencode plugin
 
-Intake is not a CLI command — it is four opencode **custom tools** installed once per
-machine by orch (`orch install`, or ensured by `orch server start`) into
-`~/.config/opencode/tools/`, so every opencode session — the shared server's headless
-sessions and any local TUI in any project — can call them. There is no `task draft`;
-you draft in the conversation itself.
+Intake is not a CLI command — it is four opencode **custom tools**, registered by
+one orch-owned **plugin** installed once per machine (`orch install`, or ensured
+by `orch server start`) into `~/.config/opencode/plugins/orch.ts`. OpenCode 2
+registers custom tools through a plugin, so this replaces the V1 `tools/`
+directory. Every opencode session — the shared service's headless sessions and
+any local TUI in any project — can call them. There is no `task draft`; you draft
+in the conversation itself.
 
 | Tool | What it does |
 | --- | --- |
@@ -417,7 +419,7 @@ inert `*.example` template for every event; copy one to its real name and
 Besides the ten machine events below, `orch init` also scaffolds a
 `*.example` per opencode server event (the vocabulary in `src/orch/opencode_events.py`,
 dots mapped to dashes — `session.idle` → `session-idle.example`). The daemon's
-SSE consumer reads the server's `GET /event` stream and fires a copied
+SSE consumer reads the shared service's `GET /api/event` stream and fires a copied
 executable hook for each event, with the event's JSON on stdin and
 `ORCH_EVENT=<dashed-name>` set — a session-scoped event also fires its project
 hook in the owning worktree.
@@ -435,7 +437,7 @@ nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
 | `dispatched` | a task agent dispatched (`orch task start` or the scheduler) |
 | `dispatch-failed` | a dispatch failed |
 | `resolve-failed` | automatic conflict resolution failed |
-| `restart-server` | the shared server restarted |
+| `restart-server` | the shared opencode service restarted |
 | `reset` | `orch task reset` |
 | `archived` | `orch task archive` |
 
@@ -474,9 +476,11 @@ not a hostile one, but the blast radius is bounded:
   hook — can opt into the full env with `"verify": {"env": "full"}`.
 - **Permissions are one-time.** `orch task answer` approves a blocked permission
   once; nothing is persisted to opencode's runtime config.
-- **The control plane is loopback-only and the logs are private.** The shared server
-  binds `127.0.0.1`; state and session logs live in `~/.local/state/orch` created
-  `0700` with `0600` files, so other users cannot read conversations or the server port.
+- **The control plane is loopback-only and the logs are private.** The shared
+  opencode service binds `127.0.0.1` and writes its registration and password to
+  `~/.local/state/opencode/service.json` (`0600`); orch's state and session logs
+  live in `~/.local/state/orch` created `0700` with `0600` files, so other users
+  cannot read conversations or the port.
 
 Same-user compromise is out of scope: anything that already runs as you can read your
 files and drive the agents. If you need containment against hostile agents, run them in
@@ -495,8 +499,9 @@ of `todo` tasks, opt-in per project and trust-bound). Task intake via the machin
 against live agents (an agent calling the tools writes, amends, moves, and removes
 `tasks/` specs through them). A slow agent that spends minutes
 inside a tool is
-held, not torn down: the daemon treats a live detached `opencode run` process in the
-worktree as the agent working and only settles once it exits.
+held, not torn down: the daemon treats a busy session (opencode reports it
+working for the whole agent loop) as the agent working and only settles once it
+goes idle.
 
 The security controls are covered by unit tests: the **trust boundary** (untrusted projects
 only alert), the **env filter** (agents and verification hooks run without the owner's secrets), and
@@ -504,8 +509,8 @@ the **`.orchestration` deny** installed by `orch install`.
 
 `orch daemon` supervises: it settles tasks, runs the committed verification hook itself, retriggers
 failing agents up to `retryCap`, merges verified work, archives done work, restarts a
-dead or unresponsive shared server, flags blocked permissions, and consumes the shared
-server's `/event` SSE stream to fire per-event hooks. A **merge conflict**
+dead or unresponsive shared opencode service, flags blocked permissions, and consumes the
+shared service's `/api/event` SSE stream to fire per-event hooks. A **merge conflict**
 is left in progress and the task reads `needs-review (merge-conflict)`. Who resolves it
 follows `wait_human_start`: a task a human had to start needs the human to resolve it
 in the base worktree (`git add`/`git commit`); a machine-started task gets an agent
@@ -527,7 +532,7 @@ a pass.
 Not built yet: routing `needs-review` onwards or unblocking a parent agent.
 
 The per-event hooks are live: the daemon's SSE consumer reads the server's
-`GET /event` stream and fires a copied, executable hook per event type in
+`GET /api/event` stream and fires a copied, executable hook per event type in
 `src/orch/opencode_events.py` (templated machine-level as `~/.config/orch/hooks/*.example`),
 with the event JSON on stdin.
 
@@ -554,8 +559,8 @@ session-idle verification hook never firing from the stream.
 - `bin/` — dispatcher (`orch`; `orch tasktool` is a hidden backend subcommand)
 - `src/orch/` — state (scan), dispatch, daemon, verify, merge, server, doctor, CLI,
   `tasktool.py` (the custom-tool backend), `custom_tools.py` (installs the global
-  tools), `tools/` (the `.ts` tool bridges),
+  plugin), `tools/orch.ts` (the V2 plugin that registers the four task tools),
   `opencode_events.py` (the server-event catalog), and `sse.py` (the daemon's
-  `/event` stream consumer that fires per-event hooks)
+  `/api/event` stream consumer that fires per-event hooks)
 - `docs/` — architecture and decisions
 - `tasks/` — one folder per task, each with a `task.md`

@@ -13,7 +13,7 @@
 **The repo is the state.** Task management — which tasks exist, their status, their
 ordering — is derived from the project's own git repository, never stored anywhere
 else. Runtime facts — what is running right now — are read live from `/proc` and
-the shared server. There is no database, no cache, no registry, no generated
+the shared opencode service. There is no database, no cache, no registry, no generated
 backlog file. Nothing can drift because there is nothing to drift from.
 
 | Concept | Derived from |
@@ -22,9 +22,9 @@ backlog file. Nothing can drift because there is nothing to drift from.
 | task claimed | `refs/heads/<name>` exists — **the branch is the claim** |
 | worktree / branch | `git worktree list` |
 | dirty / diff | `git status --porcelain` in the worktree; `rev-list --count base..branch` |
-| session state | the shared server: `/session?directory=<worktree>` |
+| session state | the shared opencode service: `/api/session?directory=<worktree>` |
 | dispatch alive | a session bound to the worktree that is busy or blocked — task agents are server sessions, not subprocesses |
-| dispatch orchestrated | the task has a session on the shared server (every task session is created by `orch task start` or the scheduler via `POST /session`) |
+| dispatch orchestrated | the task has a session on the shared opencode service (every task session is created by `orch task start` or the scheduler via `POST /api/session`) |
 | which projects exist | a live scan of `$HOME`, `/mnt`, and orch's dev root `/tmp/opencode` (env `ORCH_ROOTS` overrides) for `.orchestration/` dirs |
 | retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
 
@@ -77,11 +77,11 @@ function of a snapshot, so every branch above is testable.
 
 ### When is an agent "still working"?
 
-Every task agent is a session on the shared server bound to its worktree — created via
-`POST /session?directory=<worktree>`, prompted via `prompt_async` — so there is no
+Every task agent is a session on the shared opencode service bound to its worktree — created via
+`POST /api/session` (with `location.directory`), prompted via `prompt` — so there is no
 dispatch subprocess to inspect. The daemon reads three signals from the server:
 
-- **busy** — the session appears in `/session/status` (opencode reports `busy` for the
+- **busy** — the session appears in `/api/session/active` (opencode reports `running` for the
   whole agent loop, including long-running tool calls); the agent is working.
 - **blocked** — a live pending ask for that worktree in `/permission` or `/question`; the
   agent is waiting on a human.
@@ -90,7 +90,7 @@ dispatch subprocess to inspect. The daemon reads three signals from the server:
 - **idle** — neither; the work is settled, and the verification hook plus the worktree
   state decide the outcome.
 
-A human-attached client (`opencode attach`) shares the same sessions and is simply
+A human-attached opencode TUI shares the same sessions and is simply
 another viewer; nothing about a controlling terminal distinguishes an orchestrated
 agent anymore. A pending ask whose **owning message** was aborted is **orphaned** — the
 turn that created it is dead, so it is not a block; the daemon replies `reject` to clear
@@ -111,7 +111,7 @@ Per claimed task, each cycle:
    - otherwise: the committed verification hook decides, or its absence is the
      implicit unverified state:
      - **hook present, pass** → the hook committed → diff → `merge`; no diff → `remove`
-     - **hook present, fail** → inject the failure via `prompt_async`; retry++;
+     - **hook present, fail** → inject the failure via `prompt`; retry++;
        `< cap` wait for the agent to work again, `>= cap` → `needs-review`
        (`retries-exhausted`)
      - **no committed verification hook** → the daemon commits the work itself and
@@ -148,7 +148,7 @@ commits the stragglers on a pass.
 | What is claimed? | **git refs** — `refs/heads/<name>` |
 | What orders the work? | **the base branch** — `dependencies:` in each task's front matter |
 | Is the work committed and passing? | **the worktree** — clean + diff + the daemon's own verification run |
-| What is running right now? | **live** — `/proc`, the shared server |
+| What is running right now? | **live** — `/proc`, the shared opencode service |
 | How long since… (retries, settle) | **the daemon's memory** — restart-losing by design |
 
 ## The repo is the tracker
@@ -180,7 +180,7 @@ or writes issues, labels, or PRs.
                           └───────┬──────┘       │
                                   │ HTTP         │
    ┌────────────────────────────▼──────────────▼────────────────────┐
-   │  ONE `opencode serve` per machine (headless, always a port)    │
+   │  ONE opencode background service per machine (always a port)   │
    │  sessions per worktree; agents are server sessions, never runs │
    └───────────────────────────────┬────────────────────────────────┘
                                     │ the verification hook
@@ -204,7 +204,7 @@ cached in-memory for ~60s.
 ### 2. The daemon — policy and authority
 
 Consumes the scan, decides, and is the only component permitted to act. Its actions:
-restart the shared server, inject a verification failure back into a session, merge a verified
+restart the shared opencode service, inject a verification failure back into a session, merge a verified
 branch, remove a no-op, mark `needs-review`, alert on a blocked permission. It runs
 the verification hook itself — there is no verdict it accepts from anywhere, because there is no
 plugin left to report one.
@@ -229,7 +229,7 @@ string cannot do this job.
 | `orch project scheduler [<n>\|off]` | show or set the project's auto-dispatch cap (`scheduler.maxConcurrent`). Writes into the base worktree's `.orchestration/config.json` for review and commit; the committed copy is the only one in force |
 | `orch daemon budget [<n>\|off]` | show or set the machine-wide auto-dispatch cap in `~/.config/orch/daemon.json`; `0` disables scheduling machine-wide, `off`/absent means per-project caps only |
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
-| `create_task`/`update_task`/`archive_task`/`delete_task` | machine-global opencode custom tools (installed by orch into `~/.config/opencode/tools/`) — intake is a conversation, not a command: any opencode session can create/amend/move/remove `tasks/` specs from params. None ever commits or trusts |
+| `create_task`/`update_task`/`archive_task`/`delete_task` | machine-global opencode custom tools (installed by orch into `~/.config/opencode/plugins/`) — intake is a conversation, not a command: any opencode session can create/amend/move/remove `tasks/` specs from params. None ever commits or trusts |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
 | `orch task list` | render the scan for this project; `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take |
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted |
@@ -239,7 +239,7 @@ string cannot do this job.
 | `orch verify` | inspect whether the committed verification hook is trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify --run` | run the committed verification hook here and say why |
-| `orch attach` | attach the interactive TUI on the shared server — from inside a claimed task worktree to that task's session (create it on first use), otherwise to the project's primary agent (create the `orch:agent` session on first use) |
+| `orch attach` | attach the interactive TUI on the shared opencode service — from inside a claimed task worktree to that task's session (create it on first use), otherwise to the project's primary agent (create the `orch:agent` session on first use) |
 | `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a daemon no-op), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
 
 The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
@@ -268,7 +268,7 @@ unverified project.
 - One `~/.config/orch/hooks/<event>.example` template per opencode server event (the
   vocabulary in
   `src/orch/opencode_events.py`, the single source of truth). The daemon's SSE
-  consumer reads the shared server's `GET /event` stream and fires a copied,
+  consumer reads the shared opencode service's `GET /api/event` stream and fires a copied,
   executable hook for each event, with the event's JSON on stdin and
   `ORCH_EVENT=<dashed-name>` set; a session-scoped event also fires in the
   worktree that owns the session. `session.idle` is the one exception:
@@ -308,12 +308,13 @@ for blocked alerts). Existing dedup carries over — alerts fire once per reques
 ### 5. The primary agent — the project's own conversation
 
 Distinct from task agents, a project can have **one persistent primary agent**
-(`orch attach`). It is a session on the shared server attached to the project's
+(`orch attach`). It is a session on the shared opencode service attached to the project's
 base worktree, found live by its `orch:agent` session title — no stored state,
 matching the "the repo is the state" rule. First use creates it with
-`POST /session?directory=<base>`; `orch attach` then runs opencode's own
-`attach <url> --session <id>` TUI on it, so every further message continues the
-same session via the normal client, not a headless proxy. Like task agents it is a
+`POST /api/session` (with `location.directory`); `orch attach` then runs
+opencode's own TUI on it (`opencode <base> --session <id>`), so every further
+message continues the same session via the normal client, not a headless proxy.
+Like task agents it is a
 plain server session with **no `opencode run` loop**, so a permission ask stays
 pending and is surfaced in the attached TUI instead of being auto-rejected. The
 primary agent edits the base worktree uncommitted and is **outside the daemon's
@@ -328,13 +329,13 @@ loop**: it is never verified, merged, or torn down, and its work is never a task
 4. CLI creates the worktree (`git worktree add -b <name> <base>`), pruning first.
 5. CLI runs `hooks/post-task-create` (the committed base copy) from the new worktree.
 6. CLI notes whether a committed verification hook exists; absence is fine — verification is opt-in by committing the hook.
-7. CLI creates a task session on the shared server, bound to the new worktree, and
+7. CLI creates a task session on the shared opencode service, bound to the new worktree, and
    sends the task prompt — no subprocess is spawned, so nothing is detached and
    nothing can auto-answer a permission ask:
 
    ```
-   POST /session?directory=<worktree>            (title: <name>)
-   POST /session/{id}/prompt_async               (parts: the task prompt)
+   POST /api/session                       (location.directory: <worktree>; title: <name>)
+   POST /api/session/{id}/prompt           (text: the task prompt, delivery: queue)
    ```
 
 The dispatch call returning is not the task finishing. Completion is derived later
@@ -425,7 +426,7 @@ so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
    `wait_human_start`**: a human resolves a human-started task in the base worktree
    (`git add`/`git commit`); a machine-started task gets its own agent dispatched into
    the base worktree (a **server session** titled `<name>-merge-conflict` via
-   `prompt_async`, not an `opencode run` subprocess) to resolve and commit, bounded
+   `prompt`, not an `opencode run` subprocess) to resolve and commit, bounded
    by the same `retryCap` before it escalates to a human. Once the
    merge lands either way, the branch is an ancestor of base and the daemon's no-op
    path archives the task. A conflicted task is never re-verified, re-merged, or torn
@@ -463,7 +464,7 @@ signals any consumer can read:
 - `orch task list` renders the scan — blocked sessions and every `needs-review`
   task (`--json` for machines).
 - `orch task answer <name> allow|deny` replies to the blocked permission (or the
-  answer text, for a question) over the shared server, unblocking the agent directly.
+  answer text, for a question) over the shared opencode service, unblocking the agent directly.
 - The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
 - A global `alert` hook (or `needs-review`, `merged`, …) does the delivery — push to
   a phone, an HTTP endpoint, anything the machine owner's script can do.
@@ -491,7 +492,8 @@ built on the daemon's log + scan rather than on a verdict table.
 7. The agent declares done by committing; only a committed, diffing branch can merge,
    and it merges only after the daemon's own verification run passed it (or, when no
    hook is committed, after the daemon's implicit acceptance commit).
-8. Kill by recorded pid (a specific process found by exact cmdline), never by pattern.
+8. A dispatch is a server session, never a subprocess — there is nothing to detach
+   or kill; liveness is the session's state in the shared service.
 9. Unavailability never produces a pass. Store gone (there is none), server down,
    verification hook timed out, worktree gone: each lands on `needs-review`.
 10. Every project-specific decision is a hook or config value, never daemon or CLI
@@ -527,7 +529,7 @@ still bounded:
   stays lazy-agent.
 - **Permissions are one-time.** `task answer` approves a blocked permission once;
   nothing is persisted to opencode's runtime config.
-- **Loopback control plane, private state.** The shared server binds `127.0.0.1`;
+- **Loopback control plane, private state.** The shared opencode service binds `127.0.0.1`;
   `~/.local/state/orch` is created `0700` with `0600` files, so other users can read
   neither the port nor the session logs.
 
@@ -539,9 +541,9 @@ verification hooks) is deliberately not provided.
 model it uses, what its prompt says — all out of scope. A project supplies its own
 checks through `.orchestration/`.
 
-**The supported harness floor is 1.18.11.** Anything newer is a bonus. The shared
-server's live version is checked by `doctor` against the floor; there is no version
-history store any more.
+**The supported harness floor is 2.0.** Anything newer is a bonus. The shared
+opencode service's live version is checked by `doctor` against the floor; there is
+no version history store any more.
 
 **Deferred, with nothing built on either:**
 - Routing `needs-review` onwards or unblocking a parent agent. (The "human needed"

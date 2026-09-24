@@ -10,28 +10,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from orch import custom_tools, install  # noqa: E402
 
 
-def test_ensure_installs_tools_with_the_backend_path_baked_in() -> None:
+def test_ensure_installs_the_plugin_with_the_backend_path_baked_in() -> None:
     tmp = tempfile.TemporaryDirectory()
-    saved_tools = custom_tools.TOOLS_DIR
-    custom_tools.TOOLS_DIR = Path(tmp.name) / "tools"
+    saved_dir = custom_tools.PLUGIN_DIR
+    custom_tools.PLUGIN_DIR = Path(tmp.name) / "plugins"
     try:
         assert custom_tools.check(), "nothing installed yet must fail doctor"
         assert custom_tools.ensure() is True, "first install must report a change"
+        dest = custom_tools.PLUGIN_DIR / "orch.ts"
+        assert dest.exists(), "the V2 plugin must be installed"
+        body = dest.read_text()
+        assert custom_tools.TOOL_BIN_PLACEHOLDER not in body, \
+            "the placeholder must be substituted"
+        assert '"tasktool", op' in body, \
+            "the bridge must spawn `bin/orch tasktool <op> ...`"
+        assert "Plugin.define" in body and "ctx.tool.transform" in body, \
+            "custom tools are registered by a V2 plugin"
         for name in ("create_task", "update_task", "archive_task", "delete_task"):
-            assert (custom_tools.TOOLS_DIR / f"{name}.ts").exists(), name
-            body = (custom_tools.TOOLS_DIR / f"{name}.ts").read_text()
-            assert custom_tools.TOOL_BIN_PLACEHOLDER not in body, \
-                "the placeholder must be substituted"
-            assert '"tasktool", op' in body, \
-                "the bridge must spawn `bin/orch tasktool <op> ...`"
-        assert "wait_human_start" in (custom_tools.TOOLS_DIR / "create_task.ts").read_text(), \
+            assert f'name: "{name}"' in body, name
+        assert "wait_human_start" in body, \
             "the drafting guidance lives in the tool description"
         assert not custom_tools.check(), "a current install must pass doctor"
         assert custom_tools.ensure() is False, "an unchanged install is a no-op"
     finally:
-        custom_tools.TOOLS_DIR = saved_tools
+        custom_tools.PLUGIN_DIR = saved_dir
         tmp.cleanup()
-    print("ok: ensure installs the tools (path baked in), idempotently")
+    print("ok: ensure installs the plugin (path baked in), idempotently")
 
 
 def test_render_substitutes_the_placeholder() -> None:

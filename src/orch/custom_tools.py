@@ -4,13 +4,15 @@ import os
 import shutil
 from pathlib import Path
 
-# Sources shipped with orch: the custom-tool bridges. The drafting guidance
-# lives in the tool descriptions themselves - a skill would only drift from
-# them, and it would only fire if a model decided to load it.
+# Sources shipped with orch: the task-intake bridge. In OpenCode 2 custom tools
+# are registered by a *plugin* (there is no `tools/` directory any more), so orch
+# installs one plugin whose `setup` registers create_task/update_task/
+# archive_task/delete_task through `ctx.tool.transform`. The drafting guidance
+# lives in the tool descriptions themselves - a skill would only drift from them.
 _TOOLS_SRC = Path(__file__).resolve().parent / "tools"
 
-# Global destination, read by the shared server and every local opencode TUI.
-TOOLS_DIR = Path("~/.config/opencode/tools").expanduser()
+# The global plugin directory OpenCode 2 discovers for every project.
+PLUGIN_DIR = Path("~/.config/opencode/plugins").expanduser()
 
 TOOL_BIN_PLACEHOLDER = "{{ORCH_BIN}}"
 
@@ -57,25 +59,29 @@ def tool_sources() -> list[Path]:
     return sorted(p for p in _TOOLS_SRC.iterdir() if p.suffix == ".ts")
 
 
+def plugin_paths() -> list[Path]:
+    return [PLUGIN_DIR / src.name for src in tool_sources()]
+
+
 def ensure() -> bool:
-    """Make the machine's global custom tools current. True when anything was
-    written (a fresh tool set needs a server restart)."""
+    """Make the machine's global opencode plugin current. True when anything was
+    written (a fresh plugin is picked up by the service as it reloads)."""
     changed = False
     for src in tool_sources():
-        changed |= _write_if_different(TOOLS_DIR / src.name, _render(src.read_text()))
+        changed |= _write_if_different(PLUGIN_DIR / src.name, _render(src.read_text()))
     return changed
 
 
 def check() -> list[str]:
-    """Doctor-style problems: missing or stale tool files. Empty when everything
-    is current."""
+    """Doctor-style problems: missing or stale plugin files. Empty when
+    everything is current."""
     problems: list[str] = []
     for src in tool_sources():
-        dest = TOOLS_DIR / src.name
+        dest = PLUGIN_DIR / src.name
         if not dest.exists():
-            problems.append(f"custom tool {src.name} is not installed at {dest}; "
-                            f"run `orch install` or `orch server restart`")
+            problems.append(f"custom-tool plugin {src.name} is not installed at "
+                            f"{dest}; run `orch install` or `orch server restart`")
         elif dest.read_bytes() != _render(src.read_text()):
-            problems.append(f"custom tool {src.name} at {dest} is stale; "
+            problems.append(f"custom-tool plugin {src.name} at {dest} is stale; "
                             f"run `orch install` or `orch server restart`")
     return problems

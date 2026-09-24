@@ -240,9 +240,9 @@ def start_resolve(base_wt: Path, task: str) -> Result:
     try:
         srv = server.current()
     except (RuntimeError, TimeoutError, OSError) as e:
-        return result.fail(f"could not reach the shared server: {e}")
+        return result.fail(f"could not reach the shared opencode service: {e}")
     if srv is None:
-        return result.fail("no shared server is running, so nothing to attach to")
+        return result.fail("no shared opencode service is running, so nothing to attach to")
 
     try:
         sess = harness.create_session(srv.port, str(base_wt),
@@ -330,20 +330,20 @@ def start(
     try:
         srv = server.start()
     except (RuntimeError, TimeoutError, OSError) as e:
-        return result.fail(f"could not start the shared server: {e}")
-    result.step(f"shared server pid={srv.pid} {srv.url}")
+        return result.fail(f"could not reach the shared opencode service: {e}")
+    result.step(f"shared opencode service pid={srv.pid} {srv.url}")
     result.url = srv.url
 
     try:
-        sess = harness.create_session(srv.port, str(p.worktree), title=p.task)
+        sess = harness.create_session(srv.port, str(p.worktree), title=p.task,
+                                      agent=p.agent, model=p.model)
     except harness.HarnessError as e:
         return result.fail(f"could not create the task session: {e}")
     sid = (sess or {}).get("id")
     if not sid:
         return result.fail("the server did not return a session id")
     try:
-        harness.prompt_async(srv.port, sid, p.prompt,
-                             agent=p.agent, model=p.model)
+        harness.prompt_async(srv.port, sid, p.prompt)
     except harness.HarnessError as e:
         return result.fail(f"could not prompt the task session: {e}")
     result.session_id = sid

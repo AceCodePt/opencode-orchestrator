@@ -99,12 +99,12 @@ def status(info: server.ServerInfo, base: Path) -> dict:
     sid = find(info.port, base)
     if sid is None:
         return {"session": None, "state": "none", "blocked": []}
-    busy = sid in (harness.session_status(info.port, str(base)) or {})
+    busy = sid in harness.active_sessions(info.port)
     perms = [p for p in harness.permissions(info.port, str(base))
              if str(p.get("sessionID") or "") == sid]
-    ques = [q for q in harness.questions(info.port, str(base))
-            if str(q.get("sessionID") or "") == sid]
-    if perms or ques:
+    forms = [q for q in harness.forms(info.port, str(base))
+             if str(q.get("sessionID") or "") == sid]
+    if perms or forms:
         state_ = "blocked"
     elif busy:
         state_ = "busy"
@@ -113,6 +113,6 @@ def status(info: server.ServerInfo, base: Path) -> dict:
     blocked = []
     for p in perms:
         blocked.append(observe._describe_permission(p).detail)
-    for q in ques:
-        blocked.append(observe._describe_question(q).detail)
+    for q in forms:
+        blocked.append(observe._describe_form(q).detail)
     return {"session": sid, "state": state_, "blocked": blocked}

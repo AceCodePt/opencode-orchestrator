@@ -10,7 +10,7 @@ in one source file has one place to check.
 - **`orch` is stdlib-only Python.** It must run on a box that is a pinned-binary
   environment, so a dependency tree is a liability.
 - **The repo is the state; there is no store.** Task intent and status are derived
-  from git, runtime facts from `/proc` and the shared server, and only transient
+  from git, runtime facts from `/proc` and the shared opencode service, and only transient
   bookkeeping (retries, settle timers, alert dedup) lives in the daemon's memory. A
   copy of task state elsewhere — a database, a registry file — was built once and
   removed: a cache that is reconciled lazily drifts, and drift was the failure this
@@ -40,9 +40,9 @@ in one source file has one place to check.
   was rejected precisely because it is a *snapshot* — the stale-cache pattern this
   design removes.
 - **Dispatch is a server session, not a subprocess.** Task agents are created with
-  `POST /session?directory=<worktree>` plus `prompt_async`, so there is no `opencode run`
-  process to scan for or kill. A hand-opened viewer (`opencode attach`) attaches to the
-  same shared server and cannot create a second claim — the branch is the claim.
+  `POST /api/session` (with `location.directory`) plus `prompt`, so there is no `opencode run`
+  process to scan for or kill. A hand-opened opencode TUI attaches to the
+  same shared opencode service and cannot create a second claim — the branch is the claim.
 - **The base branch is excluded from the task set.** `main` is an integration branch,
   not a task; only branches other than base are claims.
 - **`project base` is clone-parity, and it is non-destructive.** Repointing an
@@ -96,27 +96,30 @@ in one source file has one place to check.
   re-derives the state from the worktree.
 - **Actions carry their project** (the common-dir), because one daemon supervises
   every project and task names are unique only within one.
-- **"Busy" is the session status, and it is enough.** opencode's `/session/status`
-  reports `busy` for the whole agent loop (LLM turns and long-running tool calls) and
-  `idle` when the agent is done; a pending `/permission` or `/question` ask for the
-  worktree is `blocked`. Dispatch no longer spawns an `opencode run` process, so there
-  is no process-based signal to hold settling on — the session state plus the worktree
-  state and the verification hook are the truth. Blocked asks stay pending until a human
-  answers them: the headless `opencode run` loop used to auto-reject (or auto-approve
-  with `--auto`) every ask before a human could see it.
-- **A user interrupt and an orphaned ask are derived from the message record, never
-  stored.** When a turn is stopped in the TUI (`POST /session/{id}/interrupt`), opencode
-  records it on the message (`MessageAbortedError`, the tool part's
-  `metadata.interrupted`) but does **not** garbage-collect the permission ask that turn
-  created — so an idle session can carry a pending ask forever, and a scan that treats
-  "a pending ask exists" as `blocked` would freeze the task for good. `observe.look_task`
-  therefore reads the session's recent messages: if the **last** assistant message was
-  aborted the session is `interrupted`, and a pending ask whose **owning message** was
-  aborted is **orphaned** (never a live block, and the daemon replies `reject` to clear
-  it). An interrupted task with work (`dirty` or `diff`) is held as `needs-review`
-  (`interrupted`) — the human stopped the turn and must verify it, so it is never
-  auto-merged or auto-committed; an interrupted task with no produced work still closes
-  as a no-op. Only live asks (owning message not aborted) keep the `blocked` alert flow.
+- **"Busy" is the session status, and it is enough.** opencode's
+  `GET /api/session/active` reports `running` for the whole agent loop (LLM turns
+  and long-running tool calls) and omits idle sessions; a pending
+  `/api/permission/request` or a form for the worktree is `blocked`. Dispatch no
+  longer spawns an `opencode run` process, so there is no process-based signal to
+  hold settling on — the session state plus the worktree state and the
+  verification hook are the truth. Blocked asks stay pending until a human
+  answers them: the headless `opencode run` loop used to auto-reject (or
+  auto-approve with `--auto`) every ask before a human could see it.
+- **A user interrupt and an orphaned ask are derived from the session record,
+  never stored.** V2 records the turn's `outcome` on the session
+  (`succeeded`/`failed`/`interrupted`) and on its trailing idle message, so a
+  stopped turn is read directly; `observe.look_task` also cross-checks the last
+  assistant message's error. When a turn is stopped in the TUI
+  (`POST /api/session/{id}/interrupt`), opencode does **not** garbage-collect the
+  permission ask that turn created — so an idle session can carry a pending ask
+  forever, and a scan that treats "a pending ask exists" as `blocked` would
+  freeze the task for good. A pending ask whose **owning message**
+  (`source.messageID`) was aborted is **orphaned** (never a live block, and the
+  daemon replies `reject` to clear it). An interrupted task with work (`dirty` or
+  `diff`) is held as `needs-review` (`interrupted`) — the human stopped the turn
+  and must verify it, so it is never auto-merged or auto-committed; an
+  interrupted task with no produced work still closes as a no-op. Only live asks
+  (owning message not aborted) keep the `blocked` alert flow.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
   next unclaimed declared task. It is opt-in because auto-spawning agents is
@@ -161,10 +164,14 @@ in one source file has one place to check.
   `check_task_dependencies` fails loudly on it.
 - **The human answers a block through the CLI, not through orch's memory.**
   `orch task answer <name> allow|deny` (or a question's text) posts the reply to the
-  shared server's permission endpoint for the pending request the scan already surfaced:
-  `POST /permission/{requestID}/reply?directory=<worktree>` with `once`/`reject` (allow
-  maps to `once`, deny to `reject`). It is a human act against the live server, not
-  stored state; the daemon notices the unblock on its next scan.
+  shared opencode service for the pending request the scan already surfaced. In V2
+  a permission reply is session-scoped:
+  `POST /api/session/{sessionID}/permission/{requestID}/reply` with
+  `{decision: once|reject, message}` (allow maps to `once`, deny to `reject`, and a
+  deny can explain itself in `message`). A V2 question is a **form**:
+  `POST /api/session/{sessionID}/form/{formID}/reply` with `{answer: {field: value}}`.
+  It is a human act against the live service, not stored state; the daemon notices
+  the unblock on its next scan.
 
 ## `dispatch.py`
 
@@ -173,9 +180,9 @@ in one source file has one place to check.
 - **Order is the design.** Refuse an existing claim → `pre-task-create` from the
   dispatcher's worktree → create the worktree → `post-task-create` from the new one →
   note whether a verification hook is committed → dispatch.
-- **Dispatch is a server-side session, not a spawned process.** `POST /session?directory=<worktree>`
+- **Dispatch is a server-side session, not a spawned process.** `POST /api/session` (with `location.directory`)
   binds the session to the task worktree (the workspace-routing middleware honours the
-  query), then `POST /session/{id}/prompt_async` sends the task prompt. Nothing is
+  query), then `POST /api/session/{id}/prompt` sends the task prompt. Nothing is
   forked, so a Ctrl-C meant for the CLI cannot touch the agent, and there is nothing to
   detach or kill at teardown. The trade that buys the permission gate: the headless
   `opencode run` loop that used to auto-answer every ask is gone, so asks stay pending
@@ -245,7 +252,7 @@ in one source file has one place to check.
   source (`hooks.event_hook_template` for events, `SESSION_IDLE_TEMPLATE` for the
   verification hook, `TASK_HOOK_TEMPLATE` for the lifecycle hooks), so the copies
   cannot drift either. The daemon's `EventWatcher` thread reads the shared
-  server's `GET /event` stream and fires a copied, executable hook per event,
+  server's `GET /api/event` stream and fires a copied, executable hook per event,
   with the event JSON on stdin; a session-scoped event routes to the project
   whose worktree owns the session. Hooks are fire-and-forget: a slow hook never
   blocks the stream, and a non-zero exit only lands in the log. One reservation,
@@ -286,8 +293,6 @@ in one source file has one place to check.
 - **`remove_task` and `reset_task` force-delete the branch** — they are explicit
   removal acts (a no-op task produced nothing; a human decided to discard). Only
   `merge_and_cleanup` uses `-d`, preserving "a `-d` refusal means real unmerged work".
-- **Kill by recorded pid**: the dispatch process is found by exact cmdline and killed
-  by pid.
 
 ## `tasks.py`
 
@@ -299,14 +304,17 @@ in one source file has one place to check.
   feature branch is not dispatchable, and hiding that would be a silent surprise.
 - **Names go through `slug`** so the directory and the branch cannot disagree about
   what the task is called.
-- **`task draft` is gone; intake is an opencode conversation over custom tools.**
+- **`task draft` is gone; intake is an opencode conversation over a plugin.**
   The one-shot CLI draft (`opencode run --attach` writing specs from a hardcoded
   prompt) is replaced by four machine-global opencode custom tools —
-  `create_task`, `update_task`, `archive_task`, `delete_task` — installed by orch
-  into `~/.config/opencode/tools/` (the same config dir the shared server loads, so
-  headless sessions and any local TUI get them). The tools are thin zod-validated
-  bridges to a Python backend (`orch tasktool` — a hidden dispatcher
-  subcommand), so slugs, front matter, dependencies and refusals share orch's code.
+  `create_task`, `update_task`, `archive_task`, `delete_task` — registered by one
+  orch-owned **plugin** (`tools/orch.ts`, installed by orch into
+  `~/.config/opencode/plugins/`; OpenCode 2 has no `tools/` directory). The plugin
+  registers each tool through `ctx.tool.transform` with a JSON-Schema input, so
+  headless sessions and any local TUI get them. The tools are thin bridges to a
+  Python backend (`orch tasktool` — a hidden dispatcher subcommand) — the plugin
+  spawns it and pipes the args as JSON — so slugs, front matter, dependencies and
+  refusals share orch's code.
   **The tools commit their change to the base branch by default.** The
   human-in-the-loop gates are the wait flags — `wait_human_start` (a human starts
   the task) and `wait_human_merge` (a human merges verified work) — exactly like
@@ -315,6 +323,9 @@ in one source file has one place to check.
   gate is committed on the spot so the daemon can dispatch it and the loop runs on
   its own. `commit: false` (or `commit: true` to override a wait gate) opts out.
   The tools never claim or dispatch a task, and they never trust a project.
+  **A new local plugin only loads at service startup**, so `orch install` restarts
+  the shared service after writing it (a hot reload of a newly added file does not
+  pick it up).
 - **The wait flags are decided in the conversation, never hardcoded.** The old
   prompt baked in `wait_human_start: true` for the spec task and `false` for the
   slices. `create_task` takes `wait_human_start`/`wait_human_merge` as optional
@@ -339,9 +350,10 @@ in one source file has one place to check.
 ## `agent.py`
 
 - **One primary agent per project, found live, never stored.** It is the session
-  titled `orch:agent` in the project's base worktree on the shared server; the first
-  `orch attach` creates it via `POST /session?directory=<base>`, and every later
-  conversation continues the same session through opencode's own attach TUI. No
+  titled `orch:agent` in the project's base worktree on the shared opencode
+  service; the first `orch attach` creates it via `POST /api/session` (with
+  `location.directory`), and every later conversation continues the same session
+  through opencode's own TUI. No
   registry, no file — the "repo is the state" rule holds for a conversation too.
 - **`orch ask` was removed; `orch attach` replaced it, because a second client was
   more inconvenient than useful.** The headless ask surface — a blocking reply, a
@@ -353,7 +365,8 @@ in one source file has one place to check.
   is simpler because there is nothing to maintain — orch only resolves the project's
   server and session, and opencode owns the conversation. `orch attach` is therefore
   a **thin resolver, not a client**: it finds or creates the session id and `exec`s
-  `opencode attach <url> --session <id> --dir <base>`, so the interactive TUI owns
+  `opencode <base> --session <id>` (V2 has no `attach` subcommand; the TUI discovers
+  the shared service and its auth itself), so the interactive TUI owns
   the terminal and conversation features stay opencode's. The one thing the headless
   client *did* provide — sending a message without opening the TUI (`--async`) — was
   kept reachable through the same session from any opencode client, and answering
@@ -363,12 +376,13 @@ in one source file has one place to check.
   is never verified, merged, or torn down. Task worktrees branch from base HEAD, so its
   uncommitted edits never leak into a task.
 - **The primary agent is a server session like any task agent — no run loop.**
-  Creation is `POST /session?directory=<base>` with no `prompt_async`; nothing ever
-  spawns `opencode run`. That means the primary agent is held to the same permission
-  gate as task agents: an ask stays pending (surfaced as a `primary-agent@<base>`
-  owner in `orch permissions` and shown live in the attached TUI) instead of being
-  auto-rejected by a headless run loop. The workspace-routing middleware binds the
-  session to the base worktree, so a neutral server cwd is no obstacle.
+  Creation is `POST /api/session` (with `location.directory`) with no prompt;
+  nothing ever spawns `opencode run`. That means the primary agent is held to the
+  same permission gate as task agents: an ask stays pending (surfaced as a
+  `primary-agent@<base>` owner in `orch permissions` and shown live in the attached
+  TUI) instead of being auto-rejected by a headless run loop. The session's
+  `location.directory` binds it to the base worktree, so a neutral service cwd is
+  no obstacle.
 
 ## `cli.py`
 
@@ -396,31 +410,36 @@ in one source file has one place to check.
   the agent's turn; without a reason the model stops, the session idles, and the
   daemon sweeps the clean, unchanged task as a no-op. So a deny sends its reason both
   in the reply's `message` field (the rejected tool result tells the agent why) and
-  as a `prompt_async` nudge to adjust and continue. A denial becomes a conversation —
+  as a `prompt` nudge to adjust and continue. A denial becomes a conversation —
   the agent responds, tries a different approach, and may raise a fresh ask for the
   human to decide again — instead of a dead end. The empty reason falls back to a
   generic denial so the flow never blocks on the human's typing.
 
 ## `harness.py`
 
-- **All harness knowledge lives on the Python side.** `prompt_async`
-  (`POST /session/{id}/prompt_async`) is the injection channel the daemon uses to
-  retrigger an agent on a failed verification hook.
-- **Use `/permission`, `/question`, `/session?directory=`, not the `/api/*`
-  equivalents** — the latter two returned empty against a session that was demonstrably
-  busy and blocked.
-- **`/permission` and `/question` are workspace-scoped.** The list endpoints only
-  return asks for the workspace named in the `?directory=` query, so every call must
-  pass the worktree — an unscoped call silently reads as "nobody is blocked". The
-  reply endpoint is `POST /permission/{requestID}/reply?directory=<worktree>` with
-  `once`/`always`/`reject`; the dead v1 path was `POST /session/{id}/permissions/{id}`
-  with `{response: allow|deny}`.
+- **All harness knowledge lives on the Python side, and it is V2.** The module is
+  the one place that knows the wire contract: the `/api/*` paths, the `{data: …}`
+  envelopes, and the service password. `prompt`
+  (`POST /api/session/{id}/prompt`, `delivery: queue`) is the injection channel the
+  daemon uses to retrigger an agent on a failed verification hook.
+- **Every request is authenticated.** OpenCode 2 exposes an authenticated API: the
+  service registers a password in `~/.local/state/opencode/service.json`, and every
+  call carries HTTP Basic auth (user `opencode`, that password). `server.py`
+  registers the password with `harness` when it discovers the service, so callers
+  keep passing just a port.
+- **`/api/permission/request` and `/api/form` are location-scoped.** Their query is
+  an object, `location[directory]=<worktree>`, so every call must pass the worktree
+  — an unscoped call silently reads as "nobody is blocked". A permission reply is
+  session-scoped: `POST /api/session/{sessionID}/permission/{requestID}/reply` with
+  `{decision: once|always|reject}`; a V2 question (a **form**) replies at
+  `POST /api/session/{sessionID}/form/{formID}/reply` with `{answer: {field: value}}`.
 - **The permission reply takes an optional `message`.** It is the rejection text the
   agent sees in its tool result, so a deny can explain itself in the agent's own
   context rather than only in the human's terminal. The explainable-denial flow in
-  `cli.py` relies on it (alongside a `prompt_async` nudge to keep the session busy).
-- **`GET /session` is global, not per-server** — the `?directory=` filter is the only
-  usable join from a task to its state.
+  `cli.py` relies on it (alongside a `prompt` nudge to keep the session busy).
+- **`GET /api/session` is global, not per-service** — the `?directory=` filter is
+  the only usable join from a task to its state, and `GET /api/session/active` is
+  the busy check.
 - **`server.heartbeat` separates "stream alive, agent quiet" from "stream dead"** —
   the absence problem the daemon has to solve.
 
@@ -469,13 +488,21 @@ in one source file has one place to check.
 
 ## `server.py`
 
-- **One headless server per machine hosts every worktree.** A server always has a
-  port (observability becomes structural) and is far cheaper than a TUI per task.
-  The TUI is demoted to `opencode attach`.
-- **Identity is recorded pid plus start time, never a command-line pattern.** A stale
-  pid file can never kill a stranger's process.
-- **Stop is SIGTERM then SIGKILL, by recorded pid, no tmux teardown.**
-- **The server starts in a neutral directory** that is not a project, so its own
+- **orch does not run its own server any more; it uses opencode's.** OpenCode 2
+  manages one background service per machine (`opencode serve --service`),
+  registering its URL and password in `~/.local/state/opencode/service.json`. orch
+  discovers that service, authenticates to it, and only starts
+  `opencode serve --service` itself when none is running. This is the V2-native
+  version of "one server per machine": there is no orch-owned `opencode serve`, no
+  `server.json`, and no log parsing for a port.
+- **The service is shared with the user's own opencode clients, so orch does not
+  stop it.** `orch uninstall` and the daemon leave it running; only an explicit
+  `orch server stop`/`restart` touches it. The daemon restarts it when it is dead or
+  unresponsive (`opencode service restart` semantics).
+- **A changed custom-tool plugin forces a restart.** OpenCode loads a *newly added*
+  local plugin only at service startup, so `orch install` restarts the service after
+  writing `orch.ts`; otherwise the task tools would be invisible to sessions.
+- **The service starts in a neutral directory** that is not a project, so its own
   config never becomes the ambient default for dispatched work.
 
 ## `doctor.py`

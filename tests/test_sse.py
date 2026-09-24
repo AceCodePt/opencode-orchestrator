@@ -54,7 +54,7 @@ def _commit(root: Path, msg: str = "c") -> None:
 
 def test_hook_name_and_payload() -> None:
     assert sse.hook_name("permission.asked") == "permission-asked"
-    ev = {"type": "session.status", "properties": {"sessionID": "s1", "status": "idle"}}
+    ev = {"type": "session.status", "data": {"sessionID": "s1", "status": "idle"}}
     env = sse.event_env(ev)
     assert env["ORCH_EVENT"] == "session-status"
     assert env["ORCH_EVENT_TYPE"] == "session.status"
@@ -65,11 +65,12 @@ def test_hook_name_and_payload() -> None:
 
 def test_event_stream_parses_sse_lines() -> None:
     lines = [
-        "data: {\"id\": \"evt_1\", \"type\": \"session.idle\", \"properties\": {\"sessionID\": \"s1\"}}",
+        "data: {\"id\": \"evt_1\", \"type\": \"session.idle\", \"data\": {\"sessionID\": \"s1\"}}",
+        ": heartbeat",
         "event: keepalive",
         "data: not json",
         "",
-        "data: {\"type\": \"server.heartbeat\"}",
+        "data: {\"type\": \"server.heartbeat\", \"data\": {}}",
     ]
     out = []
     for line in lines:
@@ -77,7 +78,7 @@ def test_event_stream_parses_sse_lines() -> None:
         if ev is not None:
             out.append(ev)
     assert [e["type"] for e in out] == ["session.idle", "server.heartbeat"]
-    print("ok: event_stream parses data: lines and skips non-events")
+    print("ok: event_stream parses data: lines and skips comments/non-events")
 
 
 def harness_parse(line: str):
@@ -124,7 +125,7 @@ def test_dispatch_fires_global_and_project_hooks() -> None:
         _commit(root)
 
         ev = {"type": "permission.asked",
-              "properties": {"sessionID": "s1", "permission": "bash"}}
+              "data": {"sessionID": "s1", "permission": "bash"}}
         owner = (str(root), "main", str(root))
         sse.dispatch(ev, owner, trusted={str(root)})
 
@@ -165,7 +166,7 @@ def test_session_idle_is_never_fired_from_the_stream() -> None:
             '{"baseBranch": "main"}\n')
         _commit(root)
 
-        ev = {"type": "session.idle", "properties": {"sessionID": "s1"}}
+        ev = {"type": "session.idle", "data": {"sessionID": "s1"}}
         sse.dispatch(ev, (str(root / "lab.git"), "main", str(root)),
                      trusted={str(root / "lab.git")})
         assert not pm.exists(), "the acceptance hook must not fire from the event stream"
@@ -186,8 +187,8 @@ def test_watcher_routes_by_session_and_reconnects() -> None:
     calls = []
 
     def fake_stream(port):
-        yield {"type": "a.b", "properties": {}}
-        yield {"type": "c.d", "properties": {"sessionID": "s1"}}
+        yield {"type": "a.b", "data": {}}
+        yield {"type": "c.d", "data": {"sessionID": "s1"}}
         w._stop.wait(5)  # block until the test stops the watcher
 
     w = sse.EventWatcher(resolver=lambda sid: ("/p", "main", "/wt"))

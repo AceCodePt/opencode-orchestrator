@@ -228,45 +228,45 @@ def test_ensure_task_creates_a_session_bound_to_the_task_worktree() -> None:
 
 def test_status_reports_busy() -> None:
     orig_sessions = agent.harness.sessions
-    orig_status = agent.harness.session_status
+    orig_active = agent.harness.active_sessions
     orig_perms = agent.harness.permissions
-    orig_ques = agent.harness.questions
+    orig_forms = agent.harness.forms
     agent.harness.sessions = lambda _p, **kw: [
         {"id": "ses_1", "title": agent.AGENT_TITLE}]
-    agent.harness.session_status = lambda _p, _d=None: {"ses_1": {}}
+    agent.harness.active_sessions = lambda _p: {"ses_1": {"type": "running"}}
     agent.harness.permissions = lambda _p, _d=None: []
-    agent.harness.questions = lambda _p, _d=None: []
+    agent.harness.forms = lambda _p, _d=None: []
     try:
         st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st == {"session": "ses_1", "state": "busy", "blocked": []}
     finally:
         agent.harness.sessions = orig_sessions
-        agent.harness.session_status = orig_status
+        agent.harness.active_sessions = orig_active
         agent.harness.permissions = orig_perms
-        agent.harness.questions = orig_ques
+        agent.harness.forms = orig_forms
     print("ok: status reports a streaming session as busy")
 
 
 def test_status_reports_blocked_and_none_when_absent() -> None:
     orig_sessions = agent.harness.sessions
-    orig_status = agent.harness.session_status
+    orig_active = agent.harness.active_sessions
     orig_perms = agent.harness.permissions
-    orig_ques = agent.harness.questions
+    orig_forms = agent.harness.forms
     agent.harness.sessions = lambda _p, **kw: [
         {"id": "ses_1", "title": agent.AGENT_TITLE}]
-    agent.harness.session_status = lambda _p, _d=None: {}
+    agent.harness.active_sessions = lambda _p: {}
     agent.harness.permissions = lambda _p, _d=None: [{
-        "id": "per_1", "sessionID": "ses_1", "permission": "bash",
-        "patterns": ["/etc/*"]}]
-    agent.harness.questions = lambda _p, _d=None: []
+        "id": "per_1", "sessionID": "ses_1", "action": "shell",
+        "resources": ["/etc/*"]}]
+    agent.harness.forms = lambda _p, _d=None: []
     try:
         st = agent.status(_INFO, _FakeProject.base_worktree)
         assert st["state"] == "blocked" and st["blocked"] == ["/etc/*"]
     finally:
         agent.harness.sessions = orig_sessions
-        agent.harness.session_status = orig_status
+        agent.harness.active_sessions = orig_active
         agent.harness.permissions = orig_perms
-        agent.harness.questions = orig_ques
+        agent.harness.forms = orig_forms
     print("ok: status reports a blocked permission and its target")
 
     agent.harness.sessions = lambda _p, **kw: []
@@ -307,13 +307,13 @@ def test_cmd_attach_attaches_to_the_found_session() -> None:
         with contextlib.redirect_stdout(buf):
             rc = cli.cmd_attach(_args())
         assert rc == 0, rc
-        assert execd == [("opencode", ["opencode", "attach",
-                                       _INFO.url, "--session", "ses_1",
-                                       "--dir", str(_FakeProject.base_worktree)])]
+        assert execd == [("opencode", ["opencode",
+                                       str(_FakeProject.base_worktree),
+                                       "--session", "ses_1"])]
         assert buf.getvalue() == ""
     finally:
         _restore(saved)
-    print("ok: `attach` execs opencode attach on the found session, silent")
+    print("ok: `attach` execs opencode on the found session, silent")
 
 
 def test_cmd_attach_first_use_creates_then_attaches() -> None:
@@ -401,12 +401,11 @@ def test_cmd_attach_attaches_to_the_task_session_in_a_task_worktree() -> None:
     try:
         rc = cli.cmd_attach(_args())
         assert rc == 0, rc
-        assert execd == [("opencode", ["opencode", "attach", _INFO.url,
-                                       "--session", "ses_task",
-                                       "--dir", "/tmp/lab/lab/text"])]
+        assert execd == [("opencode", ["opencode", "/tmp/lab/lab/text",
+                                       "--session", "ses_task"])]
     finally:
         _restore(saved)
-    print("ok: inside a task worktree `attach` execs opencode attach on the task session")
+    print("ok: inside a task worktree `attach` execs opencode on the task session")
 
 
 def test_cmd_attach_creates_the_task_session_on_first_use() -> None:
@@ -422,7 +421,8 @@ def test_cmd_attach_creates_the_task_session_on_first_use() -> None:
         assert created == [(_INFO.port, "/tmp/lab/lab/text", "text")]
         argv = execd[0][1]
         assert argv[argv.index("--session") + 1] == "ses_new"
-        assert argv[argv.index("--dir") + 1] == "/tmp/lab/lab/text"
+        assert argv[1] == "/tmp/lab/lab/text", \
+            "the TUI is pointed at the task worktree"
     finally:
         _restore(saved)
     print("ok: a task worktree with no live session gets one created, then attached")

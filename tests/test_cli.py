@@ -64,10 +64,9 @@ def test_answer_allow_replies_to_a_permission() -> None:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="allow",
                                        request=None))
         assert rc == 0, rc
-        (port, pid, reply), kw = replies[0]
-        assert (port, pid, reply) == (4096, "per_1", "once")
-        assert kw == {"directory": None}, \
-            "an allow maps to the v2 once reply, scoped to the worktree"
+        (port, sid, pid, reply), kw = replies[0]
+        assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "once")
+        assert kw == {}, "an allow maps to the V2 once reply"
     finally:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
@@ -93,29 +92,34 @@ def test_answer_rejects_non_allow_deny_for_a_permission() -> None:
     print("ok: a permission only accepts allow or deny")
 
 
-def test_answer_question_routes_to_reply_question() -> None:
+def test_answer_question_routes_to_a_form_reply() -> None:
     t = _blocked(kind="question")
     _FakeProject._instance = _FakeProject([t])
     sent: list[tuple] = []
     orig_status = cli.server_mod.status
     orig_from = cli.state.Project.from_dir
-    orig_q = cli.harness.reply_question
+    orig_f = cli.harness.reply_form
+    orig_forms = cli.harness.forms
     cli.state.Project.from_dir = _FakeProject.from_dir
     cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
                                      "port": 4096}
-    cli.harness.reply_question = lambda *a, **k: sent.append((a, k))
+    cli.harness.forms = lambda port, directory=None: [
+        {"id": "per_1", "sessionID": "ses_1",
+         "fields": [{"key": "choice", "type": "string"}]}]
+    cli.harness.reply_form = lambda *a, **k: sent.append((a, k))
     try:
         rc = cli.cmd_task_answer(_args(name="task-a", reply="go ahead",
                                        request=None))
         assert rc == 0, rc
-        (port, rid, answers), kw = sent[0]
-        assert port == 4096 and rid == "per_1"
-        assert answers == [{"value": "go ahead"}]
+        (port, sid, rid, answer), _kw = sent[0]
+        assert (port, sid, rid) == (4096, "ses_1", "per_1")
+        assert answer == {"choice": "go ahead"}
     finally:
         cli.state.Project.from_dir = orig_from
         cli.server_mod.status = orig_status
-        cli.harness.reply_question = orig_q
-    print("ok: a question routes to the question reply endpoint")
+        cli.harness.reply_form = orig_f
+        cli.harness.forms = orig_forms
+    print("ok: a V2 form question routes to the form reply endpoint")
 
 
 def test_answer_unblocked_task_is_refused() -> None:
@@ -674,10 +678,9 @@ def test_permissions_oneshot_allow_routes_once() -> None:
     try:
         rc = cli.cmd_permissions(_pargs(task="task-a", reply="allow"))
         assert rc == 0, rc
-        (port, pid, reply), kw = replied[0]
-        assert (port, pid, reply) == (4096, "per_1", "once")
-        assert kw == {"directory": "/tmp/wt"}, \
-            "an allow maps to the v2 once reply, scoped to the worktree"
+        (port, sid, pid, reply), kw = replied[0]
+        assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "once")
+        assert kw == {}, "an allow maps to the V2 once reply"
     finally:
         _perm_restore(saved)
     print("ok: `permissions --task <name> allow` replies once to the task")
@@ -695,10 +698,9 @@ def test_permissions_oneshot_deny_routes_reject_with_reason() -> None:
         rc = cli.cmd_permissions(_pargs(task="task-a", reply="deny",
                                         reason="never touch /etc"))
         assert rc == 0, rc
-        (port, pid, reply), kw = replied[0]
-        assert (port, pid, reply) == (4096, "per_1", "reject")
-        assert kw == {"directory": "/tmp/wt",
-                      "message": "never touch /etc"}, \
+        (port, sid, pid, reply), kw = replied[0]
+        assert (port, sid, pid, reply) == (4096, "ses_1", "per_1", "reject")
+        assert kw == {"message": "never touch /etc"}, \
             "a deny carries the reason to the agent"
         (nport, nsid, ntext), nkw = nudges[0]
         assert nport == 4096 and nsid == "ses_1"
@@ -721,7 +723,7 @@ def test_permissions_oneshot_deny_defaults_reason() -> None:
     try:
         rc = cli.cmd_permissions(_pargs(task="task-a", reply="deny"))
         assert rc == 0, rc
-        (port, pid, reply), kw = replied[0]
+        (port, sid, pid, reply), kw = replied[0]
         assert kw["message"] == cli._DENY_DEFAULT, \
             "an empty reason falls back to the generic denial"
         assert cli._DENY_DEFAULT in nudges[0][0][2]
@@ -809,7 +811,7 @@ def test_permissions_interactive_walks_allow_and_deny() -> None:
     saved = _perm_saved()
     _perm_env(_FakeProject([t]), prompts=["a", "d", "no writes to /tmp"])
 
-    def fake_reply(port, rid, reply, **kw) -> None:
+    def fake_reply(port, sid, rid, reply, **kw) -> None:
         replied.append((rid, reply, kw))
         t.blocked = [b for b in t.blocked if b.request_id != rid]
     cli.harness.reply_permission = fake_reply
@@ -820,10 +822,9 @@ def test_permissions_interactive_walks_allow_and_deny() -> None:
             rc = cli.cmd_permissions(_pargs())
         out = buf.getvalue()
         assert rc == 0, (rc, out)
-        assert replied == [("per_1", "once", {"directory": "/tmp/wt"}),
+        assert replied == [("per_1", "once", {}),
                            ("per_2", "reject",
-                            {"directory": "/tmp/wt",
-                             "message": "no writes to /tmp"})], \
+                            {"message": "no writes to /tmp"})], \
             "a deny in the walk explains itself"
         assert nudges and "no writes to /tmp" in nudges[0][0][2], \
             "the denied session is told why and nudged to keep working"
@@ -885,7 +886,7 @@ def test_permissions_interactive_primary_agent_owner() -> None:
     cli.harness.permissions = lambda port, directory: (
         [] if directory == "/tmp/wt" else perm_response)
 
-    def fake_reply(port, rid, reply, **kw) -> None:
+    def fake_reply(port, sid, rid, reply, **kw) -> None:
         replied.append((rid, reply, kw))
         perm_response.clear()
     cli.harness.reply_permission = fake_reply
@@ -898,8 +899,8 @@ def test_permissions_interactive_primary_agent_owner() -> None:
         assert "primary-agent@main" in out, "the primary agent is a picker row"
         assert "/tmp/opencode/a.sh" in out, \
             "the walk shows the actual file the agent wants to touch, not the glob"
-        assert replied == [("per_9", "once", {"directory": "/tmp/lab"})], \
-            "the primary agent's ask is answered scoped to the base worktree"
+        assert replied == [("per_9", "once", {})], \
+            "the primary agent's ask is answered once"
     finally:
         _perm_restore(saved)
         cli.agent_mod.find = orig_find
@@ -965,7 +966,7 @@ def test_permissions_global_picker_selects_project() -> None:
     cli.daemon_mod.project_label = lambda c: Path(c).parent.name
     cli._perm_asks = lambda port, proj: asks.get(str(proj.common), [])
 
-    def fake_reply(port, rid, reply, **kw) -> None:
+    def fake_reply(port, sid, rid, reply, **kw) -> None:
         replied.append((rid, reply, kw))
         for lst in asks.values():
             lst[:] = [a for a in lst if a.request_id != rid]
@@ -978,7 +979,7 @@ def test_permissions_global_picker_selects_project() -> None:
         assert rc == 0, (rc, out)
         assert "p1" in out and "p2" in out, "the project picker lists both"
         assert "task-b" in out, "the picked project's task is walked"
-        assert replied == [("per_2", "once", {"directory": "/p2/wt"})], \
+        assert replied == [("per_2", "once", {})], \
             "selecting project 2 answers its task, not project 1's"
     finally:
         _perm_restore(saved)

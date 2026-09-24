@@ -30,7 +30,7 @@ def _label(common: Path) -> str:
 
 
 def event_env(ev: dict) -> dict[str, str]:
-    props = ev.get("properties") or {}
+    props = ev.get("data") if isinstance(ev.get("data"), dict) else {}
     env = {"ORCH_EVENT": hook_name(ev.get("type", ""))}
     if ev.get("type"):
         env["ORCH_EVENT_TYPE"] = str(ev["type"])
@@ -144,7 +144,7 @@ def dispatch(ev: dict, owner: tuple[str, str, str] | None,
 
 
 class EventWatcher(threading.Thread):
-    """Consume the shared server's /event stream and fire per-event hooks.
+    """Consume the shared opencode service's /api/event stream and fire per-event hooks.
     Reconnects on transport failure; stop() tears it down. The `resolver`
     callable maps a session id to (common, base, worktree) or None."""
 
@@ -160,7 +160,7 @@ class EventWatcher(threading.Thread):
 
     def _dispatch(self, ev: dict) -> None:
         trusted = state.trusted_projects()
-        props = ev.get("properties") or {}
+        props = ev.get("data") if isinstance(ev.get("data"), dict) else {}
         owner = None
         if props.get("sessionID"):
             owner = self._resolver(str(props["sessionID"]))

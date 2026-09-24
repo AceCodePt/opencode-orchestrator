@@ -1,128 +1,75 @@
 # Event vocabulary
 
-Extracted from a live server's OpenAPI document (`GET /doc`, 93 named event
-schemas) and cross-checked against a real SSE stream. Both matter: the spec is
-complete but not entirely accurate, and the stream emits at least one type the spec
-does not name.
+Extracted from the running OpenCode 2 server binary and cross-checked against a
+live `GET /api/event` stream. The V2 stream is authenticated and its envelope
+changed from V1: properties now live under `data`, and the type names changed too.
 
 ## Reading the stream
 
-`GET /event` is Server-Sent Events. Lines arrive as `data: {json}` with the shape
-`{"id": "evt_…", "type": "…", "properties": {…}}`.
+`GET /api/event` is Server-Sent Events, authenticated with the service password
+(HTTP Basic, user `opencode`). Lines arrive as `data: {json}` with the shape:
 
-**Read it with `readline()`, not by iterating the response object.** Iterating an
-`HTTPResponse` buffers, so a low-traffic feed appears to deliver nothing at all
-until enough bytes accumulate. This cost an hour; `curl -sN` worked while the
-Python equivalent looked broken.
+```json
+{"id": "evt_…", "created": 1790184689133, "type": "session.tool.success",
+ "location": {"directory": "/path/to/worktree"}, "data": {…}}
+```
 
-## Undocumented but real
+`server.heartbeat` arrives as an SSE comment line, `: heartbeat`, not a `data:`
+event. **Read the stream with `readline()`, not by iterating the response
+object.** Iterating an `HTTPResponse` buffers, so a low-traffic feed appears to
+deliver nothing at all until enough bytes accumulate; a comment line read that way
+also stalls. `harness._parse_sse_data` ignores non-`data:` lines, so both
+heartbeats and the odd non-JSON line are skipped.
 
-Observed on the wire, absent from the schema list:
-
-| Type | Why it matters |
-| --- | --- |
-| `server.connected` | Emitted immediately on connect. Cheap proof the stream is live. |
-| `server.heartbeat` | Periodic keepalive, roughly every 8-10s. |
-
-`server.heartbeat` is the one to care about. It separates **"the stream is alive and
-the agent is quiet"** from **"the stream is dead"** — which is precisely the
-absence-detection problem the daemon has to solve. Without it, a dropped
-connection is indistinguishable from an idle agent. With it, missing heartbeats
-mean the transport failed, and quiet-with-heartbeats means the agent is genuinely
-doing nothing.
+Routing: a session-scoped event's `data.sessionID` maps to the worktree that owns
+the session (via the location registry); the global hook fires for every event.
 
 ## What the daemon uses
 
-### Liveness and state
+The daemon decides task state from the REST endpoints and the worktree, never from
+the stream — the stream is a trigger for advisory hooks only. The REST facts are:
 
-| Type | Properties |
+| Fact | Endpoint |
 | --- | --- |
-| `session.idle` | `sessionID` |
-| `session.status` | `sessionID`, `status` — observed `{"type":"idle"}` |
-| `session.error` | `sessionID`, `error` |
-| `session.compacted` | `sessionID` |
-| `session.diff` | `sessionID`, `diff` |
+| server info / version | `GET /api/info` (`{version, pid, urls, paths}`) |
+| sessions in a worktree | `GET /api/session?directory=<worktree>` |
+| busy sessions | `GET /api/session/active` (`{data: {ses_…: {type: "running"}}}`) |
+| pending permission asks | `GET /api/permission/request?location[directory]=<worktree>` |
+| pending questions (forms) | `GET /api/form?location[directory]=<worktree>` |
+| a session's turn outcome | `GET /api/session/{id}` (`outcome: succeeded\|failed\|interrupted`) |
+| recent messages | `GET /api/session/{id}/message?limit=N` |
 
-Note `/session/status` returns `{}` for idle while the event reports
-`{"type":"idle"}`. Same fact, two encodings.
-
-### Tool boundaries — exact, not inferred
-
-| Type | Properties |
-| --- | --- |
-| `session.next.tool.called` | `timestamp`, `sessionID`, `assistantMessageID`, `callID`, `tool`, `input`, `provider` |
-| `session.next.tool.progress` | `timestamp`, `sessionID`, `callID`, `structured`, `content` |
-| `session.next.tool.success` | `timestamp`, `sessionID`, `callID`, `result`, `outputPaths`, … |
-| `session.next.tool.failed` | `timestamp`, `sessionID`, `callID`, `error`, `result` |
-| `session.next.shell.started` | `timestamp`, `sessionID`, `callID`, `command` |
-| `session.next.shell.ended` | `timestamp`, `sessionID`, `callID`, `output` |
-
-This is what makes per-state budgets possible rather than guesswork. A `called`
-without a matching `success`/`failed` for the same `callID` **is** a long-running
-tool, so "busy running a test suite" is directly observed. `progress` lets a slow
-tool prove it is alive, so a generous budget can still be bounded.
-
-### Cost and progress — loop detection for free
-
-| Type | Properties |
-| --- | --- |
-| `session.next.step.started` | `timestamp`, `sessionID`, `agent`, `model`, `snapshot` |
-| `session.next.step.ended` | `timestamp`, `sessionID`, `finish`, **`cost`**, **`tokens`**, `snapshot`, `files` |
-| `session.next.step.failed` | `timestamp`, `sessionID`, `error` |
-| `session.next.retried` | `timestamp`, `sessionID`, **`attempt`**, `error` |
-| `todo.updated` | `sessionID`, `todos` |
-
-`step.ended` carries cost and tokens per step, and `todo.updated` carries the todo
-list. Cost climbing while todos stay static is the cheap proxy for a runaway loop,
-and it needs no extra plumbing. `retried` exposes the harness's own retries, which
-would otherwise look like unexplained slowness.
-
-### Blocking on a human — two generations
-
-| Type | Properties |
-| --- | --- |
-| `permission.asked` | `id`, `sessionID`, `permission`, `patterns`, `metadata`, `always`, `tool` |
-| `permission.replied` | `sessionID`, `requestID`, `reply` |
-| `permission.v2.asked` | `id`, `sessionID`, `action`, `resources`, `save`, `metadata`, `source` |
-| `permission.v2.replied` | `sessionID`, `requestID`, `reply` |
-| `question.asked` / `question.v2.asked` | `id`, `sessionID`, `questions`, `tool` |
-| `question.replied` / `question.v2.replied` | `sessionID`, `requestID`, `answers` |
-| `question.rejected` / `question.v2.rejected` | `sessionID`, `requestID` |
-
-**Both generations exist in the same server.** v1 carries
-`permission`/`patterns`/`always`; v2 carries `action`/`resources`/`save`. A reader
-that handles only one will silently see nothing when the server speaks the other —
-silence that reads as "nobody is blocked". Handle both.
-
-The live pending request observed earlier used the **v1** shape
-(`permission: external_directory`, `patterns: ["/tmp/opencode/*"]`, plus `always`),
-so v1 is what 1.18.13 emitted in practice.
+V2 records the turn outcome on the session itself, which replaces V1's
+message-record archaeology for detecting an interrupted turn. A pending ask whose
+`source.messageID` was aborted is still **orphaned** — opencode does not
+garbage-collect the ask when the turn that created it is stopped.
 
 ## Endpoint gotchas found while building this
 
 | Endpoint | Reality |
 | --- | --- |
-| `/api/health` | Returns only `{"healthy":true}` — **no version** |
-| `/global/health` | Returns `{"healthy":true,"version":"1.18.13"}` — use this for version negotiation |
-| `/api/permission/request` | Returned empty against a demonstrably blocked session |
-| `/api/session/active` | Returned empty against a demonstrably busy session |
-| `/permission`, `/question`, `/session/status` | Correct. Use these — but `/permission` and `/question` are **workspace-scoped**: pass `?directory=<worktree>`, or a pending ask for a task reads as "nobody is blocked" |
-| `/api/location` | `{"directory": …, "project": {"id": …, "directory": …}}` — maps a port to a worktree |
-| `--port` | `--help` claims `[default: 0]`, but omitting it starts **no server** |
+| `/session`, `/permission`, `/event` (V1 paths) | gone from the API; V2 uses `/api/*` and requires the password |
+| `/api/info` | authenticated; the only place the version comes from now (there is no unauthenticated `/global/health`) |
+| `/api/permission/request`, `/api/form`, `/api/location` | location-scoped by an **object** query, `location[directory]=<path>`; `?directory=` is rejected |
+| `/api/session` | list scopes by a plain `?directory=`; **create** takes `location: {directory}` in the body |
+| `/api/session/{id}/prompt` | the V2 send; `delivery` is `steer` or `queue` |
+| reply to a permission | session-scoped: `POST /api/session/{sid}/permission/{rid}/reply` `{decision, message}` |
+| reply to a question | it is a form: `POST /api/session/{sid}/form/{fid}/reply` `{answer: {field: value}}` |
+| `/api/event` | envelope `{id, created, type, location, data}`; heartbeat is a `: heartbeat` comment |
 
 ## Full list
 
-90 event types, with their property names, in `src/orch/opencode_events.py` — the
-single source of truth. The `/doc` OpenAPI lists 93 schemas, but the stream does
-not emit every one, and it does emit `server.heartbeat`, which has no schema; the
-map holds the emitted vocabulary.
+The event types are in `src/orch/opencode_events.py` — the single source of truth
+for the vocabulary (extracted from the running server binary). The property names
+are not enumerated: the whole event JSON is on stdin, so a hook never needs to
+know them ahead of time.
 
 ## Hooks for these events
 
 `orch init` installs one inert hook template per event type —
 `~/.config/orch/hooks/<event>.example`, dots mapped to dashes
 (`session.idle` → `session-idle`). The daemon's SSE consumer reads
-`GET /event` and fires the copied hook for each event, with the event's JSON on
+`GET /api/event` and fires the copied hook for each event, with the event's JSON on
 stdin and `ORCH_EVENT=<dashed-name>` set. A session-scoped event fires its
 project hook in the worktree that owns the session; a copied executable global
 hook fires for every event. The vocabulary lives in `src/orch/opencode_events.py`
@@ -131,8 +78,6 @@ project-relevant `.example` references (session-idle, the lifecycle hooks, and o
 per opencode server event) are also scaffolded into the project's
 `.orchestration/hooks/`, gitignored and non-executable, matching the global set;
 copy one to its real name, make it executable, and commit it to enable it. One
-asymmetry: `session.idle` is the
-verification hook's name, so it keeps the verification template instead of a
-generic event one; globally, where there is no
-verification hook, it
-still gets an event example.
+asymmetry: `session.idle` is the verification hook's name, so it keeps the
+verification template instead of a generic event one; globally, where there is no
+verification hook, it still gets an event example.

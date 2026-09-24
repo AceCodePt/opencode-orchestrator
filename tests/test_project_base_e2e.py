@@ -148,16 +148,13 @@ def test_repoint_backend_and_cli_full_loop_from_the_new_base() -> None:
         _install_hook(backend_base, PASSING_HOOK)
         _install_hook(cli_base, PASSING_HOOK)
 
-        srv = server.start()
-        try:
-            backend_wt = _claim_and_commit(backend_store, "next", "done-backend",
-                                           {"answer.txt": "answer: 42"})
-            cli_wt = _claim_and_commit(cli_store, "next", "done-cli",
+        server.start()  # the shared service (discovered/started, never stopped)
+        backend_wt = _claim_and_commit(backend_store, "next", "done-backend",
                                        {"answer.txt": "answer: 42"})
-            log_backend = "\n".join(_run_step(backend, "done-backend"))
-            log_cli = "\n".join(_run_step(cli_proj, "done-cli"))
-        finally:
-            server.stop()
+        cli_wt = _claim_and_commit(cli_store, "next", "done-cli",
+                                   {"answer.txt": "answer: 42"})
+        log_backend = "\n".join(_run_step(backend, "done-backend"))
+        log_cli = "\n".join(_run_step(cli_proj, "done-cli"))
 
         for joined in (log_backend, log_cli):
             assert "verify passed" in joined, joined
@@ -186,9 +183,19 @@ def test_repoint_backend_and_cli_full_loop_from_the_new_base() -> None:
 
 
 def main() -> int:
+    from orch import custom_tools
+
+    plugin_tmp = tempfile.TemporaryDirectory()
+    saved_plugin = custom_tools.PLUGIN_DIR
+    custom_tools.PLUGIN_DIR = Path(plugin_tmp.name)
+    custom_tools.ensure()  # pre-install so server.start() never bounces the real service
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for t in tests:
-        t()
+    try:
+        for t in tests:
+            t()
+    finally:
+        custom_tools.PLUGIN_DIR = saved_plugin
+        plugin_tmp.cleanup()
     print(f"\n{len(tests)} e2e tests passed")
     return 0
 

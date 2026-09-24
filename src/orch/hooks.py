@@ -26,7 +26,7 @@ GLOBAL_HOOKS = {
     "alert": "a task is blocked on a permission/question (or a project is untrusted)",
     "needs-review": "a task needs a human: dirty work, retries exhausted, "
                     "a conflict, or a missing worktree",
-    "restart-server": "the shared server was restarted",
+    "restart-server": "the shared opencode service was restarted",
     "merged": "verified work was merged into base and archived",
     "removed": "a no-op branch was removed",
     "dispatched": "a task agent was dispatched",
@@ -110,6 +110,8 @@ def event_hook_template(name: str, ext: str, event: str, props: str) -> str:
     as ~/.config/orch/hooks/{name}.example (and shared with nothing else - the
     template is the single source). The daemon's SSE consumer fires the real hook
     when the server emits the event, with the event's JSON on stdin."""
+    props_line = f"# Properties: {props}" if props else \
+        "# Properties: the event JSON is on stdin (V2 puts them under `data`)"
     return f"""#!/usr/bin/env bash
 # {name}.{ext} - opencode server event "{event}".
 # The daemon's SSE consumer fires this when the server emits "{event}": copy this
@@ -118,7 +120,7 @@ def event_hook_template(name: str, ext: str, event: str, props: str) -> str:
 # when one applies).
 # Fire-and-forget: a non-zero exit is logged to ~/.local/state/orch, never
 # blocking the stream.
-# Properties: {props}
+{props_line}
 
 set -uo pipefail
 read -r payload

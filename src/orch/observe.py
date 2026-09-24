@@ -42,7 +42,7 @@ _PERM_TARGET_KEYS = ("filepath", "filePath", "path", "command", "url",
 def _describe_permission(p: dict) -> Blocked:
     rid = str(p.get("id") or p.get("requestID") or "?")
     sid = str(p.get("sessionID") or "?")
-    kind = p.get("permission") or p.get("action") or "?"
+    kind = p.get("action") or p.get("permission") or "?"
     meta = p.get("metadata") or {}
     detail = None
     if isinstance(meta, dict):
@@ -52,7 +52,7 @@ def _describe_permission(p: dict) -> Blocked:
                 detail = str(val)
                 break
     if detail is None:
-        target = p.get("patterns") or p.get("resources") or []
+        target = p.get("resources") or p.get("patterns") or []
         if isinstance(target, (list, tuple)):
             detail = ", ".join(str(t) for t in target) or str(kind)
         else:
@@ -65,22 +65,28 @@ def _describe_permission(p: dict) -> Blocked:
     )
 
 
-def _describe_question(q: dict) -> Blocked:
-    rid = str(q.get("id") or q.get("requestID") or "?")
-    sid = str(q.get("sessionID") or "?")
-    qs = q.get("questions") or []
-    if isinstance(qs, list) and qs:
-        first = qs[0]
-        detail = str(first.get("question") if isinstance(first, dict) else first)
-    else:
-        detail = "question pending"
+def _describe_form(f: dict) -> Blocked:
+    """A V2 form is what V1 called a question: a title plus typed fields. The
+    daemon treats it as `blocked-on-question`, answerable with `orch task
+    answer`."""
+    rid = str(f.get("id") or f.get("requestID") or "?")
+    sid = str(f.get("sessionID") or "?")
+    fields = f.get("fields") or []
+    detail = str(f.get("title") or "question pending")
+    if isinstance(fields, list) and fields and isinstance(fields[0], dict):
+        detail = str(fields[0].get("title") or fields[0].get("key") or detail)
     return Blocked(kind="question", request_id=rid, session_id=sid, detail=detail)
 
 
 def _ask_message_id(ask: dict) -> str | None:
-    """The message a pending ask belongs to, from the ask's `tool.messageID`.
-    None when the server did not attach one - such an ask is treated as a live
-    block (the safe default)."""
+    """The message a pending ask belongs to. V2 permissions carry
+    `source: {type: "tool", messageID, id}`; V1 carried `tool.messageID`. A form
+    has neither (None), so it is treated as a live block."""
+    source = ask.get("source")
+    if isinstance(source, dict):
+        mid = source.get("messageID")
+        if mid:
+            return str(mid)
     tool = ask.get("tool")
     if isinstance(tool, dict):
         mid = tool.get("messageID")
@@ -88,21 +94,35 @@ def _ask_message_id(ask: dict) -> str | None:
     return None
 
 
+def _error(value: dict) -> dict | None:
+    err = value.get("error")
+    if isinstance(err, dict):
+        return err
+    info = value.get("info")
+    if isinstance(info, dict) and isinstance(info.get("error"), dict):
+        return info["error"]
+    return None
+
+
+def _is_abort(err: dict) -> bool:
+    name = str(err.get("name") or err.get("type") or "")
+    if "abort" in name.lower():
+        return True
+    return "abort" in str(err.get("message") or "").lower()
+
+
 def _message_aborted(port: int, session_id: str, message_id: str) -> bool:
-    """Whether a message ended in an abort (`MessageAbortedError`), i.e. the
-    turn that raised an ask was stopped by a user interrupt (the TUI stop) or
-    died for another reason - so the ask it created is orphaned."""
+    """Whether a message ended in an abort, i.e. the turn that raised an ask was
+    stopped by a user interrupt (the TUI stop) or died - so the ask it created is
+    orphaned."""
     try:
         m = harness.message_by_id(port, session_id, message_id)
     except Exception:
         return False
     if not isinstance(m, dict):
         return False
-    info = m.get("info")
-    if not isinstance(info, dict):
-        return False
-    err = info.get("error")
-    return bool(isinstance(err, dict) and err.get("name") == "MessageAbortedError")
+    err = _error(m)
+    return bool(err and _is_abort(err))
 
 
 def _last_turn_aborted(port: int, session_id: str) -> bool:
@@ -115,12 +135,24 @@ def _last_turn_aborted(port: int, session_id: str) -> bool:
     for m in reversed(msgs):
         if not isinstance(m, dict):
             continue
-        info = m.get("info")
-        if not isinstance(info, dict) or info.get("role") != "assistant":
+        role = m.get("role")
+        if role is None and isinstance(m.get("info"), dict):
+            role = m["info"].get("role")
+        if role != "assistant" and m.get("type") != "assistant":
             continue
-        err = info.get("error")
-        return bool(isinstance(err, dict) and err.get("name") == "MessageAbortedError")
+        err = _error(m)
+        return bool(err and _is_abort(err))
     return False
+
+
+def _session_interrupted(port: int, session_id: str) -> bool:
+    """V2 records the turn outcome on the session (`outcome:
+    interrupted`), which is sturdier than re-deriving it from the last message."""
+    try:
+        s = harness.session_info(port, session_id)
+    except Exception:
+        return False
+    return bool(isinstance(s, dict) and s.get("outcome") == "interrupted")
 
 
 def look_task(port: int, worktree: str) -> TaskFact | None:
@@ -133,20 +165,21 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
                if s.get("id") and not s.get("parentID")]
     watch = primary or ids
 
-    status = harness.session_status(port, worktree)
-    busy = [sid for sid in watch if sid in status]
+    active = harness.active_sessions(port)
+    busy = [sid for sid in watch if sid in active]
 
     perms = [p for p in harness.permissions(port, worktree)
              if str(p.get("sessionID") or "") in set(ids)]
-    ques = [q for q in harness.questions(port, worktree)
-            if str(q.get("sessionID") or "") in set(ids)]
+    forms = [q for q in harness.forms(port, worktree)
+             if str(q.get("sessionID") or "") in set(ids)]
 
     interrupted = False
     orphaned: list[dict] = []
     if not busy and ids:
         sid = (primary or ids)[0]
-        interrupted = _last_turn_aborted(port, sid)
-        for ask in perms + ques:
+        interrupted = (_session_interrupted(port, sid)
+                       or _last_turn_aborted(port, sid))
+        for ask in perms + forms:
             mid = _ask_message_id(ask)
             if mid and _message_aborted(port, sid, mid):
                 orphaned.append(ask)
@@ -154,14 +187,14 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
     orphan_ids = {str(a.get("id") or a.get("requestID") or "") for a in orphaned}
     live_perms = [p for p in perms
                   if str(p.get("id") or p.get("requestID") or "") not in orphan_ids]
-    live_ques = [q for q in ques
-                 if str(q.get("id") or q.get("requestID") or "") not in orphan_ids]
+    live_forms = [q for q in forms
+                  if str(q.get("id") or q.get("requestID") or "") not in orphan_ids]
 
     if interrupted:
         state = INTERRUPTED
     elif live_perms:
         state = BLOCKED_PERMISSION
-    elif live_ques:
+    elif live_forms:
         state = BLOCKED_QUESTION
     elif busy:
         state = BUSY
@@ -175,5 +208,5 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
         interrupted=interrupted,
         orphaned=orphaned,
         blocked=[_describe_permission(p) for p in live_perms]
-        + [_describe_question(q) for q in live_ques],
+        + [_describe_form(q) for q in live_forms],
     )

@@ -172,7 +172,7 @@ def decide(snap: Snapshot) -> list[Action]:
                else "is alive but answers nothing")
         actions.append(Action(
             RESTART_SERVER, None,
-            f"the shared server {why}",
+            f"the shared opencode service {why}",
             "every dispatched task lives inside this one process, so its death "
             "takes them all with it",
         ))
@@ -696,10 +696,10 @@ class Supervisor:
             if a.kind == RESTART_SERVER:
                 try:
                     info = server.restart()
-                    log.append(f"  -> restarted shared server pid={info.pid} {info.url}")
+                    log.append(f"  -> restarted shared opencode service pid={info.pid} {info.url}")
                     log.extend(self._hook_log("restart-server", _hook_env(a)))
                 except (RuntimeError, TimeoutError, OSError) as e:
-                    log.append(f"  -> could not restart the shared server: {e}")
+                    log.append(f"  -> could not restart the shared opencode service: {e}")
             elif a.kind == ALERT:
                 if not a.blocked:
                     log.append(f"  -> alert: {a.reason} ({a.detail})")
@@ -721,11 +721,11 @@ class Supervisor:
             elif a.kind == CLEAR_ORPHANED and a.port and a.worktree:
                 for ask in a.orphaned:
                     rid = str(ask.get("id") or ask.get("requestID") or "")
-                    if not rid or rid in self.mem.cleared:
+                    sid = str(ask.get("sessionID") or "")
+                    if not rid or not sid or rid in self.mem.cleared:
                         continue
                     try:
-                        harness.reply_permission(a.port, rid, "reject",
-                                                 directory=a.worktree)
+                        harness.reply_permission(a.port, sid, rid, "reject")
                         self.mem.cleared.add(rid)
                         log.append(f"  -> cleared orphaned ask {rid}")
                     except Exception as e:  # noqa: BLE001
@@ -822,8 +822,8 @@ def run(project: str | None = None, roots: list[str] | None = None,
     _emit(f"orch daemon: supervising {scope}, every {interval:g}s")
     if sse and not once and not dry_run:
         sup.start_event_watcher()
-        _emit("orch daemon: listening on the shared server's /event stream for "
-              "per-event hooks")
+        _emit("orch daemon: listening on the shared opencode service's "
+              "/api/event stream for per-event hooks")
     try:
         while True:
             for line in sup.step():
@@ -850,7 +850,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-# The daemon must be able to (re)start the shared server, which spawns
+# The daemon must be able to (re)start the shared opencode service, which spawns
 # `opencode`. systemd's default PATH does not include the user's shell PATH
 # (e.g. ~/.opencode/bin), so the install-time environment is baked in. This
 # also carries ORCH_ROOTS when the owner set it, so supervised roots survive
@@ -864,7 +864,7 @@ RestartSec=5
 # Journald already timestamps and rotates, so the daemon logs plainly to stdout.
 StandardOutput=journal
 StandardError=journal
-# Never kill the shared server or a running agent when the unit stops: they are
+# Never kill the shared opencode service or a running agent when the unit stops: they are
 # started with start_new_session and deliberately outlive this process.
 KillMode=process
 
@@ -1014,10 +1014,11 @@ def uninstall(wipe_state: bool = True) -> list[str]:
     _run_config_cmd(["loginctl", "disable-linger", os.environ.get("USER") or ""], out)
 
     if server.current() is not None:
-        killed = server.stop()
-        out.append("stopped the shared server" if killed else "no shared server running")
+        out.append("left the shared opencode service running (it is shared "
+                   "with your own opencode clients; `opencode service stop` "
+                   "stops it)")
     else:
-        out.append("no shared server running")
+        out.append("no shared opencode service running")
 
     state_dir = server.state_dir()
     if wipe_state and state_dir.exists():

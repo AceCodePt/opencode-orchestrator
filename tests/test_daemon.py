@@ -291,8 +291,8 @@ def test_orphaned_asks_emit_a_clear_action() -> None:
 def test_apply_clears_orphaned_asks() -> None:
     calls: list[tuple] = []
     orig = daemon.harness.reply_permission
-    daemon.harness.reply_permission = lambda port, rid, reply, directory=None, \
-        message=None: (calls.append((port, rid, reply, directory)) or {})
+    daemon.harness.reply_permission = lambda port, sid, rid, reply, message=None: \
+        (calls.append((port, sid, rid, reply)) or {})
     try:
         sup = daemon.Supervisor(dry_run=False)
         a = daemon.Action(daemon.CLEAR_ORPHANED, "task-a",
@@ -302,7 +302,7 @@ def test_apply_clears_orphaned_asks() -> None:
                           orphaned=[{"id": "per_1", "sessionID": "ses_1"}])
         log = sup.apply([a])
         assert any("cleared orphaned ask per_1" in l for l in log), log
-        assert calls == [(4096, "per_1", "reject", WT)], calls
+        assert calls == [(4096, "ses_1", "per_1", "reject")], calls
         assert "per_1" in sup.mem.cleared
     finally:
         daemon.harness.reply_permission = orig

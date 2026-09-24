@@ -99,12 +99,12 @@ def test_start_creates_a_session_via_the_server_api() -> None:
 
     dispatch.server.start = lambda: _Srv()
 
-    def create_session(port, directory, title=None):
-        calls.append(("create", port, directory, title))
+    def create_session(port, directory, title=None, agent=None, model=None):
+        calls.append(("create", port, directory, title, agent, model))
         return {"id": "ses_abc"}
 
-    def prompt_async(port, sid, text, agent=None, model=None):
-        calls.append(("prompt", port, sid, text, agent, model))
+    def prompt_async(port, sid, text):
+        calls.append(("prompt", port, sid, text))
 
     dispatch.harness.create_session = create_session
     dispatch.harness.prompt_async = prompt_async
@@ -112,9 +112,9 @@ def test_start_creates_a_session_via_the_server_api() -> None:
         r = dispatch.start(root, "probe", model="m/x", agent="builder")
         assert r.ok, r.problems
         assert r.session_id == "ses_abc"
-        assert calls[0] == ("create", 4099, str(r.worktree), "probe"), calls
+        assert calls[0] == ("create", 4099, str(r.worktree), "probe",
+                            "builder", "m/x"), calls
         assert calls[1][0] == "prompt" and calls[1][2] == "ses_abc", calls
-        assert calls[1][4] == "builder" and calls[1][5] == "m/x", calls
         assert "tasks/probe/task.md" in calls[1][3], \
             "the prompt must carry the task instructions"
         assert not any("opencode" in s and "run" in s for s in r.steps), \
@@ -142,11 +142,11 @@ def test_start_prompts_for_the_done_commit() -> None:
         url = "http://127.0.0.1:4099"
 
     dispatch.server.start = lambda: _Srv()
-    dispatch.harness.create_session = lambda port, directory, title=None: {
+    dispatch.harness.create_session = lambda port, directory, title=None, **kw: {
         "id": "ses_abc"}
     calls: list = []
 
-    def prompt_async(port, sid, text, agent=None, model=None):
+    def prompt_async(port, sid, text):
         calls.append(text)
 
     dispatch.harness.prompt_async = prompt_async

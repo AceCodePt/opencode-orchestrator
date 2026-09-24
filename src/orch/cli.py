@@ -79,13 +79,13 @@ def cmd_server(args: argparse.Namespace) -> int:
         except (RuntimeError, TimeoutError, OSError) as e:
             print(f"could not start: {e}", file=sys.stderr)
             return 1
-        print(f"shared server pid={info.pid} {info.url}")
+        print(f"shared opencode service pid={info.pid} {info.url}")
         _fire_global("restart-server")
         return 0
 
     if args.action == "stop":
         killed = server_mod.stop()
-        print("stopped" if killed else "nothing running")
+        print("stopped the shared opencode service" if killed else "nothing running")
         return 0
 
     if args.action == "restart":
@@ -94,7 +94,7 @@ def cmd_server(args: argparse.Namespace) -> int:
         except (RuntimeError, TimeoutError, OSError) as e:
             print(f"could not restart: {e}", file=sys.stderr)
             return 1
-        print(f"shared server pid={info.pid} {info.url}")
+        print(f"shared opencode service pid={info.pid} {info.url}")
         _fire_global("restart-server")
         return 0
 
@@ -108,7 +108,7 @@ def cmd_server(args: argparse.Namespace) -> int:
             print(f"pid={st['pid']} {st['url']} version={st.get('version') or '?'} "
                   f"uptime={st.get('uptime_s')}s")
             if st.get("unresponsive"):
-                print("  ! process is alive but does not answer /global/health")
+                print("  ! process is alive but does not answer /api/info")
     if not st.get("running"):
         return 2
     return 1 if st.get("unresponsive") else 0
@@ -468,6 +468,17 @@ def cmd_task_merge(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
+def _form_answer(form: dict, text: str) -> dict:
+    """Turn one answer string into a V2 form reply: `{field_key: value}`. The
+    `question` tool's forms normally carry a single field, so the text goes to
+    the first one; a form with no fields falls back to a generic key."""
+    fields = form.get("fields") or []
+    if isinstance(fields, list) and fields and isinstance(fields[0], dict):
+        key = str(fields[0].get("key") or "answer")
+        return {key: text}
+    return {"answer": text}
+
+
 def cmd_task_answer(args: argparse.Namespace) -> int:
     start = Path(args.directory) if args.directory else Path.cwd()
     proj = state.Project.from_dir(start)
@@ -478,7 +489,7 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
     port = (st.get("port") if st.get("running")
             and not st.get("unresponsive") else None)
     if not port:
-        print("no shared server; `orch server start` first", file=sys.stderr)
+        print("no shared opencode service; `orch server start` first", file=sys.stderr)
         return 2
     tasks = proj.scan(port)
     t = next((x for x in tasks if x.name == args.name), None)
@@ -495,16 +506,19 @@ def cmd_task_answer(args: argparse.Namespace) -> int:
         return 2
     try:
         if b.kind == "question":
-            harness.reply_question(port, b.request_id, [{"value": args.reply}])
+            forms = harness.forms(port, t.worktree)
+            form = next((x for x in forms
+                         if str(x.get("id")) == b.request_id), {})
+            harness.reply_form(port, b.session_id, b.request_id,
+                               _form_answer(form, args.reply))
             print(f"answered question {b.request_id} for {args.name}")
         else:
             reply = args.reply.lower()
             if reply not in ("allow", "deny"):
                 print("a permission takes `allow` or `deny`", file=sys.stderr)
                 return 2
-            harness.reply_permission(port, b.request_id,
-                                     "once" if reply == "allow" else "reject",
-                                     directory=t.worktree)
+            harness.reply_permission(port, b.session_id, b.request_id,
+                                     "once" if reply == "allow" else "reject")
             print(f"{reply}ed permission {b.request_id} for {args.name}")
     except Exception as e:  # noqa: BLE001
         print(f"could not answer {b.request_id}: {e}", file=sys.stderr)
@@ -659,8 +673,8 @@ def _walk_permissions(proj: state.Project, port: int, owner: str) -> int:
             c = line.strip().lower()
             if c in ("a", "allow"):
                 try:
-                    harness.reply_permission(port, ask.request_id, "once",
-                                             directory=ask.worktree)
+                    harness.reply_permission(port, ask.session_id, ask.request_id,
+                                             "once")
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! could not allow {ask.request_id}: {e}",
                           file=sys.stderr)
@@ -672,9 +686,8 @@ def _walk_permissions(proj: state.Project, port: int, owner: str) -> int:
                 reason = _prompt("  reason (sent to the agent): ") or ""
                 reason = reason.strip() or _DENY_DEFAULT
                 try:
-                    harness.reply_permission(port, ask.request_id, "reject",
-                                             directory=ask.worktree,
-                                             message=reason)
+                    harness.reply_permission(port, ask.session_id, ask.request_id,
+                                             "reject", message=reason)
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! could not deny {ask.request_id}: {e}",
                           file=sys.stderr)
@@ -715,12 +728,11 @@ def _perm_one_shot(proj: state.Project, port: int, name: str,
         reason_text = (reason or "").strip() or _DENY_DEFAULT
     try:
         if reply == "deny":
-            harness.reply_permission(port, ask.request_id, "reject",
-                                     directory=ask.worktree,
-                                     message=reason_text)
+            harness.reply_permission(port, ask.session_id, ask.request_id,
+                                     "reject", message=reason_text)
         else:
-            harness.reply_permission(port, ask.request_id, "once",
-                                     directory=ask.worktree)
+            harness.reply_permission(port, ask.session_id, ask.request_id,
+                                     "once")
     except Exception as e:  # noqa: BLE001
         print(f"could not answer {ask.request_id}: {e}", file=sys.stderr)
         return 1
@@ -774,7 +786,7 @@ def cmd_permissions(args: argparse.Namespace) -> int:
     port = (st.get("port") if st.get("running")
             and not st.get("unresponsive") else None)
     if not port:
-        print("no shared server; `orch server start` first", file=sys.stderr)
+        print("no shared opencode service; `orch server start` first", file=sys.stderr)
         return 2
 
     proj = state.Project.from_dir(start)
@@ -868,16 +880,14 @@ def cmd_install(args: argparse.Namespace) -> int:
     for line in install_mod.path_hint():
         print(line)
 
-    if custom_tools.ensure():
-        try:
-            server_mod.restart()
-            print("custom tools installed to "
-                  f"{custom_tools.TOOLS_DIR}; shared server restarted")
-        except (OSError, RuntimeError, TimeoutError) as e:
-            print(f"custom tools installed to {custom_tools.TOOLS_DIR}, but "
-                  f"could not restart the shared server: {e}")
-    else:
-        print(f"custom tools current in {custom_tools.TOOLS_DIR}")
+    custom_tools.ensure()
+    try:
+        server_mod.restart()  # a new local plugin only loads at service startup
+        print(f"custom-tool plugin installed in {custom_tools.PLUGIN_DIR}; "
+              "shared service reloaded")
+    except (OSError, RuntimeError, TimeoutError) as e:
+        print(f"custom-tool plugin installed in {custom_tools.PLUGIN_DIR}, but "
+              f"could not reload the shared service: {e}")
     for line in daemon_mod.install(interval=args.interval,
                                    enable=not args.no_enable):
         print(line)
@@ -977,7 +987,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     try:
         info = server_mod.start()
     except (RuntimeError, TimeoutError, OSError) as e:
-        print(f"could not start the shared server: {e}", file=sys.stderr)
+        print(f"could not start the shared opencode service: {e}", file=sys.stderr)
         return 1
     try:
         t = agent_mod.task_at(proj, info.port, start)
@@ -991,10 +1001,11 @@ def cmd_attach(args: argparse.Namespace) -> int:
         print(e, file=sys.stderr)
         return 1
     try:
-        os.execvp("opencode", ["opencode", "attach", info.url,
-                               "--session", sid, "--dir", str(dir_)])
+        # V2 has no `attach` subcommand: the TUI discovers the shared service
+        # (and its auth) itself, so we only choose the directory and session.
+        os.execvp("opencode", ["opencode", str(dir_), "--session", sid])
     except OSError as e:
-        print(f"could not exec opencode attach: {e}", file=sys.stderr)
+        print(f"could not exec opencode: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -1334,15 +1345,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("-C", "--directory")
     d.set_defaults(func=cmd_doctor)
 
-    s = sub.add_parser("server", help="the one shared headless opencode server")
+    s = sub.add_parser("server",
+                       help="the machine's shared opencode service")
     s.add_argument("--json", action="store_true")
     sa = s.add_subparsers(dest="action", metavar="<action>", title="server actions")
     ss = sa.add_parser("status",
-                       help="whether the shared server is up and healthy")
+                       help="whether the shared opencode service is up and healthy")
     ss.add_argument("--json", action="store_true")
-    sa.add_parser("start", help="start the shared server (reuse if already up)")
-    sa.add_parser("stop", help="stop the shared server by recorded pid")
-    sa.add_parser("restart", help="stop and start the shared server again")
+    sa.add_parser("start", help="ensure the shared opencode service is running")
+    sa.add_parser("stop", help="stop the shared opencode service (also used by "
+                               "your own opencode clients)")
+    sa.add_parser("restart", help="stop and start the shared opencode service again")
     s.set_defaults(func=cmd_server, _sparser=s)
 
     t = sub.add_parser("task", help="dispatch and inspect tasks")
@@ -1564,7 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
     dm.add_argument("--no-sse", action="store_true",
-                    help="do not consume the server's /event stream (per-event "
+                    help="do not consume the service's /api/event stream (per-event "
                          "hooks stay silent)")
     dm.add_argument("--json", action="store_true")
     # The run flags exist on both the parent and the `run` subparser so
@@ -1579,7 +1592,7 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--dry-run", action="store_true",
                     help="decide and print, change nothing")
     dr.add_argument("--no-sse", action="store_true",
-                    help="do not consume the server's /event stream (per-event "
+                    help="do not consume the service's /api/event stream (per-event "
                          "hooks stay silent)")
     ds.add_argument("--json", action="store_true")
     db = da.add_parser(

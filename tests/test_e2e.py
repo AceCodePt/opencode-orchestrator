@@ -98,12 +98,13 @@ def _restore(saved: dict[str, str | None]) -> None:
 def _patch_orphan_ask(sid: str, last_turn_aborted: bool) -> tuple[dict, dict]:
     """Simulate the session's message record so the given pending ask's owning
     message is aborted (orphaned) and the last assistant turn is either
-    finished or aborted. A real `MessageAbortedError` needs a live model turn,
-    so only the message record is faked; the server, session, git and the whole
-    daemon loop are real."""
-    ask = {"id": "per_fake1", "sessionID": sid, "permission": "external_directory",
+    finished or aborted. A real aborted turn needs a live model turn, so only
+    the message record is faked; the server, session, git and the whole daemon
+    loop are real."""
+    ask = {"id": "per_fake1", "sessionID": sid, "action": "external_directory",
+           "resources": ["/tmp/*"],
            "metadata": {"command": "ls /tmp"},
-           "tool": {"messageID": "m_ask", "callID": "c1"}}
+           "source": {"type": "tool", "messageID": "m_ask", "id": "c1"}}
     orig = {n: getattr(observe.harness, n)
             for n in ("permissions", "messages", "message_by_id")}
 
@@ -112,12 +113,12 @@ def _patch_orphan_ask(sid: str, last_turn_aborted: bool) -> tuple[dict, dict]:
 
     def messages(port, session_id, limit=None):
         error = {"name": "MessageAbortedError",
-                 "data": {"message": "Aborted"}} if last_turn_aborted else None
-        return [{"info": {"id": "m_last", "role": "assistant", "error": error}}]
+                 "message": "Aborted"} if last_turn_aborted else None
+        return [{"id": "m_last", "type": "assistant", "error": error}]
 
     def message_by_id(port, session_id, message_id):
-        return {"info": {"id": message_id, "role": "assistant",
-                         "error": {"name": "MessageAbortedError"}}}
+        return {"id": message_id, "type": "assistant",
+                "error": {"name": "MessageAbortedError", "message": "Aborted"}}
 
     observe.harness.permissions = permissions
     observe.harness.messages = messages
@@ -134,7 +135,7 @@ def _setup_interrupted(root: Path, name: str, answer: str,
                        last_turn_aborted: bool) -> tuple[Path, list, tuple]:
     """Shared setup for the orphaned/interrupted live-server scenarios: trust
     the project, claim + commit the work, create a real session bound to the
-    worktree, simulate the aborted-message record, and start the server."""
+    worktree, simulate the aborted-message record, and ensure the service."""
     _top, common, _err = dispatch.project_of(root)
     assert common is not None, _err
     state.trust_project(common)
@@ -146,16 +147,20 @@ def _setup_interrupted(root: Path, name: str, answer: str,
     orig_patch, _ask = _patch_orphan_ask(sid, last_turn_aborted)
     cleared: list = []
     orig_reply = daemon.harness.reply_permission
-    daemon.harness.reply_permission = lambda port, rid, reply, directory=None, \
-        message=None: (cleared.append((rid, reply, directory)) or {})
-    return wt, cleared, (orig_patch, orig_reply)
+
+    def fake_reply(port, session_id, rid, reply, message=None):
+        cleared.append((session_id, rid, reply))
+        return {}
+
+    daemon.harness.reply_permission = fake_reply
+    return wt, cleared, (orig_patch, orig_reply, srv.port, sid)
 
 
 def _teardown_interrupted(cleanups: tuple) -> None:
-    orig_patch, orig_reply = cleanups
+    orig_patch, orig_reply, port, sid = cleanups
     _restore_patch(orig_patch)
     daemon.harness.reply_permission = orig_reply
-    server.stop()
+    harness.delete_session(port, sid)
 
 
 def test_an_orphaned_ask_never_freezes_a_task_and_is_cleared() -> None:
@@ -178,7 +183,8 @@ def test_an_orphaned_ask_never_freezes_a_task_and_is_cleared() -> None:
             _teardown_interrupted(cleanups)
 
         # the orphaned ask was cleared (replied reject) and never blocked
-        assert cleared == [("per_fake1", "reject", str(wt))], cleared
+        assert [(c[1], c[2]) for c in cleared] == [("per_fake1", "reject")], cleared
+        assert all(c[0].startswith("ses") for c in cleared), cleared
         assert "verify passed" in joined, joined
         assert "merged" in joined and "archived" in joined, joined
         assert (root / "answer.txt").read_text() == "answer: 42"
@@ -211,7 +217,7 @@ def test_an_interrupted_turn_is_held_for_review_not_merged() -> None:
             _teardown_interrupted(cleanups)
 
         # the orphaned ask is still cleared, but the interrupted work is held
-        assert cleared == [("per_fake1", "reject", str(wt))], cleared
+        assert [(c[1], c[2]) for c in cleared] == [("per_fake1", "reject")], cleared
         assert "needs-review" in joined and "interrupted" in joined, joined
         assert "merged" not in joined, joined
         assert wt.exists(), "interrupted work must survive, held for review"
@@ -243,12 +249,9 @@ def test_an_agent_commit_is_the_done_signal_and_the_loop_merges_it() -> None:
         assert not state._dirty(wt)
         assert state._diff(common, "main", "done-commit")
 
-        srv = server.start()
-        try:
-            log = _run_step(root, "done-commit")
-            joined = "\n".join(log)
-        finally:
-            server.stop()
+        server.start()  # the shared service (discovered/started, never stopped)
+        log = _run_step(root, "done-commit")
+        joined = "\n".join(log)
 
         assert "verify passed" in joined, joined
         assert "merged" in joined, joined
@@ -284,12 +287,9 @@ def test_a_bad_commit_lands_on_needs_review_and_preserves_the_work() -> None:
         state.trust_project(common)
         wt = _claim_and_commit(root, "done-commit", {"answer.txt": "answer: 99"})
 
-        srv = server.start()
-        try:
-            log = _run_step(root, "done-commit")
-            joined = "\n".join(log)
-        finally:
-            server.stop()
+        server.start()  # the shared service (discovered/started, never stopped)
+        log = _run_step(root, "done-commit")
+        joined = "\n".join(log)
 
         assert "needs-review" in joined, joined
         assert "merged" not in joined, joined
@@ -306,9 +306,19 @@ def test_a_bad_commit_lands_on_needs_review_and_preserves_the_work() -> None:
 
 
 def main() -> int:
+    from orch import custom_tools
+
+    plugin_tmp = tempfile.TemporaryDirectory()
+    saved_plugin = custom_tools.PLUGIN_DIR
+    custom_tools.PLUGIN_DIR = Path(plugin_tmp.name)
+    custom_tools.ensure()  # pre-install so server.start() never bounces the real service
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for t in tests:
-        t()
+    try:
+        for t in tests:
+            t()
+    finally:
+        custom_tools.PLUGIN_DIR = saved_plugin
+        plugin_tmp.cleanup()
     print(f"\n{len(tests)} e2e tests passed")
     return 0
 

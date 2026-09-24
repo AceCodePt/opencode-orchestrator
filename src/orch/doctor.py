@@ -127,7 +127,7 @@ def check_server() -> list[Check]:
     st = server.status()
     if not st.get("running"):
         out.append(Check(
-            WARN, "no shared server",
+            WARN, "no shared opencode service",
             f"{st.get('reason')}. `orch server start`, or let `orch task start` "
             f"bring one up",
         ))
@@ -135,14 +135,14 @@ def check_server() -> list[Check]:
 
     if st.get("unresponsive"):
         out.append(Check(
-            FAIL, f"shared server pid {st['pid']} is alive but answers nothing",
-            f"port {st['port']} does not respond to /global/health. "
+            FAIL, f"shared opencode service pid {st['pid']} is alive but answers nothing",
+            f"port {st['port']} does not respond to /api/info. "
             f"`orch server restart`, then re-dispatch anything that was running",
         ))
         return out
 
     out.append(Check(
-        OK, f"shared server pid {st['pid']}",
+        OK, f"shared opencode service pid {st['pid']}",
         f"{st['url']} version {st.get('version') or '?'} up {st.get('uptime_s')}s",
     ))
     out.extend(check_harness_version(st))
@@ -281,6 +281,16 @@ def check_opencode_deny() -> list[Check]:
     missing = [k for k in daemon_mod.OPENCODE_DENY_RULES
                if edit.get(k) != "deny"]
     if missing:
+        # native V2 shape: an ordered permissions array
+        denied = set()
+        perms = (cfg or {}).get("permissions")
+        if isinstance(perms, list):
+            for r in perms:
+                if (isinstance(r, dict) and r.get("action") == "edit"
+                        and r.get("effect") == "deny"):
+                    denied.add(str(r.get("resource")))
+        missing = [k for k in daemon_mod.OPENCODE_DENY_RULES if k not in denied]
+    if missing:
         return [Check(
             FAIL, "global opencode config does not deny .orchestration/**",
             "missing deny for: " + ", ".join(missing) + ". `orch install`",
@@ -415,20 +425,8 @@ def check_custom_tools() -> list[Check]:
         for msg in problems:
             out.append(Check(FAIL, "custom tools", msg))
         return out
-    out = [Check(OK, "custom tools",
-                 "create_task/update_task/archive_task/delete_task installed and current")]
-    info = server.current()
-    newest = 0
-    try:
-        for p in custom_tools.TOOLS_DIR.glob("*.ts"):
-            newest = max(newest, int(p.stat().st_mtime))
-    except OSError:
-        pass
-    if info is not None and newest and info.started_at < newest:
-        out.append(Check(
-            WARN, "custom tools", "the shared server predates the installed tool "
-            "files - restart it (`orch server restart`) so sessions can call them"))
-    return out
+    return [Check(OK, "custom tools",
+                  "create_task/update_task/archive_task/delete_task installed and current")]
 
 
 _MARK = {OK: "[ok]  ", WARN: "[warn]", FAIL: "[FAIL]"}

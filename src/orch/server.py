@@ -7,19 +7,27 @@ import shutil
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import harness
 
-LISTEN_RE = re.compile(r"listening on\s+(https?://\S+)")
-PORT_RE = re.compile(r":(\d+)\s*$")
+# OpenCode 2 manages one background service per machine (`opencode serve
+# --service`), registering its URL and password in
+# `~/.local/state/opencode/service.json`. orch no longer spawns its own
+# server: it discovers that service, authenticates to it, and only starts one
+# when none is running. The service is shared with the user's own TUI, so it is
+# deliberately not torn down with orch.
+
+PORT_RE = re.compile(r":(\d+)/?$")
 
 START_TIMEOUT_S = 30.0
 STOP_GRACE_S = 5.0
 
 
 def state_dir() -> Path:
+    """orch's own state (trusted projects, hooks, daemon log) - not opencode's."""
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     d = Path(base) / "orch"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -30,10 +38,6 @@ def state_dir() -> Path:
     return d
 
 
-def _state_file() -> Path:
-    return state_dir() / "server.json"
-
-
 def _log_file() -> Path:
     return state_dir() / "server.log"
 
@@ -42,6 +46,25 @@ def _neutral_cwd() -> Path:
     d = state_dir() / "server-cwd"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return d
+
+
+def service_file() -> Path:
+    """opencode's service registration. The service is one per machine on a
+    persisted port, so this resolves from the real home rather than orch's
+    XDG-isolated state; `ORCH_SERVICE_FILE` overrides it for tests and custom
+    setups."""
+    override = os.environ.get("ORCH_SERVICE_FILE")
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "state" / "opencode" / "service.json"
+
+
+def read_service_file() -> dict | None:
+    try:
+        raw = json.loads(service_file().read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
 
 
 def proc_start_ticks(pid: int) -> int | None:
@@ -57,6 +80,19 @@ def proc_start_ticks(pid: int) -> int | None:
         return int(fields[19])
     except (IndexError, ValueError):
         return None
+
+
+def proc_start_epoch(pid: int) -> int:
+    """The wall-clock time `pid` started, from /proc/uptime and its starttime."""
+    ticks = proc_start_ticks(pid)
+    if ticks is None:
+        return 0
+    try:
+        up = float(Path("/proc/uptime").read_text().split()[0])
+        hz = os.sysconf("SC_CLK_TCK")
+        return int(time.time() - (up - ticks / hz))
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        return 0
 
 
 def pid_alive(pid: int, start_ticks: int | None = None) -> bool:
@@ -78,7 +114,9 @@ class ServerInfo:
     pid: int
     port: int
     url: str
-    started_at: int
+    password: str = ""
+    version: str | None = None
+    started_at: int = 0
     start_ticks: int | None = None
 
     @property
@@ -86,62 +124,60 @@ class ServerInfo:
         return pid_alive(self.pid, self.start_ticks)
 
     def healthy(self) -> bool:
+        harness.set_auth(self.port, self.password)
         return bool((harness.health(self.port) or {}).get("healthy"))
 
 
-def read_state() -> ServerInfo | None:
+def _port_of(url: str) -> int:
     try:
-        raw = json.loads(_state_file().read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
+        port = urlsplit(url.strip()).port
+    except ValueError:
+        port = None
+    if port:
+        return int(port)
+    m = PORT_RE.search(url.strip().rstrip("/"))
+    if not m:
+        raise RuntimeError(f"cannot read a port out of {url!r}")
+    return int(m.group(1))
+
+
+def _info_from_service(raw: dict) -> ServerInfo | None:
     try:
-        return ServerInfo(
-            pid=int(raw["pid"]),
-            port=int(raw["port"]),
-            url=str(raw["url"]),
-            started_at=int(raw.get("started_at", 0)),
-            start_ticks=raw.get("start_ticks"),
-        )
+        pid = int(raw["pid"])
+        url = str(raw["url"])
     except (KeyError, TypeError, ValueError):
         return None
-
-
-def write_state(info: ServerInfo) -> None:
-    p = _state_file()
-    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(asdict(info), indent=2))
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    tmp.replace(p)
-
-
-def clear_state() -> None:
-    try:
-        _state_file().unlink()
-    except OSError:
-        pass
+    return ServerInfo(
+        pid=pid,
+        port=_port_of(url),
+        url=url,
+        password=str(raw.get("password") or ""),
+        version=str(raw.get("version") or "") or None,
+        started_at=proc_start_epoch(pid),
+        start_ticks=proc_start_ticks(pid),
+    )
 
 
 def current() -> ServerInfo | None:
-    info = read_state()
-    if info is None:
+    """The live opencode service, or None when none is registered/alive."""
+    raw = read_service_file()
+    if raw is None:
         return None
-    if not info.alive:
-        clear_state()
+    info = _info_from_service(raw)
+    if info is None or not info.alive:
         return None
+    harness.set_auth(info.port, info.password)
     return info
 
 
+def discover() -> ServerInfo | None:
+    return current()
+
+
 def status() -> dict:
-    info = read_state()
+    info = current()
     if info is None:
-        return {"running": False, "reason": "no recorded server"}
-    if not info.alive:
-        return {"running": False, "reason": f"recorded pid {info.pid} is gone",
-                "stale": True, "pid": info.pid, "port": info.port}
+        return {"running": False, "reason": "no opencode service registered"}
     caps = harness.capabilities(info.port)
     return {
         "running": True,
@@ -172,22 +208,7 @@ def orch_bin() -> str:
     return shutil.which("orch") or "orch"
 
 
-def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
-    from . import custom_tools
-
-    if custom_tools.ensure():
-        existing = current()
-        if existing:
-            stop()
-        reuse = False
-
-    if reuse:
-        existing = current()
-        if existing and existing.healthy():
-            return existing
-        if existing:
-            stop()
-
+def _spawn_service(opencode: str) -> subprocess.Popen:
     log = _log_file()
     log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     handle = os.fdopen(
@@ -195,8 +216,8 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
         "wb", buffering=0,
     )
     try:
-        proc = subprocess.Popen(
-            [opencode, "serve", "--port", "0", "--print-logs", "--log-level", "INFO"],
+        return subprocess.Popen(
+            [opencode, "serve", "--service"],
             cwd=str(_neutral_cwd()),
             env={**os.environ, "ORCH_BIN": orch_bin()},
             stdout=handle,
@@ -207,76 +228,74 @@ def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
     finally:
         handle.close()
 
-    url = _await_url(log, proc, START_TIMEOUT_S)
-    port = _port_of(url)
-    info = ServerInfo(
-        pid=proc.pid,
-        port=port,
-        url=url,
-        started_at=int(time.time()),
-        start_ticks=proc_start_ticks(proc.pid),
-    )
-    write_state(info)
-    return info
 
-
-def _await_url(log: Path, proc: subprocess.Popen, timeout: float) -> str:
+def _await_service(previous_pid: int | None, proc: subprocess.Popen,
+                   timeout: float) -> ServerInfo:
+    """Wait for the spawned service to register itself and answer /api/info."""
     deadline = time.time() + timeout
+    last_error = ""
     while time.time() < deadline:
+        info = current()
+        if info is not None and info.pid != previous_pid and info.healthy():
+            return info
+        if info is not None and info.healthy():
+            return info
         code = proc.poll()
-        text = ""
-        try:
-            text = log.read_text(errors="replace")
-        except OSError:
-            pass
-        m = LISTEN_RE.search(text)
-        if m:
-            return m.group(1).rstrip("/")
-        if code is not None:
-            raise RuntimeError(
-                f"opencode serve exited with code {code} before announcing a port.\n"
-                f"--- {log} ---\n{text.strip()[-2000:]}"
-            )
+        if code is not None and info is None:
+            text = ""
+            try:
+                text = _log_file().read_text(errors="replace")
+            except OSError:
+                pass
+            last_error = f"opencode serve --service exited with code {code}: {text.strip()[-2000:]}"
+            break
         time.sleep(0.2)
-    proc.kill()
     raise TimeoutError(
-        f"opencode serve did not announce a port within {timeout:.0f}s; see {log}"
+        last_error
+        or f"opencode service did not become healthy within {timeout:.0f}s; "
+           f"see {_log_file()}"
     )
 
 
-def _port_of(url: str) -> int:
-    from urllib.parse import urlsplit
+def start(reuse: bool = True, opencode: str = "opencode") -> ServerInfo:
+    """Return the live shared service, starting one if none is running. opencode
+    normally starts this itself when a client connects; orch only steps in when
+    the daemon or a CLI call needs it and none exists.
 
-    try:
-        port = urlsplit(url.strip()).port
-    except ValueError:
-        port = None
-    if port:
-        return int(port)
-    m = PORT_RE.search(url.strip().rstrip("/"))
-    if not m:
-        raise RuntimeError(f"cannot read a port out of {url!r}")
-    return int(m.group(1))
+    opencode only loads a newly added local plugin at service startup (not on a
+    hot reload), so a changed plugin forces a restart - that is what makes
+    `orch install`'s custom tools available to sessions."""
+    from . import custom_tools
+
+    tools_changed = custom_tools.ensure()
+
+    existing = current()
+    if reuse and existing is not None and existing.healthy() and not tools_changed:
+        return existing
+
+    previous_pid = existing.pid if existing else None
+    if existing is not None:
+        stop()
+    proc = _spawn_service(opencode)
+    return _await_service(previous_pid, proc, START_TIMEOUT_S)
 
 
 def stop(timeout: float = STOP_GRACE_S) -> bool:
-    info = read_state()
+    """Stop the shared service by its recorded pid. This is an explicit act
+    (`orch server stop`, uninstall is deliberate); the daemon never calls it,
+    because the service is shared with the user's own opencode clients."""
+    info = current()
     if info is None:
-        return False
-    if not info.alive:
-        clear_state()
         return False
 
     try:
         os.kill(info.pid, signal.SIGTERM)
     except OSError:
-        clear_state()
         return False
 
     deadline = time.time() + timeout
     while time.time() < deadline:
         if not info.alive:
-            clear_state()
             return True
         time.sleep(0.2)
 
@@ -288,7 +307,6 @@ def stop(timeout: float = STOP_GRACE_S) -> bool:
         if not info.alive:
             break
         time.sleep(0.2)
-    clear_state()
     return True
 
 

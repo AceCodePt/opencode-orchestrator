@@ -9,31 +9,34 @@ from orch import observe  # noqa: E402
 
 
 class _Fake:
-    def __init__(self, sessions=None, status=None, perms=None, ques=None,
-                 messages=None, message_errors=None):
+    def __init__(self, sessions=None, active=None, perms=None, forms=None,
+                 messages=None, message_errors=None, outcome=None):
         self.sessions = sessions or [{"id": "ses_1"}]
-        self.status = status or {}
+        self.active = active or {}
         self.perms = perms or []
-        self.ques = ques or []
+        self.forms = forms or []
         self.messages = messages or []
         self.message_errors = message_errors or {}
+        self.outcome = outcome
         self._orig = {}
-        for name in ("sessions", "session_status", "permissions", "questions",
-                     "messages", "message_by_id"):
+        for name in ("sessions", "active_sessions", "permissions", "forms",
+                     "messages", "message_by_id", "session_info"):
             self._orig[name] = getattr(observe.harness, name)
 
     def install(self) -> None:
         observe.harness.sessions = lambda port, worktree: self.sessions
-        observe.harness.session_status = lambda port, worktree: self.status
+        observe.harness.active_sessions = lambda port: self.active
         observe.harness.permissions = lambda port, worktree: self.perms
-        observe.harness.questions = lambda port, worktree: self.ques
+        observe.harness.forms = lambda port, worktree: self.forms
         observe.harness.messages = lambda port, sid, limit=None: self.messages
 
         def message_by_id(port, sid, mid):
-            return {"info": {"id": mid, "role": "assistant",
-                             "error": self.message_errors.get(mid)}}
+            return {"id": mid, "type": "assistant",
+                    "error": self.message_errors.get(mid)}
 
         observe.harness.message_by_id = message_by_id
+        observe.harness.session_info = lambda port, sid: (
+            {"outcome": self.outcome} if self.outcome else {})
 
     def restore(self) -> None:
         for name, fn in self._orig.items():
@@ -42,16 +45,16 @@ class _Fake:
 
 def _ask(**kw) -> dict:
     base = {"id": "per_1", "sessionID": "ses_1",
-            "tool": {"messageID": "m_old", "callID": "c1"}}
+            "source": {"type": "tool", "messageID": "m_old", "id": "c1"}}
     base.update(kw)
     return base
 
 
 def _msg(error, mid="m_latest", role="assistant") -> dict:
-    return {"info": {"id": mid, "role": role, "error": error}}
+    return {"id": mid, "type": role, "error": error}
 
 
-ABORTED = {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
+ABORTED = {"name": "MessageAbortedError", "message": "Aborted"}
 
 
 def test_last_turn_aborted_is_interrupted_and_orphans_its_ask() -> None:
@@ -106,7 +109,7 @@ def test_a_live_pending_ask_is_still_blocked() -> None:
 
 
 def test_busy_session_is_busy_not_interrupted() -> None:
-    fake = _Fake(status={"ses_1": "busy"}, messages=[_msg(ABORTED)])
+    fake = _Fake(active={"ses_1": {"type": "running"}}, messages=[_msg(ABORTED)])
     fake.install()
     try:
         tf = observe.look_task(4096, "/wt")
@@ -117,6 +120,35 @@ def test_busy_session_is_busy_not_interrupted() -> None:
     finally:
         fake.restore()
     print("ok: a busy session is never misread as interrupted")
+
+
+def test_a_session_outcome_of_interrupted_is_held() -> None:
+    fake = _Fake(outcome="interrupted", messages=[_msg(None)])
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.INTERRUPTED, tf.state
+        assert tf.interrupted is True
+    finally:
+        fake.restore()
+    print("ok: the V2 session outcome marks an interrupted turn")
+
+
+def test_a_form_is_a_blocked_question() -> None:
+    form = {"id": "frm_1", "sessionID": "ses_1", "title": "Pick one",
+            "fields": [{"key": "choice", "type": "string", "title": "Which?"}]}
+    fake = _Fake(forms=[form], messages=[_msg(None)])
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.BLOCKED_QUESTION, tf.state
+        assert [b.request_id for b in tf.blocked] == ["frm_1"]
+        assert tf.blocked[0].detail == "Which?"
+    finally:
+        fake.restore()
+    print("ok: a V2 form reads as a blocked question")
 
 
 def main() -> int:

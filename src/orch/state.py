@@ -566,7 +566,7 @@ def resolution_alive(port: int | None, base_worktree: str | None,
                      task: str) -> bool:
     """True if an agent is currently resolving <task>'s merge conflict in the
     base worktree. The resolver is a server session titled `<task>-merge-conflict`
-    bound to the base worktree (started via `prompt_async`, not an `opencode run`
+    bound to the base worktree (started via the prompt API, not an `opencode run`
     subprocess), so it is detected by session title + directory, never by a
     `run` process — a `run`-process lookup is blind to it."""
     if not port or not base_worktree:
