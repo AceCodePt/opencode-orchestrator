@@ -934,6 +934,46 @@ def test_permissions_interactive_primary_agent_owner() -> None:
     print("ok: the walk answers the primary agent's pending permission")
 
 
+def test_permissions_base_worktree_any_session_is_surfaced() -> None:
+    """A human's own opencode session in the base worktree (not titled
+    `orch:agent`) can block on a permission too; `orch permissions` must show it
+    by its session title instead of silently dropping it."""
+    t = _perm_blocked()
+    perm_response: list[dict] = [{"id": "per_x", "sessionID": "ses_human",
+                                  "action": "edit",
+                                  "resources": [".config/opencode/opencode.json"],
+                                  "source": {"type": "tool", "messageID": "m1",
+                                             "id": "c1"}}]
+    session_response: list[dict] = [{"id": "ses_human", "title": "my session"}]
+    saved = _perm_saved()
+    _perm_env(_FakeProject([t]))
+    orig_find = cli.agent_mod.find
+    orig_perms = cli.harness.permissions
+    orig_sessions = cli.harness.sessions
+    cli.agent_mod.find = lambda port, base: None  # no `orch:agent` here
+    cli.harness.permissions = lambda port, directory: (
+        [] if directory == "/tmp/wt" else perm_response)
+    cli.harness.sessions = lambda port, directory: (
+        [] if directory == "/tmp/wt" else session_response)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_permissions(_pargs(json=True))
+        out = buf.getvalue()
+        assert rc == 0, (rc, out)
+        items = json.loads(out)
+        mine = [i for i in items if i["request_id"] == "per_x"]
+        assert mine, out
+        assert mine[0]["owner"] == "my session", items
+        assert mine[0]["detail"] == ".config/opencode/opencode.json", mine
+    finally:
+        _perm_restore(saved)
+        cli.agent_mod.find = orig_find
+        cli.harness.permissions = orig_perms
+        cli.harness.sessions = orig_sessions
+    print("ok: a non-primary base-worktree session's ask is surfaced by its title")
+
+
 def test_permissions_dir_flag_lists_non_interactively() -> None:
     t = _perm_blocked()
     saved = _perm_saved()

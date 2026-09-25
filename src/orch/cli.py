@@ -554,16 +554,28 @@ def _perm_asks(port: int, proj: state.Project) -> list[_PermAsk]:
                                  request_id=b.request_id, session_id=b.session_id))
     base_wt = proj.base_worktree
     if base_wt is not None:
-        sid = agent_mod.find(port, base_wt)
-        if sid is not None:
-            for p in harness.permissions(port, str(base_wt)):
-                if str(p.get("sessionID") or "") != sid:
-                    continue
-                d = observe._describe_permission(p)
-                asks.append(_PermAsk(owner=f"primary-agent@{proj.base}",
-                                     worktree=str(base_wt), kind=d.kind,
-                                     detail=d.detail, request_id=d.request_id,
-                                     session_id=d.session_id))
+        # Every session bound to the base worktree can be blocked, not just the
+        # titled `orch:agent` conversation: a human's own opencode TUI session
+        # there raises asks too. Label the primary agent as before; label any
+        # other session by its title, so `orch permissions` surfaces it.
+        primary = agent_mod.find(port, base_wt)
+        titles: dict[str, str] = {}
+        for s in harness.sessions(port, str(base_wt)):
+            sid = str(s.get("id") or "")
+            if sid:
+                titles[sid] = str(s.get("title") or "").strip()
+        for p in harness.permissions(port, str(base_wt)):
+            sid = str(p.get("sessionID") or "")
+            if sid == primary:
+                owner = f"primary-agent@{proj.base}"
+            elif sid in titles:
+                owner = titles[sid] or f"session@{proj.base}"
+            else:
+                continue
+            d = observe._describe_permission(p)
+            asks.append(_PermAsk(owner=owner, worktree=str(base_wt),
+                                 kind=d.kind, detail=d.detail,
+                                 request_id=d.request_id, session_id=d.session_id))
     return asks
 
 
