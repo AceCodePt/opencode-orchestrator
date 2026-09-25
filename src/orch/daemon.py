@@ -344,7 +344,7 @@ def decide(snap: Snapshot) -> list[Action]:
             _reset_loop(mem, key)
             continue
 
-        if t.status in (state.MERGE_READY, state.NOOP):
+        if t.status == state.MERGE_READY or (not t.dirty and not t.diff):
             if state._base_merging(Path(t.project), t.base):
                 if key not in mem.merge_held_notified:
                     mem.merge_held_notified.add(key)
@@ -361,13 +361,11 @@ def decide(snap: Snapshot) -> list[Action]:
             mem.merge_held_notified.discard(key)
 
         if snap.now < mem.wait_until.get(key, 0):
-            # A backoff (e.g. from a failed merge) must not freeze a clean,
-            # already-merged task: its branch is an ancestor of base, so there is
-            # nothing left to re-attempt and the no-op sweep is idempotent.
-            if not t.dirty and not t.diff:
-                mem.wait_until.pop(key, None)
-            else:
-                continue
+            # A backoff (e.g. from a failed merge or a held review) must hold the
+            # task until it expires. A clean branch identical to base is no longer
+            # swept automatically, so it must honour the backoff like every other
+            # held case instead of having it spent on each tick.
+            continue
 
         if key not in mem.settled_at:
             mem.settled_at[key] = snap.now
@@ -376,13 +374,28 @@ def decide(snap: Snapshot) -> list[Action]:
             continue
 
         if not t.dirty and not t.diff:
-            actions.append(Action(
-                REMOVE, t.name, "no-op: clean branch identical to base",
-                "nothing was produced, so there is nothing to merge or verify",
-                project=t.project, worktree=t.worktree,
-                branch=t.branch, base=t.base,
-            ))
-            _reset_loop(mem, key)
+            # The branch tip is still base's tip: the agent stopped without
+            # committing anything. That is "not busy", not "done" - a provider
+            # error, a quota stop, or a crash leaves exactly this shape, and a
+            # legitimate empty run is indistinguishable from a dead one. Hold it
+            # for a human rather than removing the worktree, deleting the branch
+            # and archiving the spec, which would destroy the evidence.
+            if snap.now >= mem.wait_until.get(key, 0):
+                actions.append(Action(
+                    NEEDS_REVIEW, t.name,
+                    "held: branch committed nothing since its claim",
+                    "the branch tip is still base's tip; nothing was produced, so "
+                    "there is nothing to merge or verify. The worktree and branch "
+                    "are kept for you to review.",
+                    project=t.project, worktree=t.worktree,
+                    branch=t.branch, base=t.base,
+                ))
+                mem.wait_until[key] = snap.now + REVIEW_BACKOFF_S
+                _reset_loop(mem, key, keep=("wait_until",))
+                # The work has already settled; a held no-op must re-surface the
+                # moment the review backoff expires, not after another settle
+                # budget, so keep the settle timer spent.
+                mem.settled_at[key] = snap.now
             continue
 
         if t.wait_human_merge and not t.dirty and t.diff:

@@ -216,6 +216,32 @@ def test_task_list_local_does_not_flag_unclaimed_tasks() -> None:
     print("ok: unclaimed todo tasks are not mislabelled as needs-you")
 
 
+def test_task_list_local_flags_a_committed_nothing_task() -> None:
+    with tempfile.TemporaryDirectory() as wt:
+        t = state.TaskState(project="/tmp/lab/lab.git", name="task-a", base="main",
+                            claimed=True, branch="task-a", worktree=wt,
+                            session=state.SESSION_IDLE, dirty=False, diff=False)
+        _FakeProject._instance = _FakeProject([t])
+        orig_status = cli.server_mod.status
+        orig_from = cli.state.Project.from_dir
+        cli.state.Project.from_dir = _FakeProject.from_dir
+        cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                         "port": 4096}
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli.cmd_task_list(_args())
+            out = buf.getvalue()
+            assert "needs-review" in out, out
+            assert "NEEDS-YOU" in out, out
+            assert "task archive" in out, out
+        finally:
+            cli.state.Project.from_dir = orig_from
+            cli.server_mod.status = orig_status
+    print("ok: the local `task list` flags a branch that committed nothing as "
+          "needs-review")
+
+
 class _GProject:
     _base_wt: Path | None = None
     _tasks: list = []

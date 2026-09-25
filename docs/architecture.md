@@ -100,14 +100,20 @@ work is `needs-review`, never auto-merged).
 Per claimed task, each cycle:
 
 1. **Interrupted** with work (`dirty` or `diff`) → `needs-review` (`interrupted`), held for
-   the human; an interrupted task with no produced work still closes as a no-op.
+   the human; an interrupted task with no produced work (`dirty` and `diff` both false)
+   falls through to the empty-branch hold below, so it is held too.
 2. **Blocked** on a live permission/question → alert (deduped by request id, in-memory).
 3. **Busy** session, or an orchestrated run process alive → running; nothing. (A run
    client stuck alive past `MAX_ORCHESTRATED_S` is escaped, so it can never stall a
    task forever.)
 4. **Settled** (session idle or gone) past a settle budget (~30s):
    - worktree missing → `needs-review`
-   - clean + no diff → `remove` (no-op)
+   - clean + no diff (the branch tip is still base's tip: nothing was committed since
+     the claim) → `needs-review` (`held: branch committed nothing since its claim`),
+     honouring `REVIEW_BACKOFF_S`. The commit is the only done signal, so "not busy"
+     is never read as "done": the worktree, branch and spec are kept. This covers a
+     turn-1 crash, a quota stop, a provider error and an interrupted turn with no work,
+     which are indistinguishable at the git level.
    - otherwise: the committed verification hook decides, or its absence is the
      implicit unverified state:
      - **hook present, pass** → the hook committed → diff → `merge`; no diff → `remove`
@@ -205,7 +211,8 @@ cached in-memory for ~60s.
 
 Consumes the scan, decides, and is the only component permitted to act. Its actions:
 restart the shared opencode service, inject a verification failure back into a session, merge a verified
-branch, remove a no-op, mark `needs-review`, alert on a blocked permission. It runs
+branch, remove a verified no-op (a diff-less branch only after its hook pass), mark
+`needs-review` — including an empty branch that committed nothing — alert on a blocked permission. It runs
 the verification hook itself — there is no verdict it accepts from anywhere, because there is no
 plugin left to report one.
 
@@ -240,7 +247,7 @@ string cannot do this job.
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify --run` | run the committed verification hook here and say why |
 | `orch attach` | attach the interactive TUI on the shared opencode service — from inside a claimed task worktree to that task's session (create it on first use), otherwise to the project's primary agent (create the `orch:agent` session on first use) |
-| `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a daemon no-op), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
+| `orch permissions` | approve/deny pending permission asks interactively: run inside a project it auto-picks it and shows a task picker (a `primary-agent@<base>` row covers the base worktree's asks), `--global` (or running outside a project) picks a project first. Flags make it non-interactive: `--task <name> allow\|deny [--reason "..."]` answers one task's ask (a deny carries its reason back to the agent so it keeps working rather than the session idling into a held review), `-C <dir>` lists the project's asks, `--json` lists them machine-readably. Questions are out of scope — this is allow/deny only, and every answer is one-time (nothing persisted) |
 
 The CLI is what agents call, via a tool. A task is a branch: `task start` refuses
 when the branch already exists (the claim), and refuses an uncommitted spec or an
@@ -428,9 +435,10 @@ so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
    the base worktree (a **server session** titled `<name>-merge-conflict` via
    `prompt`, not an `opencode run` subprocess) to resolve and commit, bounded
    by the same `retryCap` before it escalates to a human. Once the
-   merge lands either way, the branch is an ancestor of base and the daemon's no-op
-   path archives the task. A conflicted task is never re-verified, re-merged, or torn
-   down. **In-flight detection is a session check, not a `run`-process check**: a
+   merge lands either way, the branch is an ancestor of base, so the daemon can no
+   longer tell the resolved conflict from an empty run: it holds the task as
+   `needs-review` for a human to archive. A conflicted task is never re-verified,
+   re-merged, or torn down. **In-flight detection is a session check, not a `run`-process check**: a
    live session titled `<name>-merge-conflict` in the base worktree means a resolver
    is already working, so the daemon must not spawn another (the old
    `resolution_pid` run-process lookup was blind to the resolver's session and

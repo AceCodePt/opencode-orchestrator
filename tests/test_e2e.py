@@ -230,6 +230,51 @@ def test_an_interrupted_turn_is_held_for_review_not_merged() -> None:
     print("ok: an interrupted turn is held for review, never merged")
 
 
+def test_a_claim_that_committed_nothing_is_held_not_archived() -> None:
+    if not _have_opencode():
+        print("skip: opencode not on PATH (no live server)")
+        return
+    tmp = tempfile.TemporaryDirectory()
+    saved = {k: os.environ.get(k) for k in ("XDG_STATE_HOME",)}
+    os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+    try:
+        t = Path(tmp.name)
+        root = _project(t)
+        _install_hook(root, PASSING_HOOK)
+        _top, common, _err = dispatch.project_of(root)
+        assert common is not None, _err
+        state.trust_project(common)
+        # The dispatcher's act with no agent commit: the shape a turn-1 crash, a
+        # quota stop or a provider error leaves behind. The branch tip is base's
+        # tip, so the task produced nothing and must not be harvested as an empty
+        # run.
+        wt = root.parent / "done-commit"
+        _git("-C", str(root), "worktree", "add", "-b", "done-commit", str(wt),
+             "main")
+        assert not state._dirty(wt) and not state._diff(common, "main",
+                                                        "done-commit")
+
+        server.start()  # the shared service (discovered/started, never stopped)
+        joined = "\n".join(_run_step(root, "done-commit"))
+
+        assert "needs-review" in joined, joined
+        assert "committed nothing" in joined, joined
+        assert "merged" not in joined, joined
+        # the worktree, branch and spec survive; nothing was archived
+        assert wt.exists(), "the worktree must survive"
+        assert (root / "tasks" / "done-commit" / "task.md").exists()
+        assert _git("-C", str(root), "show-ref", "--verify", "-q",
+                    "refs/heads/done-commit").returncode == 0, \
+            "the branch must survive"
+        archived = _git("-C", str(root), "ls-tree", "-r", "--name-only",
+                        "main", "--", "archive").stdout
+        assert "archive/done-commit/task.md" not in archived, archived
+    finally:
+        _restore(saved)
+        tmp.cleanup()
+    print("ok: a claim that committed nothing is held for review, never archived")
+
+
 def test_an_agent_commit_is_the_done_signal_and_the_loop_merges_it() -> None:
     if not _have_opencode():
         print("skip: opencode not on PATH (no live server)")
