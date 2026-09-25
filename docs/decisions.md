@@ -118,7 +118,8 @@ in one source file has one place to check.
   daemon replies `reject` to clear it). An interrupted task with work (`dirty` or
   `diff`) is held as `needs-review` (`interrupted`) — the human stopped the turn
   and must verify it, so it is never auto-merged or auto-committed; an
-  interrupted task with no produced work still closes as a no-op. Only live asks
+  interrupted task with no produced work has a branch tip still at base's tip, so
+  the empty-branch hold below catches it too. Only live asks
   (owning message not aborted) keep the `blocked` alert flow.
 - **The scheduler is opt-in per project.** `scheduler.enabled` in
   `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
@@ -283,15 +284,16 @@ in one source file has one place to check.
   a human-started task in the base worktree; a machine-started task gets an agent
   dispatched into the
   base worktree to resolve and commit, bounded by `retryCap` before it escalates to a
-  human. Either way, once the merge lands the branch is merged into base and the
-  no-op path archives the task. The failed-merge backoff only delays *re-attempts*,
-  never the sweep: a clean branch identical to base is already merged, so the
-  no-op archive is not held hostage by the stale `wait_until`. The resolution agent
+  human. Either way, once the merge lands the branch is merged into base, so the
+  branch tip is base's tip and the daemon can no longer tell the resolved conflict
+  from an empty run: it holds the task as `needs-review` for a human to archive. The
+  failed-merge backoff is honoured like every other held case, so the hold is not
+  re-emitted on every tick. The resolution agent
   is detected by base-worktree path **and** task title, because the base worktree is
   shared with every task. `task merge`
   still re-runs a merge after a human has aborted or fixed one.
 - **`remove_task` and `reset_task` force-delete the branch** — they are explicit
-  removal acts (a no-op task produced nothing; a human decided to discard). Only
+  removal acts (a verified diff-less task, or a human decided to discard). Only
   `merge_and_cleanup` uses `-d`, preserving "a `-d` refusal means real unmerged work".
 
 ## `tasks.py`
@@ -408,7 +410,7 @@ in one source file has one place to check.
   daemon's alert lines, so a human never decides on a glob.
 - **A deny explains itself and keeps the agent working.** Rejecting a tool call ends
   the agent's turn; without a reason the model stops, the session idles, and the
-  daemon sweeps the clean, unchanged task as a no-op. So a deny sends its reason both
+  daemon holds the clean, unchanged task as `needs-review`. So a deny sends its reason both
   in the reply's `message` field (the rejected tool result tells the agent why) and
   as a `prompt` nudge to adjust and continue. A denial becomes a conversation —
   the agent responds, tries a different approach, and may raise a fresh ask for the

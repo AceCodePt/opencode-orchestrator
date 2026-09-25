@@ -257,7 +257,9 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None) -> tuple[str | None
             "verified, awaiting your merge"
     if t.diff:
         return "looks-done", None, "unmerged (awaiting verify/merge)"
-    return None, None, ""
+    return "needs-you", f"orch task archive -C {_q(base_wt)} {t.name}", \
+        "the branch committed nothing since its claim; review the spec, then " \
+        "archive it to discard"
 
 
 def _task_list_global(args: argparse.Namespace) -> int:

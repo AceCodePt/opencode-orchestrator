@@ -25,9 +25,9 @@ task.md committed (base)  →  branch exists (claimed)  →  agent dispatched
      →  daemon runs the session-idle verification hook
           → pass: the hook commits any stragglers  →  merge + archive + teardown
           → fail:  daemon injects the failure back, bounded by retryCap
-          → no-op: clean branch identical to base  →  removed + archived
-     →  needs-review: dirty work, retries exhausted, a missing worktree, or a turn the
-        user interrupted in the TUI (interrupted work is held, never auto-merged)
+          → empty: branch committed nothing since its claim  →  held for review
+     →  needs-review: dirty work, an empty branch, retries exhausted, a missing
+        worktree, or a turn the user interrupted in the TUI (held, never auto-merged)
 ```
 
 **Done is a git state, and git is the only state.** The working agent declares the task
@@ -65,8 +65,10 @@ Walking one task through the whole loop, from a raw idea to archived work:
 4. **Settle.** Once the session is idle past the settle budget, the daemon derives the
    outcome from the worktree — it does not ask the agent. An interrupted turn with work,
    a missing worktree, or a dirty tree that keeps failing verification lands on
-   `needs-review` for you. A clean branch with no diff is a no-op: the worktree and
-   branch are removed and the spec archived. Everything else is handed to the
+   `needs-review` for you. So does a claimed branch whose tip is still base's tip: it
+   committed nothing since its claim — the shape a turn-1 crash, a quota stop or a
+   provider error leaves — so the worktree and branch are kept and the spec stays in
+   `tasks/`, never harvested as an empty run. Everything else is handed to the
    committed `session-idle` verification hook.
 5. **Verify and merge.** The daemon runs the verification hook committed on the base
    branch (never the agent's working-tree copy). On a pass the hook also idempotently
@@ -83,8 +85,9 @@ Walking one task through the whole loop, from a raw idea to archived work:
    agent dispatched into the base worktree — a server session titled
    `<name>-merge-conflict` — to resolve and commit on its own, up to `retryCap` tries
    before it escalates to you. The daemon detects an in-flight resolver by that session,
-   so it never spawns duplicates. Either way, once the merge lands, the no-op path
-   archives the task.
+   so it never spawns duplicates. Either way, once the merge lands the branch tip is
+   base's tip, so the daemon can no longer tell the resolved conflict from an empty
+   run: it holds the task for you to review and archive (`orch task archive`).
 7. **Archive.** `tasks/<name>/task.md` is `git mv`'d to `archive/<name>/task.md` (a
    reused slug whose earlier generation still occupies that path is archived to
    `archive/<name>/<utc-ts>/task.md` instead) and
@@ -243,7 +246,7 @@ the walk. **A denial asks you for a reason and sends it back to the agent** alon
 with a nudge to adjust and continue — so a denied request becomes a
 conversation (the agent responds, tries a different approach, and can hit a new
 ask for you to decide again) instead of the session going idle and the task
-being swept up as a no-op by the daemon. An empty reason falls back to a generic
+being held as needs-review by the daemon. An empty reason falls back to a generic
 denial. After the last ask it rescans and reports what is still pending — exit 1
 if anything is, 0 if all were answered. `--global` (or running outside a project)
 lists every supervised project with its pending count first (`*` marks the one
@@ -431,9 +434,9 @@ nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
 | Event | Fired when |
 | --- | --- |
 | `alert` | a task is blocked on a permission/question, or a project is untrusted |
-| `needs-review` | a task needs a human (dirty work, retries exhausted, conflict, missing worktree) |
+| `needs-review` | a task needs a human (dirty work, an empty branch, retries exhausted, conflict, missing worktree) |
 | `merged` | verified work merged into base (daemon verification pass or `orch task merge`) |
-| `removed` | a no-op branch cleaned up |
+| `removed` | a diff-less branch cleaned up after a pass, or by `orch task archive` |
 | `dispatched` | a task agent dispatched (`orch task start` or the scheduler) |
 | `dispatch-failed` | a dispatch failed |
 | `resolve-failed` | automatic conflict resolution failed |
@@ -493,7 +496,7 @@ Working and exercised against live agents: `init`, `verify`, `doctor`, `server`,
 `answer`/`reset`/`archive`/`merge`,
 and the daemon — including the full loop of settle → verify → commit-on-pass → merge →
 archive, the failure loop of verify-fail → inject → bounded retry → `needs-review`, the
-no-op path of clean-identical → remove + archive, and the **scheduler** (auto-dispatch
+hold path of an empty branch (committed nothing) → `needs-review`, and the **scheduler** (auto-dispatch
 of `todo` tasks, opt-in per project and trust-bound). Task intake via the machine's
 `create_task`/`update_task`/`archive_task`/`delete_task` custom tools is exercised
 against live agents (an agent calling the tools writes, amends, moves, and removes

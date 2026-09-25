@@ -238,15 +238,16 @@ def test_settled_clean_diff_task_is_verified() -> None:
     print("ok: a settled clean+diff task is verified")
 
 
-def test_settled_clean_noop_is_removed_without_a_verification_hook() -> None:
+def test_settled_clean_noop_is_held_for_review() -> None:
     mem = daemon.LoopState()
     t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
     snap = _snap(tasks=[t], mem=mem)
     daemon.decide(snap)
     acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
                                tasks=[t], mem=mem))
-    assert _kinds(acts) == [daemon.REMOVE]
-    print("ok: a clean no-diff task is removed without running a verification hook")
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert daemon.REMOVE not in _kinds(acts)
+    print("ok: a clean no-diff task is held for review, not removed")
 
 
 def test_missing_worktree_needs_review() -> None:
@@ -297,15 +298,65 @@ def test_interrupted_with_work_is_held_for_review() -> None:
     print("ok: an interrupted task with work is held for review, never merged")
 
 
-def test_interrupted_noop_is_still_removed() -> None:
+def test_interrupted_noop_is_held_for_review() -> None:
     mem = daemon.LoopState()
     key = ("/tmp/lab/lab.git", "task-a")
     mem.settled_at[key] = NOW - daemon.SETTLE_BUDGET_S - 1
     t = _task(session=state.SESSION_IDLE, interrupted=True,
               dirty=False, diff=False)
     acts = daemon.decide(_snap(tasks=[t], mem=mem))
-    assert _kinds(acts) == [daemon.REMOVE], _kinds(acts)
-    print("ok: an interrupt with no produced work still closes as a no-op")
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert daemon.REMOVE not in _kinds(acts)
+    print("ok: an interrupt with no produced work is held for review, not removed")
+
+
+def test_claimed_no_commit_task_is_held_and_never_removed() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert daemon.REMOVE not in _kinds(acts), _kinds(acts)
+    print("ok: a claimed task whose branch committed nothing is held, not removed")
+
+
+def test_held_no_commit_task_honours_the_review_backoff() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    base = NOW + daemon.SETTLE_BUDGET_S + 1
+    first = daemon.decide(_snap(now=base, tasks=[t], mem=mem))
+    assert _kinds(first) == [daemon.NEEDS_REVIEW], _kinds(first)
+    for tick in range(1, daemon.REVIEW_BACKOFF_S):
+        acts = daemon.decide(_snap(now=base + tick, tasks=[t], mem=mem))
+        assert acts == [], acts
+    later = daemon.decide(_snap(now=base + daemon.REVIEW_BACKOFF_S + 1,
+                                tasks=[t], mem=mem))
+    assert _kinds(later) == [daemon.NEEDS_REVIEW], _kinds(later)
+    print("ok: a held no-commit task is reported once per review backoff")
+
+
+def test_claimed_clean_diff_task_still_verifies() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=False, diff=True)
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    assert daemon.NEEDS_REVIEW not in _kinds(acts), _kinds(acts)
+    print("ok: a committed, diffing task still goes to verification")
+
+
+def test_claimed_dirty_task_still_verifies_not_held() -> None:
+    mem = daemon.LoopState()
+    t = _task(session=state.SESSION_IDLE, dirty=True, diff=False)
+    daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
+                               tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.VERIFY], _kinds(acts)
+    assert daemon.NEEDS_REVIEW not in _kinds(acts), _kinds(acts)
+    print("ok: a dirty task's existing path is untouched (still verified)")
 
 
 def test_orphaned_asks_emit_a_clear_action() -> None:
@@ -363,16 +414,20 @@ def test_wait_backoff_blocks_repeated_actions() -> None:
     print("ok: a task in backoff is left alone")
 
 
-def test_backoff_does_not_freeze_an_already_merged_noop() -> None:
+def test_backoff_holds_a_clean_noop_for_review() -> None:
+    # A clean branch identical to base is no longer swept automatically, so a
+    # stale backoff must hold it (not be spent every tick) and the task must
+    # still reach review once the backoff expires.
     mem = daemon.LoopState()
     key = ("/tmp/lab/lab.git", "task-a")
     mem.wait_until[key] = NOW + 9999
     mem.settled_at[key] = NOW - daemon.SETTLE_BUDGET_S - 1
     t = _task(session=state.SESSION_IDLE, dirty=False, diff=False)
     acts = daemon.decide(_snap(tasks=[t], mem=mem))
-    assert _kinds(acts) == [daemon.REMOVE], _kinds(acts)
-    assert key not in mem.wait_until, "the stale merge backoff must be spent"
-    print("ok: a merge backoff does not freeze a clean, already-merged task")
+    assert acts == [], acts
+    later = daemon.decide(_snap(now=NOW + 10000, tasks=[t], mem=mem))
+    assert _kinds(later) == [daemon.NEEDS_REVIEW], _kinds(later)
+    print("ok: a backoff holds a clean no-op until it expires, then it is reviewed")
 
 
 def test_unchanged_worktree_after_failure_stalls_to_review() -> None:
@@ -1086,7 +1141,7 @@ def test_a_resolver_session_for_a_different_task_does_not_block_this_one() -> No
     print("ok: a resolver for another task never blocks this task's resolve")
 
 
-def test_auto_resolved_conflict_archives_as_a_noop() -> None:
+def test_auto_resolved_conflict_is_held_for_review() -> None:
     root, wt, tmp = _conflicted_repo()
     proj = state.Project.from_dir(root)
     assert proj is not None
@@ -1097,15 +1152,18 @@ def test_auto_resolved_conflict_archives_as_a_noop() -> None:
     assert state._base_merging(root, "main") is None, "the merge must be complete"
     t = next(x for x in proj.scan() if x.name == "task-a")
     assert not t.conflicted, "the scan must no longer report the conflict"
-    assert t.status == state.NOOP, t.status
+    assert t.status == state.NEEDS_REVIEW, t.status
     mem = daemon.LoopState()
     daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
     acts = daemon.decide(_snap(now=NOW + daemon.SETTLE_BUDGET_S + 1,
                                tasks=[t], mem=mem))
-    assert daemon.REMOVE in _kinds(acts), _kinds(acts)
+    # the branch tip is now base's tip, so the daemon can no longer tell the
+    # resolved merge from an empty run: hold it for a human instead of archiving.
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert daemon.REMOVE not in _kinds(acts)
     assert daemon.RESOLVE not in _kinds(acts)
     tmp.cleanup()
-    print("ok: a resolved conflict falls through to the no-op archive path")
+    print("ok: a resolved conflict is held for review, not silently archived")
 
 
 def test_clean_task_is_held_while_the_base_is_mid_merge() -> None:
@@ -1221,6 +1279,61 @@ def test_stale_target_returns_the_installed_bin_when_running_a_checkout() -> Non
                 os.environ[k] = v
         tmp.cleanup()
     print("ok: a checkout-running daemon re-execs onto the canonical install")
+
+
+def _empty_claim_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
+    """A task declared on base and claimed by a branch/worktree that committed
+    nothing since its claim: the shape a turn-1 crash or quota stop leaves."""
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name) / "wt"
+    root.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"],
+                   check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"],
+                   check=True)
+    (root / ".orchestration").mkdir(parents=True)
+    (root / ".orchestration" / "config.json").write_text('{"baseBranch": "main"}\n')
+    d = root / "tasks" / "task-a"
+    d.mkdir(parents=True)
+    (d / "task.md").write_text("# Task A\n\nDo it.\n")
+    (root / "seed").write_text("x")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"],
+                   check=True)
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    return root, wt, tmp
+
+
+def test_a_claimed_task_that_committed_nothing_is_held_intact() -> None:
+    root, wt, tmp = _empty_claim_repo()
+    proj = state.Project.from_dir(root)
+    assert proj is not None
+    t = next(x for x in proj.scan() if x.name == "task-a")
+    assert t.claimed and not t.dirty and not t.diff
+    mem = daemon.LoopState()
+    mem.settled_at[(t.project, t.name)] = NOW - daemon.SETTLE_BUDGET_S - 1
+    acts = daemon.decide(_snap(now=NOW, tasks=[t], mem=mem))
+    assert _kinds(acts) == [daemon.NEEDS_REVIEW], _kinds(acts)
+    assert daemon.REMOVE not in _kinds(acts)
+
+    sup = daemon.Supervisor(dry_run=False)
+    sup.mem = mem
+    log = "\n".join(sup.apply(acts))
+    assert "needs-review" in log, log
+
+    assert wt.exists(), "the worktree must survive"
+    assert (root / "tasks" / "task-a" / "task.md").exists(), \
+        "the spec must stay in tasks/, not move to archive/"
+    assert not (root / "archive" / "task-a" / "task.md").exists()
+    p = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "-q",
+                        "refs/heads/task-a"], capture_output=True)
+    assert p.returncode == 0, "the task branch must survive"
+    tmp.cleanup()
+    print("ok: a claimed task that committed nothing is held with its branch, "
+          "worktree and spec intact")
 
 
 def main() -> int:

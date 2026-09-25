@@ -174,32 +174,34 @@ def test_scan_reports_dirty_and_diff() -> None:
     print("ok: dirty and diff derive from the worktree")
 
 
-def test_scan_clean_no_diff_is_a_noop() -> None:
+def test_scan_clean_no_diff_needs_review() -> None:
     root, tmp = _repo()
     _task(root, "a-task")
     _claim(root, "a-task")
     proj = _proj(root)
     t = next(x for x in proj.scan() if x.name == "a-task")
     assert not t.dirty and not t.diff
-    assert t.status == state.NOOP
+    # the branch tip is still base's tip: an agent that stopped without
+    # committing anything is held for a human, never harvested as an empty run.
+    assert t.status == state.NEEDS_REVIEW
     tmp.cleanup()
-    print("ok: a clean branch identical to base is a no-op")
+    print("ok: a clean branch identical to base needs review")
 
 
-def test_interrupted_status_depends_on_the_work() -> None:
+def test_interrupted_status_is_held_for_review_either_way() -> None:
     wt = tempfile.mkdtemp(prefix="orch-status-")
     try:
         held = state.TaskState(project="/p", name="x", base="main", claimed=True,
                                branch="x", worktree=wt, session=state.SESSION_IDLE,
                                interrupted=True, dirty=False, diff=True)
         assert held.status == state.NEEDS_REVIEW
-        noop = state.TaskState(project="/p", name="x", base="main", claimed=True,
-                               branch="x", worktree=wt, session=state.SESSION_IDLE,
-                               interrupted=True, dirty=False, diff=False)
-        assert noop.status == state.NOOP
+        empty = state.TaskState(project="/p", name="x", base="main", claimed=True,
+                                branch="x", worktree=wt, session=state.SESSION_IDLE,
+                                interrupted=True, dirty=False, diff=False)
+        assert empty.status == state.NEEDS_REVIEW
     finally:
         os.rmdir(wt)
-    print("ok: interrupted work is held for review, an interrupted no-op still closes")
+    print("ok: an interrupted task with work and an empty one are both held for review")
 
 
 def test_scan_marks_a_missing_worktree() -> None:

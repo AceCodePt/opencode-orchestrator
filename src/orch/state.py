@@ -20,7 +20,6 @@ TODO = "todo"
 RUNNING = "running"
 NEEDS_REVIEW = "needs-review"
 MERGE_READY = "ready"
-NOOP = "noop"
 ARCHIVED = "archived"
 
 MAX_DEPTH = 6
@@ -645,7 +644,10 @@ class TaskState:
         if self.dirty:
             return NEEDS_REVIEW
         if not self.diff:
-            return NOOP
+            # The branch tip is still the base tip: the agent stopped without
+            # committing anything. "Not busy" is not "done", so this is held for
+            # a human rather than harvested as an empty no-op.
+            return NEEDS_REVIEW
         return MERGE_READY
 
 
