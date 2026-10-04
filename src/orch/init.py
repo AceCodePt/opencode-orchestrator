@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 from dataclasses import dataclass
@@ -23,13 +24,30 @@ TEMPLATE_CONFIG = {
     },
     "scheduler": {
         "$comment": (
-            "Let the daemon auto-dispatch todo tasks itself (wait_human_start: false tasks only). "
-            "maxConcurrent caps how many task agents run in this project at "
-            "once. Edit with `orch project scheduler <n>`; only the committed "
-            "copy on the base branch applies."
+            "Auto-dispatch of todo tasks (wait_human_start: false only): the "
+            "daemon fills free maxConcurrent slots with the next unclaimed task. "
+            "opencode-orchestrator turns this on by default for `orch init` and "
+            "`orch project create`; a cloned project starts with it off. Edit "
+            "with `orch project scheduler <n>`; only the committed copy on the "
+            "base branch applies."
         ),
+        "enabled": True,
+        "maxConcurrent": 1,
     },
 }
+
+
+def scaffold_config(scheduler_enabled: bool = True) -> dict:
+    """The `.orchestration/config.json` a scaffold writes. `orch init` and
+    `orch project create` leave the scheduler on; `orch project clone` passes
+    False so a cloned project starts opted out."""
+    cfg = copy.deepcopy(TEMPLATE_CONFIG)
+    if not scheduler_enabled:
+        sched = cfg["scheduler"]
+        sched["enabled"] = False
+        sched.pop("maxConcurrent", None)
+    return cfg
+
 
 TEMPLATE_GITIGNORE = """# Inert template files and runtime state, not project intent.
 # Real hooks (a copy of a machine-level template committed as .orchestration/hooks/<name>)
@@ -81,9 +99,12 @@ branch** — a working-tree edit, or a hook committed only on a task branch, nev
 runs. Edit a hook and commit it on the base branch before dispatching.
 
 `config.json` holds project policy: `baseBranch`, the `verify` block
-(`retryCap`), and — if you want the daemon
-to dispatch `todo` tasks itself — a `scheduler` block (`enabled` + `maxConcurrent`,
-the per-project cap). Like the verification hook, the **committed copy on the base branch** is the
+(`retryCap`), and a `scheduler` block (`enabled` + `maxConcurrent`,
+the per-project cap). Auto-dispatch is **on by default** for projects made by
+`orch init` and `orch project create` in opencode-orchestrator, and **off** for a
+cloned project: when on, the daemon fills free `maxConcurrent` slots with the next
+unclaimed `todo` task (a `wait_human_start: true` task is left for a human). Like the
+verification hook, the **committed copy on the base branch** is the
 authority: `orch project scheduler <n>` writes the working-tree copy for you to
 review and commit. A machine-wide cap across all projects lives outside the repo in
 `~/.config/orch/daemon.json` (`orch daemon budget`).
@@ -141,13 +162,15 @@ def resolve_target(start: Path) -> tuple[Path | None, list[str]]:
     return Path(top), notes
 
 
-def scaffold(target: Path, version: str = "0", force: bool = False
+def scaffold(target: Path, version: str = "0", force: bool = False,
+             scheduler_enabled: bool = True
              ) -> tuple[list[str], list[str]]:
     """Write the .orchestration scaffolding (config, README, .gitignore, version)
     into `target`, and install the machine-level hook templates. Returns
     (created, skipped) relative paths. Does no repo resolution and no trust -
     the caller decides what to do with the files (e.g. `project create` commits
-    them straight into a bare store)."""
+    them straight into a bare store). `scheduler_enabled` defaults on for
+    `orch init`/`project create`; `project clone` passes False."""
     created: list[str] = []
     skipped: list[str] = []
 
@@ -168,7 +191,8 @@ def scaffold(target: Path, version: str = "0", force: bool = False
         created.append(rel)
 
     write(orch / "README.md", TEMPLATE_README)
-    write(orch / "config.json", json.dumps(TEMPLATE_CONFIG, indent=2) + "\n")
+    write(orch / "config.json",
+          json.dumps(scaffold_config(scheduler_enabled), indent=2) + "\n")
     write(orch / ".gitignore", TEMPLATE_GITIGNORE)
     write(orch / ".version", version + "\n")
 
@@ -187,14 +211,15 @@ def scaffold(target: Path, version: str = "0", force: bool = False
     return created, skipped
 
 
-def run(start: Path, force: bool = False, version: str = "0") -> InitResult:
+def run(start: Path, force: bool = False, version: str = "0",
+        scheduler_enabled: bool = True) -> InitResult:
     target, notes = resolve_target(start)
     if target is None:
         return InitResult([], [], notes)
 
     from . import hooks
     from . import opencode_events
-    created, skipped = scaffold(target, version, force)
+    created, skipped = scaffold(target, version, force, scheduler_enabled)
 
     project_hooks = "\n".join(
         f"    - {name} - {when}" for name, when in TASK_HOOKS.items()

@@ -53,8 +53,9 @@ in one source file has one place to check.
   is **not removed** — it stays in place as an ordinary checkout, which is a deliberate
   choice: repointing changes only which branch is *base*, never the branch's existence.
   It is a single per-project base repoint, not multi-environment support.
-- **Archived tasks still scan.** The spec moves to `archive/`, so `task list` shows
-  them as archived rather than silently forgetting the project's history.
+- **Archived tasks still scan.** The spec moves to `archive/`, so `task list
+  --status all` shows them as archived rather than silently forgetting the
+  project's history.
 - **The scan never writes** — it is the sensing half, safe to run when the daemon is
   broken.
 
@@ -121,11 +122,14 @@ in one source file has one place to check.
   interrupted task with no produced work has a branch tip still at base's tip, so
   the empty-branch hold below catches it too. Only live asks
   (owning message not aborted) keep the `blocked` alert flow.
-- **The scheduler is opt-in per project.** `scheduler.enabled` in
-  `.orchestration/config.json`; the daemon fills free `maxConcurrent` slots with the
-  next unclaimed declared task. It is opt-in because auto-spawning agents is
-  surprising, and it never dispatches a task whose front matter says
-  `wait_human_start: true`. The
+- **The scheduler is on by default for new projects made by `init`/`create`.** `orch
+  init` and `orch project create` write `scheduler.enabled: true` (with
+  `maxConcurrent: 1`) into `.orchestration/config.json`, so those projects start
+  auto-dispatching; the daemon fills free `maxConcurrent` slots with the next unclaimed
+  declared task. `orch project clone` scaffolds with it **off** (a cloned repo is not
+  ours to auto-start), and any project opts out with `orch project scheduler off`. The
+  scheduler never dispatches a task whose front matter says `wait_human_start: true`.
+  The
   policy is read from the **committed copy on the base branch** — the same authority
   rule as the verification hook — so an uncommitted edit (`orch project scheduler <n>` writes the
   working-tree copy for review) never takes effect silently, and the policy is never
@@ -144,11 +148,11 @@ in one source file has one place to check.
   committed copy on base — the same authority rule as the verification hook — so
   neither an agent nor an uncommitted edit can grant or revoke them.
 - **The phone notify is the consumer's job, not orch's.** The daemon's `alert`
-  action only logs that a human is needed (deduped by request id); `orch task list`
-  renders blocked sessions and `needs-review` from the scan. orch has zero phone
-  knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch by polling
-  `orch task list --json` or tailing the journal — the coupling points the right
-  way, so adding a notifier costs orch nothing.
+  action only logs that a human is needed (deduped by request id); `orch task list
+  --status all` renders blocked sessions and `needs-review` from the scan. orch has
+  zero phone knowledge. The add-on (`~/stuff/phone-approval`) integrates with orch
+  by polling `orch task list --status all --json` or tailing the journal — the
+  coupling points the right way, so adding a notifier costs orch nothing.
 - **The scheduler conditions dispatch on `dependencies:` front matter.** A declared `todo` task
   dispatches only when every dependency slug is **archived** — or was never declared,
   because a slug that never existed cannot block. An open declared task with the same

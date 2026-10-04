@@ -433,7 +433,8 @@ def clone(
                         "code. `orch project trust` (or `orch project clone "
                         "--trust`) opts it in.")
     else:
-        created, _skipped = init_mod.scaffold(target, version)
+        created, _skipped = init_mod.scaffold(target, version,
+                                              scheduler_enabled=False)
         for c in created:
             result.step(f"created {c}")
         if base != DEFAULT_BASE:

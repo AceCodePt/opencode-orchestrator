@@ -142,11 +142,11 @@ def _fake_run(calls: list) -> None:
 
 
 def _fake_init(calls: list) -> None:
-    def run(_start, force=False, version="0"):
+    def run(_start, force=False, version="0", scheduler_enabled=True):
         calls.append(("init", str(_start)))
         return project.init_mod.InitResult(["config.json"], [], [])
 
-    def scaffold(_target, version="0", force=False):
+    def scaffold(_target, version="0", force=False, scheduler_enabled=True):
         calls.append(("scaffold", str(_target)))
         return (["config.json"], [])
     project.init_mod.run = run
@@ -459,6 +459,10 @@ def test_create_produces_a_bare_store_and_base_worktree() -> None:
                     "discovery must map the bare store to the base worktree"
                 assert state.is_trusted(store), \
                     "the bare store must be trusted"
+                cfg = json.loads(
+                    (target / ".orchestration" / "config.json").read_text())
+                assert cfg["scheduler"]["enabled"] is True, \
+                    "project create scaffolds the scheduler on"
             finally:
                 if old is None:
                     _os.environ.pop("XDG_STATE_HOME", None)
@@ -891,6 +895,10 @@ def test_clone_produces_a_bare_store_and_base_worktree() -> None:
                 "the initialized clone holds the session-idle .example reference"
             assert (hooks_dir / "pre-task-create.example").is_file(), \
                 "the initialized clone holds the task-lifecycle .example references"
+            cfg = json.loads(
+                (target / ".orchestration" / "config.json").read_text())
+            assert cfg["scheduler"]["enabled"] is False, \
+                "a cloned project starts with the scheduler off"
             event_examples = list(hooks_dir.glob("*.example"))
             assert len(event_examples) > 90, \
                 "the initialized clone holds the ~90 event .example references"

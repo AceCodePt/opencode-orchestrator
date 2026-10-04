@@ -522,6 +522,24 @@ def test_write_scheduler_policy_preserves_keys_on_base() -> None:
     print("ok: write_scheduler_policy edits only the scheduler block on base")
 
 
+def test_scaffold_config_scheduler_defaults() -> None:
+    from orch import init
+    on = init.scaffold_config(True)
+    off = init.scaffold_config(False)
+    pol_on = state.scheduler_from_config(on)
+    pol_off = state.scheduler_from_config(off)
+    assert pol_on.enabled and pol_on.max_concurrent == 1, \
+        "init/create scaffold the scheduler on"
+    assert not pol_off.enabled, "a clone scaffolds the scheduler off"
+    assert "opencode-orchestrator" in on["scheduler"]["$comment"], \
+        "the config comment names the repo that sets this default"
+    assert on["scheduler"] == init.TEMPLATE_CONFIG["scheduler"], \
+        "the on config is the template unchanged"
+    assert init.TEMPLATE_CONFIG["scheduler"]["enabled"] is True, \
+        "building the off config must not mutate the template"
+    print("ok: init/create scaffold the scheduler on, clone off")
+
+
 def test_retry_cap_comes_from_the_committed_config() -> None:
     root, tmp = _repo()
     cfg = root / ".orchestration" / "config.json"

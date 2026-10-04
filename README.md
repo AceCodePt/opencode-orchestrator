@@ -125,7 +125,8 @@ orch server start|status|stop|restart
 orch task add <name...>      # scaffold tasks/<name>/task.md (no TASKS.md) and trust the project
 orch task start <name>       # claim (branch+worktree), run hooks, dispatch
 orch task start <name> --dry-run
-orch task list               # render the backlog + status from the scan
+orch task list               # newest 10 todo/running tasks from the scan
+orch task list --status all --limit 0   # the whole scan, incl. needs-review/ready/archived
 orch task list --global      # every project: what is waiting on you (blocked, stuck, unmerged)
 orch task answer <name> allow|deny  # answer a blocked permission (or a question's text)
 orch task reset <name>       # delete branch+worktree -> back to todo (a human act)
@@ -388,9 +389,11 @@ committing its work to the branch; completion is then derived from the git state
 daemon — the committed branch is verified and merged, nothing is stored anywhere else.
 Watch `orch task list`.
 
-**The daemon can dispatch `todo` tasks itself (opt-in).** Add a `scheduler` block to
-`.orchestration/config.json` and the daemon fills free slots with the next unclaimed
-declared task whose `dependencies:` are satisfied, in name order:
+**The daemon dispatches `todo` tasks itself (on by default).** `orch init` and
+`orch project create` scaffold `.orchestration/config.json` with it enabled; a cloned
+project starts with it off. The daemon fills free slots with the next unclaimed declared
+task whose `dependencies:` are satisfied, in name order; opt out with
+`orch project scheduler off`:
 
 ```json
 "scheduler": { "enabled": true, "maxConcurrent": 1 }
@@ -497,7 +500,7 @@ Working and exercised against live agents: `init`, `verify`, `doctor`, `server`,
 and the daemon — including the full loop of settle → verify → commit-on-pass → merge →
 archive, the failure loop of verify-fail → inject → bounded retry → `needs-review`, the
 hold path of an empty branch (committed nothing) → `needs-review`, and the **scheduler** (auto-dispatch
-of `todo` tasks, opt-in per project and trust-bound). Task intake via the machine's
+of `todo` tasks, on by default for `init`/`create` and off for clones, trust-bound). Task intake via the machine's
 `create_task`/`update_task`/`archive_task`/`delete_task` custom tools is exercised
 against live agents (an agent calling the tools writes, amends, moves, and removes
 `tasks/` specs through them). A slow agent that spends minutes

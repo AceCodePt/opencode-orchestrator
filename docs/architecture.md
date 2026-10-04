@@ -238,7 +238,7 @@ string cannot do this job.
 | `orch task add <name…>` | scaffold `tasks/<name>/task.md` (no TASKS.md is written or generated). The project is trusted for the daemon as it scaffolds |
 | `create_task`/`update_task`/`archive_task`/`delete_task` | machine-global opencode custom tools (installed by orch into `~/.config/opencode/plugins/`) — intake is a conversation, not a command: any opencode session can create/amend/move/remove `tasks/` specs from params. None ever commits or trusts |
 | `orch task start <name…>` | claim (create branch+worktree), run hooks, dispatch |
-| `orch task list` | render the scan for this project; `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take |
+| `orch task list` | render the scan for this project, newest first: `--limit` caps the rows (default 10, `0` = no cap) and `--status` picks the statuses to keep (default `todo,running`; `needs-review`, `ready`, `archived`, or `all` to widen). `--global` scans every supervised project and reports what is waiting on you (blocked, stuck, and unmerged work) with the exact action to take; `--limit`/`--status` apply to the project listing only |
 | `orch task answer <name> allow|deny` | reply to a blocked permission (or a question's text). An answer is one-time — nothing is persisted |
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
@@ -363,10 +363,11 @@ gates are the wait flags, not the commit.
 
 ## Flow A′ — the scheduler
 
-The daemon can dispatch `todo` tasks itself. A project opts in via
+The daemon dispatches `todo` tasks itself, on by default for projects made by `orch init`
+and `orch project create` (a cloned project starts with it off). A project opts out via
 `.orchestration/config.json` — read, like the verification hook, from the
   **committed copy on the
-base branch** (`orch project scheduler <n>` writes the working-tree copy for you to
+base branch** (`orch project scheduler off` writes the working-tree copy for you to
 review and commit; only the committed values apply):
 
 ```json
@@ -469,8 +470,9 @@ fires the machine-level `alert` global hook (see 4b). `orch` knows nothing about
 phones, Termux, or notify add-ons — it only *exposes* that a human is needed, through
 signals any consumer can read:
 
-- `orch task list` renders the scan — blocked sessions and every `needs-review`
-  task (`--json` for machines).
+- `orch task list --status all` renders the whole scan — blocked sessions and every
+  `needs-review` task (`--json` for machines); the default `--status todo,running`
+  lists only the queue still in flight.
 - `orch task answer <name> allow|deny` replies to the blocked permission (or the
   answer text, for a question) over the shared opencode service, unblocking the agent directly.
 - The daemon's journal carries the `alert:` line (and every `needs-review` outcome).
@@ -479,7 +481,7 @@ signals any consumer can read:
 
 The phone add-on (`~/stuff/phone-approval` — `notify-phone` → Termux, plus the
 approve/deny loop) integrates **with** `orch` the other way around: it polls
-`orch task list` or tails the daemon journal, and only it knows about the phone.
+`orch task list --status all` or tails the daemon journal, and only it knows about the phone.
 Whether a parent agent should be unblocked, or a `needs-review` task routed onwards,
 is a decision still to make — the machinery stores no verdicts, so routing will be
 built on the daemon's log + scan rather than on a verdict table.
@@ -555,8 +557,8 @@ no version history store any more.
 
 **Deferred, with nothing built on either:**
 - Routing `needs-review` onwards or unblocking a parent agent. (The "human needed"
-  signal exists — `orch task list --json` and the daemon journal — and the phone
-  add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
+  signal exists — `orch task list --status all --json` and the daemon journal — and
+  the phone add-on in `~/stuff/phone-approval` consumes it; orch has no phone knowledge.)
 - A budget that also bounds the primary agents or a human's manual `orch task start`.
   The scheduler's auto-dispatch is capped per project (`scheduler.maxConcurrent`) and
   machine-wide (`orch daemon budget`); a per-model cap is not there.
