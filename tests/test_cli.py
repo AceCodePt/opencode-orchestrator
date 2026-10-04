@@ -43,10 +43,29 @@ def _blocked(name: str = "task-a", kind: str = "bash") -> state.TaskState:
 
 def _args(**kw) -> argparse.Namespace:
     a = argparse.Namespace(directory=None, global_=False, json=False,
-                           run=False, event="session-idle")
+                           run=False, event="session-idle",
+                           limit=10, status="todo,running",
+                           type="all", name=None, force=False)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
+
+
+def _run_local(**kw) -> tuple[int, str, str]:
+    """Run cmd_task_list against the fake project. Returns (rc, stdout, stderr)."""
+    orig_status = cli.server_mod.status
+    orig_from = cli.state.Project.from_dir
+    cli.state.Project.from_dir = _FakeProject.from_dir
+    cli.server_mod.status = lambda: {"running": True, "unresponsive": False,
+                                     "port": 4096}
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_task_list(_args(**kw))
+    finally:
+        cli.state.Project.from_dir = orig_from
+        cli.server_mod.status = orig_status
+    return rc, out.getvalue(), err.getvalue()
 
 
 def test_answer_allow_replies_to_a_permission() -> None:
@@ -230,7 +249,7 @@ def test_task_list_local_flags_a_committed_nothing_task() -> None:
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                cli.cmd_task_list(_args())
+                cli.cmd_task_list(_args(status="needs-review"))
             out = buf.getvalue()
             assert "needs-review" in out, out
             assert "NEEDS-YOU" in out, out
@@ -240,6 +259,48 @@ def test_task_list_local_flags_a_committed_nothing_task() -> None:
             cli.server_mod.status = orig_status
     print("ok: the local `task list` flags a branch that committed nothing as "
           "needs-review")
+
+
+def test_task_list_limit_caps_the_listing() -> None:
+    tasks = [state.TaskState(project="/tmp/lab/lab.git", name=f"task-{i:02d}",
+                             base="main") for i in range(12)]
+    _FakeProject._instance = _FakeProject(tasks)
+    rc, out, _err = _run_local(json=True)
+    assert rc == 0, rc
+    assert len(json.loads(out)) == 10, "the default cap is 10"
+    rc, out, _err = _run_local(json=True, limit=0)
+    assert rc == 0, rc
+    assert len(json.loads(out)) == 12, "--limit 0 means no cap"
+    print("ok: `--limit` caps the listing, default 10, 0 means all")
+
+
+def test_task_list_status_defaults_to_todo_and_running() -> None:
+    todo = state.TaskState(project="/tmp/lab/lab.git", name="todo-a", base="main")
+    held = state.TaskState(project="/tmp/lab/lab.git", name="held-a", base="main",
+                           claimed=True, branch="held-a",
+                           worktree="/nonexistent/held-a")
+    _FakeProject._instance = _FakeProject([todo, held])
+    rc, out, _err = _run_local(json=True)
+    assert rc == 0, rc
+    assert [t["name"] for t in json.loads(out)] == ["todo-a"], \
+        "needs-review is hidden under the default --status"
+    rc, out, _err = _run_local(json=True, status="needs-review")
+    assert [t["name"] for t in json.loads(out)] == ["held-a"]
+    rc, out, _err = _run_local(json=True, status="all")
+    assert sorted(t["name"] for t in json.loads(out)) == ["held-a", "todo-a"]
+    print("ok: `--status` filters the listing; default is todo,running, all "
+          "opts out")
+
+
+def test_task_list_rejects_an_unknown_status_and_negative_limit() -> None:
+    _FakeProject._instance = _FakeProject([])
+    rc, _out, err = _run_local(status="bogus")
+    assert rc == 2, rc
+    assert "unknown status" in err, err
+    rc, _out, err = _run_local(limit=-1)
+    assert rc == 2, rc
+    assert "--limit" in err, err
+    print("ok: an unknown --status and a negative --limit are refused")
 
 
 class _GProject:

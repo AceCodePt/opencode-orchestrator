@@ -170,9 +170,34 @@ def _task_mtime(t: state.TaskState, base_wt: Path | None) -> float:
     return newest
 
 
+_STATUSES = (state.TODO, state.RUNNING, state.NEEDS_REVIEW,
+             state.MERGE_READY, state.ARCHIVED)
+
+
+def _status_filter(raw: str) -> tuple[set[str] | None, str | None]:
+    """Parse a comma-separated `--status` value into the statuses to keep.
+    `None` means no filter (all statuses); the second element is an error."""
+    items = [s.strip().lower() for s in (raw or "").split(",") if s.strip()]
+    if not items or "all" in items or "*" in items:
+        return None, None
+    unknown = [s for s in items if s not in _STATUSES]
+    if unknown:
+        return None, (f"unknown status: {', '.join(unknown)}; choose from "
+                      f"{', '.join(_STATUSES)}, or all")
+    return set(items), None
+
+
 def cmd_task_list(args: argparse.Namespace) -> int:
     if args.global_:
         return _task_list_global(args)
+    limit = getattr(args, "limit", 10)
+    statuses, err = _status_filter(getattr(args, "status", "todo,running"))
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    if limit < 0:
+        print("--limit must be 0 (no limit) or a positive number", file=sys.stderr)
+        return 2
     start = Path(args.directory) if args.directory else Path.cwd()
     proj = state.Project.from_dir(start)
     if proj is None:
@@ -180,16 +205,25 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         return 2
     st = server_mod.status()
     port = st.get("port") if st.get("running") and not st.get("unresponsive") else None
-    tasks = proj.scan(port)
     base_wt = proj.base_worktree
+    scanned = proj.scan(port)
+    tasks = scanned
+    if statuses is not None:
+        tasks = [t for t in tasks if t.status in statuses]
     tasks.sort(key=lambda t: (_task_mtime(t, base_wt), t.name))
+    total = len(tasks)
+    shown = tasks[:limit] if limit else tasks
     if args.json:
-        print(json.dumps([_task_json(t) for t in tasks], indent=2))
+        print(json.dumps([_task_json(t) for t in shown], indent=2))
         return 0
-    if not tasks:
-        print("no tasks recorded for this project")
+    if not shown:
+        if scanned and statuses is not None:
+            print(f"no tasks with status {', '.join(sorted(statuses))} "
+                  f"(scanned {len(scanned)})")
+        else:
+            print("no tasks recorded for this project")
         return 0
-    for t in tasks:
+    for t in shown:
         branch = t.branch or "-"
         where = (t.worktree or "-").split("/")[-1]
         state_info = ""
@@ -215,6 +249,8 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             print(f"    NEEDS-YOU: {detail}")
             if action:
                 print(f"    -> {action}")
+    if total > len(shown):
+        print(f"  ... {total - len(shown)} more (raise --limit, or --status all)")
     return 0
 
 
@@ -1396,6 +1432,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="scan every supervised project and show what is waiting "
                          "on you (blocked, stuck, and unmerged work)")
     tl.add_argument("--roots", help="comma-separated roots to scan (--global only)")
+    tl.add_argument("--limit", type=int, default=10,
+                    help="show at most N tasks, newest first (0 = no limit; "
+                         "default 10; project listing only, not --global)")
+    tl.add_argument("--status",
+                    default=",".join((state.TODO, state.RUNNING)),
+                    help="comma-separated statuses to show: todo, running, "
+                         "needs-review, ready, archived, or all (default: "
+                         "todo,running; project listing only, not --global)")
     tl.set_defaults(func=cmd_task_list)
 
     tr = tsub.add_parser("reset", help="return a claimed task to todo (delete branch + worktree)")
