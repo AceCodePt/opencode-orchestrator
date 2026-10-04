@@ -1341,6 +1341,148 @@ def cmd_project_base(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_base_worktree(args: argparse.Namespace
+                           ) -> tuple[state.Project | None, Path | None, int]:
+    """The project and its base worktree for a hooks command: the current
+    worktree's project, or `-C <directory>`'s. Returns (project, base, rc); base
+    is None with rc set when it cannot be resolved."""
+    start = Path(args.directory) if args.directory else Path.cwd()
+    proj = state.Project.from_dir(start)
+    if proj is None:
+        print("not in a worktree; run from a project or pass -C <directory>",
+              file=sys.stderr)
+        return None, None, 2
+    base_wt = proj.base_worktree
+    if base_wt is None:
+        print(f"no base worktree checked out on {proj.base!r}", file=sys.stderr)
+        return proj, None, 2
+    return proj, base_wt, 0
+
+
+def _split_filter(value: str, allowed: tuple[str, ...], label: str
+                  ) -> list[str] | None:
+    """Parse a comma-separated `--type`/`--status` filter. `all` (or empty)
+    means no filter. Returns None after printing an error on an unknown value."""
+    parts = [p.strip() for p in (value or "").split(",") if p.strip()]
+    if not parts or "all" in parts:
+        return []
+    bad = [p for p in parts if p not in allowed]
+    if bad:
+        print(f"unknown {label} {bad[0]!r}; choose from "
+              + ", ".join(allowed) + ", or all", file=sys.stderr)
+        return None
+    return parts
+
+
+_STATUS_ORDER = {hooks_mod.STATUS_ACTIVE: 0, hooks_mod.STATUS_INACTIVE: 1,
+                 hooks_mod.STATUS_AVAILABLE: 2, hooks_mod.STATUS_MISSING: 3}
+_KIND_ORDER = {hooks_mod.KIND_VERIFY: 0, hooks_mod.KIND_LIFECYCLE: 1,
+               hooks_mod.KIND_EVENT: 2}
+
+
+def _hook_infos(base_wt: Path, base: str) -> list[hooks_mod.HookInfo]:
+    return [
+        hooks_mod.HookInfo(name, kind, when,
+                           hooks_mod.project_hook_status(base_wt, base, name))
+        for name, kind, when in hooks_mod.project_catalog()
+    ]
+
+
+def cmd_project_hooks_help(args: argparse.Namespace) -> int:
+    args._hparser.print_help()
+    return 0
+
+
+def cmd_project_hooks_list(args: argparse.Namespace) -> int:
+    proj, base_wt, rc = _resolve_base_worktree(args)
+    if proj is None or base_wt is None:
+        return rc
+
+    kinds = _split_filter(args.type, hooks_mod.HOOK_KINDS, "hook type")
+    if kinds is None:
+        return 2
+    statuses = _split_filter(args.status, hooks_mod.HOOK_STATUSES, "hook status")
+    if statuses is None:
+        return 2
+
+    infos = _hook_infos(base_wt, proj.base)
+    if kinds:
+        infos = [i for i in infos if i.kind in kinds]
+    if statuses:
+        infos = [i for i in infos if i.status in statuses]
+    infos.sort(key=lambda i: (_STATUS_ORDER.get(i.status, 9),
+                              _KIND_ORDER.get(i.kind, 9), i.name))
+
+    total = len(infos)
+    shown = infos if not args.limit else infos[:args.limit]
+
+    if args.json:
+        print(json.dumps([
+            {"name": i.name, "kind": i.kind, "status": i.status, "when": i.when}
+            for i in shown
+        ], indent=2))
+        return 0
+    if not shown:
+        print("no hooks match")
+        return 0
+    width = max(len(i.name) for i in shown)
+    for i in shown:
+        print(f"  {i.name:<{width}}  {i.status:<9}  {i.kind:<9}  {i.when}")
+    if args.limit and total > args.limit:
+        print(f"\nshowing {args.limit} of {total}; refine with --type/--status "
+              "or --limit 0 for all")
+    return 0
+
+
+def _pick_hook(base_wt: Path, base: str) -> str | None:
+    infos = [i for i in _hook_infos(base_wt, base)
+             if i.status != hooks_mod.STATUS_ACTIVE]
+    if not infos:
+        print("every project hook is already active")
+        return None
+    infos.sort(key=lambda i: (_KIND_ORDER.get(i.kind, 9), i.name))
+    print("pick a hook to create from its example:")
+    for n, i in enumerate(infos, 1):
+        print(f"  {n}. {i.name}  ({i.kind}, {i.status})")
+    ans = _prompt("hook name or number: ")
+    if not ans:
+        print("  ! no hook chosen", file=sys.stderr)
+        return None
+    if ans.isdigit():
+        idx = int(ans)
+        if 1 <= idx <= len(infos):
+            return infos[idx - 1].name
+        print(f"  ! {ans} is out of range", file=sys.stderr)
+        return None
+    if ans in {i.name for i in infos}:
+        return ans
+    print(f"  ! {ans!r} is not an available project hook", file=sys.stderr)
+    return None
+
+
+def cmd_project_hooks_create(args: argparse.Namespace) -> int:
+    proj, base_wt, rc = _resolve_base_worktree(args)
+    if proj is None or base_wt is None:
+        return rc
+
+    name = args.name
+    if not name:
+        if not _interactive():
+            print("a hook name is required: `orch project hooks create <name>` "
+                  "(stdin is not a terminal)", file=sys.stderr)
+            return 1
+        name = _pick_hook(base_wt, proj.base)
+        if not name:
+            return 1
+
+    ok, msg = hooks_mod.create_project_hook(base_wt, name, force=args.force)
+    if not ok:
+        print(msg, file=sys.stderr)
+        return 1
+    print(msg)
+    return 0
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     return 0
@@ -1575,6 +1717,42 @@ def build_parser() -> argparse.ArgumentParser:
                          "if omitted and interactive)")
     pb.add_argument("-C", "--directory")
     pb.set_defaults(func=cmd_project_base)
+
+    hk = pjsub.add_parser(
+        "hooks",
+        help="list this project's hooks and create one from its example",
+    )
+    hk.set_defaults(func=cmd_project_hooks_help, _hparser=hk)
+    hksub = hk.add_subparsers(dest="hooks_cmd", metavar="<command>",
+                              title="hooks commands")
+    hkl = hksub.add_parser(
+        "list",
+        help="every project hook, marked active/inactive/available/missing",
+    )
+    hkl.add_argument("-C", "--directory")
+    hkl.add_argument("--type", default="all",
+                     help="comma-separated: verify, lifecycle, event, or all "
+                          "(default: all)")
+    hkl.add_argument("--status", default="all",
+                     help="comma-separated: active, inactive, available, "
+                          "missing, or all (default: all)")
+    hkl.add_argument("--limit", type=int, default=20,
+                     help="show at most N hooks, active first (0 = no limit; "
+                          "default 20)")
+    hkl.add_argument("--json", action="store_true")
+    hkl.set_defaults(func=cmd_project_hooks_list)
+
+    hkc = hksub.add_parser(
+        "create",
+        help="copy a hook's example into .orchestration/hooks/<name> and make "
+             "it executable",
+    )
+    hkc.add_argument("name", nargs="?", default=None,
+                     help="the hook to create (prompts for a pick if omitted)")
+    hkc.add_argument("-C", "--directory")
+    hkc.add_argument("--force", action="store_true",
+                     help="overwrite an existing hook file")
+    hkc.set_defaults(func=cmd_project_hooks_create)
 
     g = sub.add_parser("verify", help="can this project's verification hook be trusted")
     g.add_argument("-C", "--directory")

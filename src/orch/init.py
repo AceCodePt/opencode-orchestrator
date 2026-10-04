@@ -227,8 +227,8 @@ def run(start: Path, force: bool = False, version: str = "0",
     notes.append(
         "inert hook .example references are scaffolded into .orchestration/hooks/ "
         "(session-idle, the task-lifecycle hooks, and one per opencode server event), "
-        "gitignored and non-executable. Enabling one is still a real copy-to-real-name, "
-        "chmod +x, and commit:\n"
+        "gitignored and non-executable. Enabling one is `orch project hooks create "
+        "<name>` (a real copy, chmod +x), then edit and commit:\n"
         "    - session-idle - the verification hook: verify and, on a pass, commit the work. "
         "Nothing is verified until hooks/session-idle exists.\n"
         + project_hooks

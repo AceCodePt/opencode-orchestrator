@@ -382,6 +382,63 @@ def test_project_scheduler_rejects_non_numbers() -> None:
     print("ok: `project scheduler` validates its argument")
 
 
+def test_project_hooks_list_and_create() -> None:
+    root, tmp = _repo()
+    cfg = tempfile.TemporaryDirectory()
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = cfg.name
+    try:
+        from orch import hooks as hooks_mod
+        hooks_mod.install_examples()
+        hooks_mod.write_project_examples(root)
+        # the catalog is listed with its explanations, filtered by type/status
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.cmd_project_hooks_list(_args(
+                directory=str(root), type="lifecycle", status="available",
+                limit=0))
+        assert rc == 0, rc
+        text = out.getvalue()
+        assert "pre-task-create" in text and "session-idle" not in text, text
+        assert "before the task worktree is created" in text, \
+            "the list explains each hook"
+
+        # create copies the example in, uncommitted (inactive)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.cmd_project_hooks_create(_args(
+                directory=str(root), name="pre-task-create", force=False))
+        assert rc == 0, out.getvalue()
+        real = root / ".orchestration" / "hooks" / "pre-task-create"
+        assert real.exists() and os.access(real, os.X_OK)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.cmd_project_hooks_list(_args(
+                directory=str(root), status="inactive", limit=0))
+        assert "pre-task-create" in out.getvalue()
+
+        # an unknown name is refused, and a bad filter is a usage error
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_project_hooks_create(_args(
+                directory=str(root), name="nope", force=False))
+        assert rc == 1 and "not a project hook" in err.getvalue()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_project_hooks_list(_args(
+                directory=str(root), type="nope", status="all", limit=0))
+        assert rc == 2 and "unknown hook type" in err.getvalue()
+    finally:
+        if saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = saved
+        cfg.cleanup()
+        tmp.cleanup()
+    print("ok: `project hooks list` filters and `create` copies the example")
+
+
 def _commit_hook(root: Path, body: str) -> None:
     rel = root / ".orchestration" / "hooks" / "session-idle"
     rel.parent.mkdir(parents=True, exist_ok=True)

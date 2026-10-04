@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import server
@@ -45,6 +46,23 @@ TASK_HOOKS = {
     "post-task-cleanup": "after the worktree and branch are gone",
     "pre-branch-delete": "before the task branch is deleted",
 }
+
+# `orch project hooks list --type` / `--status` vocabularies. A project hook's
+# kind is what it is (verification / lifecycle / server event); its status is
+# whether it is actually in force. `active` is the only status that runs.
+KIND_VERIFY = "verify"
+KIND_LIFECYCLE = "lifecycle"
+KIND_EVENT = "event"
+HOOK_KINDS = (KIND_VERIFY, KIND_LIFECYCLE, KIND_EVENT)
+
+STATUS_ACTIVE = "active"
+STATUS_INACTIVE = "inactive"
+STATUS_AVAILABLE = "available"
+STATUS_MISSING = "missing"
+HOOK_STATUSES = (STATUS_ACTIVE, STATUS_INACTIVE, STATUS_AVAILABLE, STATUS_MISSING)
+
+SESSION_IDLE_WHEN = ("the verification hook: run on settle; exit 0 accepts the "
+                     "work and commits any stragglers, non-zero fails it")
 
 SESSION_IDLE_TEMPLATE = """#!/usr/bin/env bash
 # session-idle.{ext} - what "verify" means for this project.
@@ -280,4 +298,101 @@ def write_project_examples(target: Path, force: bool = False
         p.write_text(body)
         created.append(fname)
     return created, skipped
+
+
+@dataclass(frozen=True)
+class HookInfo:
+    """One project hook as `orch project hooks list` reports it: what it is
+    (`kind`), what it does (`when`), and whether it is in force (`status`)."""
+    name: str
+    kind: str
+    when: str
+    status: str = STATUS_MISSING
+
+
+def project_catalog() -> list[tuple[str, str, str]]:
+    """(name, kind, when) for every hook a project can own, one entry per name:
+    the session-idle verification hook, the task-lifecycle hooks, and one per
+    opencode server event. The machine-level GLOBAL_HOOKS are not per-project
+    and are not listed. The order matches project_example_bodies()."""
+    from . import opencode_events
+
+    entries: list[tuple[str, str, str]] = [
+        ("session-idle", KIND_VERIFY, SESSION_IDLE_WHEN),
+    ]
+    for name, when in TASK_HOOKS.items():
+        entries.append((name, KIND_LIFECYCLE, when))
+    for event in opencode_events.OPENCODE_EVENTS:
+        name = opencode_events.hook_name(event)
+        if name == "session-idle":
+            continue
+        entries.append((name, KIND_EVENT, f'opencode server event "{event}"'))
+    return entries
+
+
+def project_hook_status(base_wt: Path, base: str, name: str) -> str:
+    """Whether a project hook is in force, derived from the base worktree:
+
+    - `active`    - committed on `base` (the committed copy is what runs);
+    - `inactive`  - a real file exists in the worktree but is not committed, so
+                    the daemon still sees no hook;
+    - `available` - only an inert `.example` reference exists (project or
+                    machine-level) - create it to enable;
+    - `missing`   - neither a real hook nor an example exists.
+    """
+    from . import verify
+
+    base_wt = Path(base_wt)
+    rel = f"{verify.HOOKS_REL}/{name}"
+    committed = verify.show(base_wt, base, rel)
+    if committed is not None and committed.strip():
+        return STATUS_ACTIVE
+    if (base_wt / rel).exists():
+        return STATUS_INACTIVE
+    if ((base_wt / rel).with_name(f"{name}.example").exists()
+            or (config_dir() / f"{name}.example").exists()):
+        return STATUS_AVAILABLE
+    return STATUS_MISSING
+
+
+def example_body(target: Path, name: str) -> str | None:
+    """The example template for a project hook, from one of: the project's own
+    `.orchestration/hooks/<name>.example`, then the machine-level
+    `~/.config/orch/hooks/<name>.example`, then the single source. None when
+    `name` is not a project hook."""
+    for p in (Path(target) / ".orchestration" / "hooks" / f"{name}.example",
+              config_dir() / f"{name}.example"):
+        try:
+            return p.read_text()
+        except OSError:
+            continue
+    for fname, body in project_example_bodies():
+        if fname == f"{name}.example":
+            return body
+    return None
+
+
+def create_project_hook(base_wt: Path, name: str, force: bool = False
+                        ) -> tuple[bool, str]:
+    """Enable a project hook by copying its example into
+    `.orchestration/hooks/<name>` and making it executable. The copy is left
+    uncommitted for review: a project hook only runs once committed on the base
+    branch. Returns (ok, message)."""
+    base_wt = Path(base_wt)
+    if name not in {n for n, _k, _w in project_catalog()}:
+        return False, (f"{name!r} is not a project hook; run "
+                       "`orch project hooks list` to see the names")
+    rel = f".orchestration/hooks/{name}"
+    target = base_wt / rel
+    if target.exists() and not force:
+        return False, f"{rel} already exists; pass --force to overwrite it"
+    body = example_body(base_wt, name)
+    if body is None:
+        return False, f"no example template found for {name}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    target.chmod(0o755)
+    return True, (f"created {rel} from its example; edit it, then commit it on "
+                  f"the base branch (`git add {rel} && git commit`) so the "
+                  f"daemon runs it")
 

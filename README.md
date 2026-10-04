@@ -117,6 +117,9 @@ orch project trust [--dir]    # let the daemon verify/merge/dispatch this projec
 orch project untrust [--dir]  # stop the daemon acting on it (worktrees are left alone)
 orch project list             # every discovered project and its trust status
 orch project base <branch>    # repoint an existing project's base branch to <branch> (must already exist)
+orch project hooks list       # every project hook, marked active/inactive/available/missing
+orch project hooks list --type lifecycle --status available
+orch project hooks create <name>   # copy a hook's example into hooks/ and chmod +x
 orch verify                 # can this project's verification hook be trusted
 orch verify --run           # run the committed verification hook here and report
 orch doctor                  # verify the contracts that fail silently
@@ -388,6 +391,25 @@ before dispatching.
 committing its work to the branch; completion is then derived from the git state by the
 daemon — the committed branch is verified and merged, nothing is stored anywhere else.
 Watch `orch task list`.
+
+## Enabling a project hook
+
+Every project hook is described and its state is derived from the base worktree:
+
+```bash
+orch project hooks list                    # session-idle + the task-lifecycle + event hooks
+orch project hooks list --type event --limit 0
+orch project hooks list --status available
+orch project hooks create pre-task-create  # copy its example into .orchestration/hooks/
+```
+
+`list` marks each hook `active` (committed on the base branch — the copy that runs),
+`inactive` (a real file in the worktree but not committed, so the daemon still sees no
+hook), `available` (only an inert `.example` reference), or `missing`, and filters by
+`--type` (`verify`, `lifecycle`, `event`), `--status`, and `--limit`. `create <name>`
+loads that hook's example (the project's own copy first, else the machine-level one),
+writes it as `.orchestration/hooks/<name>`, and makes it executable — then edit it and
+commit it on the base branch, because only the committed copy runs.
 
 **The daemon dispatches `todo` tasks itself (on by default).** `orch init` and
 `orch project create` scaffold `.orchestration/config.json` with it enabled; a cloned
