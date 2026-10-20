@@ -238,6 +238,27 @@ def _committed_file(store: Path, base: str, rel: str) -> str | None:
     return out if rc == 0 else None
 
 
+def _declared_base(store: Path, branches: list[str]) -> str | None:
+    """The base branch the repo itself declares: the `baseBranch` in its
+    committed .orchestration/config.json. Read from `main` when it exists (the
+    conventional place the config is authored), else from the clone's default
+    branch (HEAD). Returns the branch only when it actually exists in the
+    clone - a stale or absent declaration is not a base."""
+    refs = ([DEFAULT_BASE] if DEFAULT_BASE in branches else []) + ["HEAD"]
+    for ref in refs:
+        committed = _committed_file(store, ref, ".orchestration/config.json")
+        if not committed:
+            continue
+        try:
+            cfg = json.loads(committed)
+        except ValueError:
+            continue
+        declared = cfg.get("baseBranch") if isinstance(cfg, dict) else None
+        if declared and declared in branches:
+            return str(declared)
+    return None
+
+
 def _set_base_branch(worktree: Path, base: str) -> bool:
     cfg = worktree / ".orchestration" / "config.json"
     try:
@@ -358,8 +379,14 @@ def clone(
     if not branches:
         return fail("the clone has no branches to supervise")
 
+    declared_note = ""
     if base is None:
-        if DEFAULT_BASE in branches:
+        declared = _declared_base(store, branches)
+        if declared is not None:
+            base = declared
+            declared_note = (" (declared by the repo's committed "
+                             ".orchestration/config.json)")
+        elif DEFAULT_BASE in branches:
             base = DEFAULT_BASE
         elif pick_branch is not None:
             base = pick_branch(branches)
@@ -374,7 +401,7 @@ def clone(
     if base not in branches:
         return fail(f"{base!r} is not a branch in {url} (branches: "
                     + ", ".join(branches) + ")")
-    result.step(f"base branch: {base}")
+    result.step(f"base branch: {base}{declared_note}")
 
     target = project / base
     rc, out = _run(["git", "-C", str(store), "worktree", "add",

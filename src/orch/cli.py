@@ -1665,8 +1665,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="parent directory (default: current directory; "
                          "prompts for it if omitted)")
     px.add_argument("--base", default=None,
-                    help="base branch when the clone has no 'main' "
-                         "(prompts for a pick if omitted and interactive)")
+                    help="base branch; overrides the branch the repo declares "
+                         "in .orchestration/config.json (default: that declared "
+                         "branch, else 'main' if present, else prompt/fail)")
     px.add_argument("--trust", action="store_true",
                     help="trust a clone that already ships .orchestration "
                          "(not trusted by default - it is third-party code)")

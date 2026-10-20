@@ -53,6 +53,15 @@ in one source file has one place to check.
   is **not removed** — it stays in place as an ordinary checkout, which is a deliberate
   choice: repointing changes only which branch is *base*, never the branch's existence.
   It is a single per-project base repoint, not multi-environment support.
+- **A clone adopts the base branch the repo declares.** When a repo already ships
+  `.orchestration/config.json`, `orch project clone` reads its `baseBranch` (from
+  `main` when present, else the clone's default branch) and checks that branch out
+  as the base — the same choice `--base <branch>` would make, but automatic. The
+  declaration is used **only if that branch exists in the clone**; a stale one is
+  ignored (fall back to `main`, then the interactive pick, then refusal), and
+  `--base` always overrides. This is why the base worktree is named for the base
+  branch rather than the repo's default, and it is the clone-side counterpart to
+  `project base`'s clone-parity rule.
 - **Archived tasks still scan.** The spec moves to `archive/`, so `task list
   --status all` shows them as archived rather than silently forgetting the
   project's history.

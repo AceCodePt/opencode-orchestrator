@@ -306,10 +306,15 @@ parent (prompted when omitted), and the bare store keeps `origin` → `<url>` an
 the base branch at its upstream, so the remote is tracked by default. orch never
 fetches inside the daemon loop; refresh is a manual `git fetch`.
 
-The base branch follows the rule the rest of orch uses everywhere: `main` if the
-clone has one; otherwise you are **told and asked to pick** one of its branches
-(`--base <branch>` makes it non-interactive). Whatever is chosen becomes
-`baseBranch` in `.orchestration/config.json`.
+The base branch follows the rule the rest of orch uses everywhere, with one
+clone-specific addition: if the repo is already orchestrated, the branch its
+committed `.orchestration/config.json` **declares** as `baseBranch` wins — read
+from `main` when present, else from the clone's default branch. That declared
+branch must exist in the clone; a stale declaration is ignored. Otherwise it is
+`main` if the clone has one; failing both, you are **told and asked to pick** one
+of its branches (`--base <branch>` makes it non-interactive and always overrides).
+Whatever is chosen becomes the base worktree's directory name and `baseBranch` in
+`.orchestration/config.json`.
 
 Two kinds of repo are cloned, handled differently:
 

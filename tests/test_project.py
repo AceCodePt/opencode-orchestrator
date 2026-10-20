@@ -90,7 +90,8 @@ def _base_args(**kw) -> argparse.Namespace:
 
 
 def _make_source(root: Path, name: str = "src", branch: str = "main",
-                 with_orch: bool = False) -> str:
+                 with_orch: bool = False, declared_base: str | None = None,
+                 extra_branches: tuple[str, ...] = ()) -> str:
     """Build a real local git repo to clone from; returns its path."""
     src = root / name
     src.mkdir()
@@ -98,7 +99,8 @@ def _make_source(root: Path, name: str = "src", branch: str = "main",
     if with_orch:
         orch = src / ".orchestration"
         orch.mkdir()
-        (orch / "config.json").write_text('{\n  "baseBranch": "main"\n}\n')
+        (orch / "config.json").write_text(
+            '{\n  "baseBranch": "%s"\n}\n' % (declared_base or "main"))
         (orch / ".gitignore").write_text(".state/\n*.sample\n*.example\n")
     for args in (
         ["git", "init", "-q", "-b", branch, str(src)],
@@ -110,6 +112,11 @@ def _make_source(root: Path, name: str = "src", branch: str = "main",
         p = subprocess.run(args, capture_output=True, text=True)
         if p.returncode != 0:
             raise RuntimeError(f"{args} failed: {p.stderr}")
+    for extra in extra_branches:
+        p = subprocess.run(["git", "-C", str(src), "branch", extra],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"git branch {extra} failed: {p.stderr}")
     return str(src)
 
 
@@ -1039,6 +1046,77 @@ def test_clone_existing_orch_aligns_base_branch_when_chosen_differs() -> None:
         finally:
             _restore_state_env(old, old_cfg)
     print("ok: a base branch different from the shipped config is aligned")
+
+
+def test_clone_existing_orch_uses_declared_base_branch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="main", with_orch=True,
+                           declared_base="preview",
+                           extra_branches=("preview",))
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            project_dir = Path(tmp) / "demo"
+            assert sorted(p.name for p in project_dir.iterdir()) == \
+                ["demo.git", "preview"], \
+                "the base worktree is named for the declared branch, not main"
+            target = project_dir / "preview"
+            rc, branch = project._run(["git", "-C", str(target), "branch",
+                                       "--show-current"])
+            assert rc == 0 and branch == "preview", branch
+            cfg = json.loads((target / ".orchestration" / "config.json")
+                             .read_text())
+            assert cfg["baseBranch"] == "preview", cfg
+            rc, log = project._run(["git", "-C", str(project_dir / "demo.git"),
+                                    "log", "--oneline"])
+            lines = [l for l in log.splitlines() if l.strip()]
+            assert not any("align" in l for l in lines), \
+                "the declared base is used as-is; nothing to align: " + log
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a clone adopts the base branch its committed config declares")
+
+
+def test_clone_existing_orch_ignores_stale_declared_base_branch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="main", with_orch=True,
+                           declared_base="ghost")
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            target = Path(tmp) / "demo" / "main"
+            rc, branch = project._run(["git", "-C", str(target), "branch",
+                                       "--show-current"])
+            assert rc == 0 and branch == "main", branch
+            rc, cfg = project._run(["git", "-C",
+                                    str(Path(tmp) / "demo" / "demo.git"),
+                                    "show", "main:.orchestration/config.json"])
+            assert rc == 0 and json.loads(cfg)["baseBranch"] == "main", cfg
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: a declared base branch absent from the clone falls back to main")
+
+
+def test_clone_existing_orch_uses_declared_base_branch_without_main() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_source(Path(tmp), branch="master", with_orch=True,
+                           declared_base="master")
+        old, old_cfg = _set_state_env(Path(tmp))
+        try:
+            r = project.clone(src, name="demo", path=tmp,
+                              allow_unsupervised=True)
+            assert r.ok, r.problems
+            target = Path(tmp) / "demo" / "master"
+            rc, branch = project._run(["git", "-C", str(target), "branch",
+                                       "--show-current"])
+            assert rc == 0 and branch == "master", branch
+        finally:
+            _restore_state_env(old, old_cfg)
+    print("ok: with no main, the clone reads the declared base from HEAD")
 
 
 def test_clone_name_flag_overrides_url_derivation() -> None:
