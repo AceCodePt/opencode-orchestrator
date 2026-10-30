@@ -1194,6 +1194,23 @@ def test_describe_permission_shows_the_actual_target() -> None:
     print("ok: a permission ask is described by what it tries to run")
 
 
+def test_cron_cli_parses_list_add_update_remove() -> None:
+    p = cli.build_parser()
+    a = p.parse_args(["cron", "list", "--json"])
+    assert a.func is cli.cmd_cron_list and a.json is True
+    a = p.parse_args(["cron", "add", "qa", "--schedule", "0 9 * * *",
+                      "--prompt", "Run QA", "--agent", "build",
+                      "--model", "provider/model", "--overlap", "allow"])
+    assert a.func is cli.cmd_cron_add
+    assert (a.name, a.schedule, a.agent, a.model, a.overlap) == \
+        ("qa", "0 9 * * *", "build", "provider/model", "allow")
+    a = p.parse_args(["cron", "update", "qa", "--disabled"])
+    assert a.func is cli.cmd_cron_update and a.enabled is False
+    a = p.parse_args(["cron", "remove", "qa", "--no-commit"])
+    assert a.func is cli.cmd_cron_remove and a.no_commit is True
+    print("ok: `orch cron` parses list/add/update/remove")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

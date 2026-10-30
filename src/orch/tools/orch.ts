@@ -13,9 +13,10 @@ type PluginContext = {
   tool: { transform: (cb: (editor: ToolEditor) => void) => Promise<unknown> }
 }
 
-// The four task-intake tools, registered through the V2 tool transform. They are
-// thin bridges to the same Python backend as the CLI (`orch tasktool`), so
-// slugs, front matter, dependencies and refusals share orch's code.
+// The task-intake and cron tools, registered through the V2 tool transform.
+// They are thin bridges to the same Python backend as the CLI
+// (`orch tasktool`), so slugs, front matter, dependencies, schedules and
+// refusals share orch's code.
 
 async function runTool(op: string, args: Record<string, unknown>, worktree: string): Promise<string> {
   const proc = Bun.spawn(
@@ -214,6 +215,128 @@ function registerTools(ctx: PluginContext, editor: ToolEditor): void {
     },
     async execute(input: Record<string, unknown>, context: any) {
       return { content: await runTool("delete", input, worktreeOf(context)) }
+    },
+  })
+
+  editor.add({
+    name: "list_jobs",
+    description:
+      "List the project's scheduled opencode jobs from .orchestration/config.json. " +
+      "Each job has a name, a five-field cron schedule, a prompt, and optional " +
+      "agent/model. Returns jobs plus any config errors the daemon would report. " +
+      "Only trusted projects fire, and the committed copy on the base branch is " +
+      "what the daemon reads.",
+    input: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    async execute(_input: Record<string, unknown>, context: any) {
+      return { content: await runTool("cron_list", {}, worktreeOf(context)) }
+    },
+  })
+
+  editor.add({
+    name: "add_job",
+    description:
+      "Add a scheduled opencode job to the project's base worktree " +
+      ".orchestration/config.json. Required: name, schedule, and a prompt (inline " +
+      "markdown) or promptFile (a committed path). Optional: agent, model, overlap. " +
+      "The daemon opens a session on the base worktree when the schedule comes due; " +
+      "the session title carries the slot, so a restart cannot replay it. Commits " +
+      "the config to base by default so the daemon can see it; pass commit: false " +
+      "to leave it for review. Only trusted projects fire.",
+    input: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "job name; slugified into the session title" },
+        schedule: {
+          type: "string",
+          description: "five-field cron: minute hour day-of-month month day-of-week (daemon local time)",
+        },
+        prompt: { type: "string", description: "inline markdown prompt" },
+        promptFile: {
+          type: "string",
+          description: "path to a committed markdown prompt file, relative to the project",
+        },
+        agent: { type: "string", description: "optional opencode agent name" },
+        model: { type: "string", description: "optional provider/model, e.g. provider/model" },
+        overlap: {
+          type: "string",
+          enum: ["skip", "allow"],
+          description: "skip a still-running previous run (default) or allow stacking",
+        },
+        commit: {
+          type: "boolean",
+          description: "commit the config change to base (default true)",
+        },
+      },
+      required: ["name", "schedule"],
+      additionalProperties: false,
+    },
+    async execute(input: Record<string, unknown>, context: any) {
+      return { content: await runTool("cron_add", input, worktreeOf(context)) }
+    },
+  })
+
+  editor.add({
+    name: "update_job",
+    description:
+      "Update a scheduled job in the project's base worktree .orchestration/config.json. " +
+      "PARTIAL: only the fields passed change; absent fields keep their current value. " +
+      "Required: name. Pass schedule, prompt/promptFile, agent, model, overlap or " +
+      "enabled to change them. Commits the config to base by default; pass commit: " +
+      "false to leave it for review.",
+    input: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "the job to update" },
+        schedule: {
+          type: "string",
+          description: "replacement five-field cron schedule",
+        },
+        prompt: { type: "string", description: "replacement inline markdown prompt" },
+        promptFile: {
+          type: "string",
+          description: "replacement committed prompt file path",
+        },
+        agent: { type: "string", description: "replacement opencode agent name" },
+        model: { type: "string", description: "replacement provider/model" },
+        overlap: { type: "string", enum: ["skip", "allow"] },
+        enabled: { type: "boolean", description: "false pauses this job" },
+        commit: {
+          type: "boolean",
+          description: "commit the config change to base (default true)",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    async execute(input: Record<string, unknown>, context: any) {
+      return { content: await runTool("cron_update", input, worktreeOf(context)) }
+    },
+  })
+
+  editor.add({
+    name: "remove_job",
+    description:
+      "Remove a scheduled job from the project's base worktree " +
+      ".orchestration/config.json. Commits the removal to base by default; pass " +
+      "commit: false to leave it for review.",
+    input: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "the job to remove" },
+        commit: {
+          type: "boolean",
+          description: "commit the removal to base (default true)",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    async execute(input: Record<string, unknown>, context: any) {
+      return { content: await runTool("cron_remove", input, worktreeOf(context)) }
     },
   })
 }

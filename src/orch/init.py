@@ -34,6 +34,19 @@ TEMPLATE_CONFIG = {
         "enabled": True,
         "maxConcurrent": 1,
     },
+    "cron": {
+        "$comment": (
+            "Scheduled opencode jobs, evaluated by the daemon every tick in "
+            "the machine's local time. Each entry needs a name, a five-field "
+            "cron schedule (minute hour day month weekday) and a prompt - inline "
+            "markdown, or promptFile pointing at a committed file. model and "
+            "agent are optional and ride through to the session-create call. "
+            "When a slot comes due the daemon opens a session on the base "
+            "worktree and queues the prompt; the session title carries the slot, "
+            "so a restart cannot replay it. Only trusted projects fire."
+        ),
+        "jobs": [],
+    },
 }
 
 
@@ -108,6 +121,15 @@ verification hook, the **committed copy on the base branch** is the
 authority: `orch project scheduler <n>` writes the working-tree copy for you to
 review and commit. A machine-wide cap across all projects lives outside the repo in
 `~/.config/orch/daemon.json` (`orch daemon budget`).
+
+The same file's `cron.jobs` block schedules opencode jobs. Each entry
+needs a `name`, a five-field `schedule`, and a `prompt` (inline markdown) or
+`promptFile` (a committed path). `model` and `agent` are optional. The daemon
+evaluates the schedule every tick in local time and, when a slot has come due
+since its last check, opens a session on the base worktree with that prompt and
+queues the first turn. Session titles carry the slot
+(`orch:cron:<name>:<epoch>`), so a restart cannot replay one; only trusted
+projects fire. `"enabled": false` turns the whole block off.
 
 Reference templates for every hook live outside the repo in
 `~/.config/orch/hooks/*.example` (installed by `orch init`) — one per lifecycle

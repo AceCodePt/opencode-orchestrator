@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orch import daemon, observe, server, state, verify  # noqa: E402
+from orch import cron, daemon, observe, server, state, verify  # noqa: E402
 
 NOW = 1_700_000_000
 _WT_DIR = tempfile.mkdtemp(prefix="orch-lab-")
@@ -655,6 +655,343 @@ def test_apply_verify_merges_a_passing_hook_and_archives() -> None:
     print("ok: a passing verification hook merges, archives, and tears the task down")
 
 
+def test_apply_verify_catches_up_a_clean_behind_branch_and_fast_forwards() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "answer.txt").write_text("42")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "answer"], check=True)
+
+    # base moves after the claim, non-conflictingly
+    (root / "base.txt").write_text("base moved")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base moves"],
+                   check=True)
+
+    sup = daemon.Supervisor(dry_run=False)
+    a = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                      project=str(root), worktree=str(wt), branch="task-a",
+                      base="main", retry_cap=3, session_ids=[])
+    log = "\n".join(sup.apply([a]))
+    assert "rebased onto main" in log, log
+    assert "verify (after catch-up)" in log, log
+    assert "merged" in log and "archived" in log, log
+    assert (root / "answer.txt").exists() and (root / "base.txt").exists(), \
+        "both the task's work and the base's advance must land"
+    merges = subprocess.run(["git", "-C", str(root), "rev-list", "--merges",
+                             "-n", "1", "HEAD"], capture_output=True, text=True)
+    assert not merges.stdout.strip(), "the rebase flow must leave a linear history"
+    assert not wt.exists(), "the task worktree is torn down"
+    assert (root / "archive" / "task-a" / "task.md").exists()
+    tmp.cleanup()
+    print("ok: a clean behind branch is rebased, re-verified, and fast-forwarded")
+
+
+def test_apply_verify_skips_the_second_run_when_the_branch_is_not_behind() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "answer.txt").write_text("42")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "answer"], check=True)
+
+    sup = daemon.Supervisor(dry_run=False)
+    a = daemon.Action(daemon.VERIFY, "task-a", "settled",
+                      project=str(root), worktree=str(wt), branch="task-a",
+                      base="main", retry_cap=3, session_ids=[])
+    log = "\n".join(sup.apply([a]))
+    assert "rebased" not in log, log
+    assert "after catch-up" not in log, "an up-to-date branch must verify once"
+    assert "merged" in log and "archived" in log, log
+    tmp.cleanup()
+    print("ok: an up-to-date branch is verified once, then merged")
+
+
+def _conflicting_claim(root: Path) -> Path:
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "clash.txt").write_text("task side\n")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "task side"],
+                   check=True)
+
+    (root / "clash.txt").write_text("base side\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base side"],
+                   check=True)
+    return wt
+
+
+def _verify_action(root: Path, wt: Path, **kw) -> daemon.Action:
+    base = dict(project=str(root), worktree=str(wt), branch="task-a",
+                base="main", retry_cap=3, port=4096, session_ids=["ses_task"])
+    base.update(kw)
+    return daemon.Action(daemon.VERIFY, "task-a", "settled", **base)
+
+
+def test_a_rebase_conflict_is_handed_to_the_task_s_own_session() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)
+    base_tip = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+    injected: list[tuple[int, str, str]] = []
+    orig = daemon.prompt_async
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text))
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        log = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert state._rebasing(wt), "the rebase waits in the task worktree"
+        assert len(injected) == 1, injected
+        assert injected[0][1] == "ses_task", "it must prompt the task's own session"
+        assert "git rebase --continue" in injected[0][2], injected[0][2]
+        assert "task-a" in injected[0][2]
+        assert "told session ses_task" in log, log
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        assert head == base_tip, "the base is untouched by a catch-up conflict"
+        assert not state._base_merging(root, "main")
+
+        # While the agent has time to work, do not prompt twice.
+        log2 = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert len(injected) == 1, "a duplicate prompt must be suppressed"
+        assert "waiting for the task's agent" in log2, log2
+
+        # The agent resolves and continues the rebase.
+        (wt / "clash.txt").write_text("resolved\n")
+        subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+        p = subprocess.run(["git", "-C", str(wt), "-c", "core.editor=true",
+                            "rebase", "--continue"], capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout + p.stderr
+        assert not state._rebasing(wt)
+
+        log3 = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert "merged" in log3 and "archived" in log3, log3
+        assert (root / "clash.txt").read_text() == "resolved\n"
+        assert not wt.exists()
+    finally:
+        daemon.prompt_async = orig
+    tmp.cleanup()
+    print("ok: a rebase conflict is resolved by the task's own session, once, "
+          "then verified and fast-forwarded")
+
+
+def test_a_rebase_conflict_prompts_a_fresh_session_only_when_none_is_left() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)
+    injected: list[tuple[int, str, str]] = []
+    orig_prompt = daemon.prompt_async
+    orig_ensure = daemon.agent.ensure_task
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text))
+    daemon.agent.ensure_task = lambda port, worktree, task: "ses_recreated"
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        log = "\n".join(sup.apply([_verify_action(root, wt, session_ids=[])]))
+        assert len(injected) == 1
+        assert injected[0][1] == "ses_recreated"
+        assert "using ses_recreated" in log, log
+    finally:
+        daemon.prompt_async = orig_prompt
+        daemon.agent.ensure_task = orig_ensure
+    tmp.cleanup()
+    print("ok: with no live task session, catch-up creates the task session "
+          "in its own worktree")
+
+
+def _two_stop_claim(root: Path) -> Path:
+    """A task branch with two commits that each conflict with base, so a rebase
+    stops twice. Used to prove progress is read from the rebase step, not a clock."""
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+    (wt / "a.txt").write_text("task a\n")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "task a"], check=True)
+    (wt / "b.txt").write_text("task b\n")
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "task b"], check=True)
+
+    (root / "a.txt").write_text("base a\n")
+    (root / "b.txt").write_text("base b\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base side"],
+                   check=True)
+    return wt
+
+
+def _continue_rebase(wt: Path, path: str, text: str) -> None:
+    (wt / path).write_text(text)
+    subprocess.run(["git", "-C", str(wt), "add", path], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "core.editor=true",
+                    "rebase", "--continue"], capture_output=True, text=True)
+
+
+def test_a_rebase_that_advances_is_prompted_again_without_waiting() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _two_stop_claim(root)
+    injected: list[tuple[int, str, str]] = []
+    orig = daemon.prompt_async
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text))
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        log = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert len(injected) == 1, injected
+        assert "told session ses_task" in log, log
+        key = (str(root), "task-a")
+        assert sup.mem.catchup_retries[key] == 1
+
+        # The agent resolves the first conflict and continues; the rebase stops
+        # at the second conflict. That is progress, so a second nudge is allowed
+        # immediately instead of waiting out a fixed cooldown.
+        before = state._rebase_progress(wt)
+        assert before is not None and before[0] == "1", before
+        _continue_rebase(wt, "a.txt", "resolved a\n")
+        after = state._rebase_progress(wt)
+        assert after is not None and after[0] == "2", after
+        assert after != before
+
+        log2 = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert "the rebase advanced; resetting the stuck count" in log2, log2
+        assert len(injected) == 2, "a new conflict after progress gets a fresh nudge"
+        assert "told session ses_task" in log2, log2
+    finally:
+        daemon.prompt_async = orig
+    tmp.cleanup()
+    print("ok: rebase progress is read from git, so a new stop is nudged at once")
+
+
+def test_a_stuck_rebase_is_nudged_again_after_the_short_grace() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)
+    injected: list[tuple[int, str, str]] = []
+    orig = daemon.prompt_async
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text))
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        sup.apply([_verify_action(root, wt)])
+        assert len(injected) == 1
+        key = (str(root), "task-a")
+        # No progress; just let the short grace expire.
+        sup.mem.catchup_prompted[key] = int(time.time()) - daemon.RETRIGGER_GRACE_S - 1
+        log = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert len(injected) == 2, "an unchanged, idle rebase is nudged after the grace"
+        assert sup.mem.catchup_retries[key] == 2
+        assert "needs-review" not in log, log
+    finally:
+        daemon.prompt_async = orig
+    tmp.cleanup()
+    print("ok: an unchanged rebase is nudged after the short grace, not five minutes")
+
+
+def test_a_stuck_rebase_escalates_after_the_prompt_cap() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)
+    injected: list[tuple[int, str, str]] = []
+    orig = daemon.prompt_async
+    daemon.prompt_async = lambda port, sid, text: injected.append((port, sid, text))
+    try:
+        sup = daemon.Supervisor(dry_run=False)
+        sup.apply([_verify_action(root, wt)])  # leaves the rebase + first prompt
+        key = (str(root), "task-a")
+        assert sup.mem.catchup_retries[key] == 1
+        sup.mem.catchup_retries[key] = 3
+        sup.mem.catchup_prompted[key] = int(time.time()) - daemon.RETRIGGER_GRACE_S - 1
+        log = "\n".join(sup.apply([_verify_action(root, wt)]))
+        assert "needs-review (rebase conflict unresolved after 3 prompt(s))" in log, log
+        assert len(injected) == 1, "the cap must stop prompting"
+    finally:
+        daemon.prompt_async = orig
+    tmp.cleanup()
+    print("ok: an unresolved rebase escalates to a human after the prompt cap")
+
+
+def test_a_dirty_base_worktree_blocks_catch_up_and_merge() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)  # a real branch with work, base moved ahead
+    (root / "human.txt").write_text("uncommitted human work")
+
+    sup = daemon.Supervisor(dry_run=False)
+    log = "\n".join(sup.apply([_verify_action(root, wt)]))
+    assert "base worktree has uncommitted work" in log, log
+    assert "merged" not in log, log
+    assert wt.exists(), "the task worktree survives"
+    assert not state._rebasing(wt), "nothing was rebased over the dirty base"
+    assert (root / "human.txt").read_text() == "uncommitted human work"
+    key = (str(root), "task-a")
+    assert sup.mem.wait_until[key] > int(time.time()), "held for a human"
+    tmp.cleanup()
+    print("ok: a dirty base worktree stops catch-up and merge, and asks a human")
+
+
+def test_catch_up_refuses_a_dirty_task_tree() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    wt = _conflicting_claim(root)
+    (wt / "local.txt").write_text("uncommitted")
+    sup = daemon.Supervisor(dry_run=False)
+    log: list[str] = []
+    ok, rebased = sup._catch_up(_verify_action(root, wt), log)
+    assert not ok and not rebased
+    assert "dirty" in "\n".join(log), log
+    assert not state._rebasing(wt), "a dirty tree is never rebased"
+    tmp.cleanup()
+    print("ok: a dirty task tree is never rebased")
+
+
+def test_catch_up_skips_a_branch_with_no_work_of_its_own() -> None:
+    root, tmp = _verified_repo("#!/usr/bin/env bash\nexit 0\n")
+    (root / "tasks" / "task-a").mkdir(parents=True)
+    (root / "tasks" / "task-a" / "task.md").write_text("# Task A\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "task"], check=True)
+    wt = root.parent / "task-a"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-b", "task-a",
+                    str(wt), "main"], check=True)
+    (root / "base.txt").write_text("base moved")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base"], check=True)
+
+    assert state._behind(root, "main", "task-a")
+    assert not state._diff(root, "main", "task-a")
+    sup = daemon.Supervisor(dry_run=False)
+    log: list[str] = []
+    ok, rebased = sup._catch_up(_verify_action(root, wt), log)
+    assert ok and not rebased, log
+    assert not state._rebasing(wt), "an empty branch is never rebased"
+    tmp.cleanup()
+    print("ok: a branch with no work of its own is skipped, not rebased")
+
+
 def test_apply_verify_failing_hook_retriggers_up_to_the_cap() -> None:
     root, tmp = _verified_repo("#!/usr/bin/env bash\necho 'tests red'\nexit 1\n")
     injected: list[tuple[int, str, str]] = []
@@ -1017,7 +1354,6 @@ def test_wait_human_start_conflicted_task_is_reviewed_not_reverified() -> None:
 
 
 def _conflicted_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
-    from orch import merge as merge_mod
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name) / "wt"
     root.mkdir(parents=True)
@@ -1048,8 +1384,11 @@ def _conflicted_repo() -> tuple[Path, Path, tempfile.TemporaryDirectory]:
     (root / "task.py").write_text("x = 2\n")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "conflict"], check=True)
-    r = merge_mod.merge_and_cleanup(root, "task-a", "task-a", wt, "main")
-    assert r.conflicted, "the merge must be left mid-merge"
+    # A mid-merge base is a legacy/human state now; construct it directly.
+    p = subprocess.run(["git", "-C", str(root), "merge", "--no-edit", "--no-ff",
+                        "task-a"], capture_output=True, text=True)
+    assert p.returncode != 0 and state._base_merging(root, "main"), \
+        "the merge must be left mid-conflict"
     return root, wt, tmp
 
 
@@ -1334,6 +1673,101 @@ def test_a_claimed_task_that_committed_nothing_is_held_intact() -> None:
     tmp.cleanup()
     print("ok: a claimed task that committed nothing is held with its branch, "
           "worktree and spec intact")
+
+
+def test_cron_fires_a_due_slot_once() -> None:
+    mem = daemon.LoopState()
+    project = "/tmp/lab/lab.git"
+    job = cron.CronJob(project=project, name="qa", schedule="* * * * *",
+                       spec=cron.parse("* * * * *"), prompt="run QA",
+                       worktree=WT)
+    mem.cron_last[(project, "qa")] = NOW - 30
+    acts = daemon.decide(_snap(tasks=[], mem=mem, crons=[job],
+                               trusted={project}))
+    fired = [a for a in acts if a.kind == daemon.CRON]
+    assert len(fired) == 1, _kinds(acts)
+    assert fired[0].slot == NOW // 60 * 60
+    assert fired[0].cron is job
+
+    acts2 = daemon.decide(_snap(tasks=[], mem=mem, crons=[job],
+                                trusted={project}))
+    assert daemon.CRON not in _kinds(acts2), "one fire per slot"
+    print("ok: a due cron opens one session; the next tick does not replay it")
+
+
+def test_cron_does_not_fire_an_untrusted_project() -> None:
+    mem = daemon.LoopState()
+    project = "/tmp/lab/lab.git"
+    job = cron.CronJob(project=project, name="qa", schedule="* * * * *",
+                       spec=cron.parse("* * * * *"), prompt="run QA",
+                       worktree=WT)
+    mem.cron_last[(project, "qa")] = NOW - 30
+    acts = daemon.decide(_snap(tasks=[], mem=mem, crons=[job], trusted=set()))
+    assert daemon.CRON not in _kinds(acts)
+    print("ok: the cron scheduler never opens a session in an untrusted project")
+
+
+def test_cron_waits_for_the_scheduled_minute() -> None:
+    mem = daemon.LoopState()
+    project = "/tmp/lab/lab.git"
+    job = cron.CronJob(project=project, name="new-year",
+                       schedule="0 9 1 1 *",
+                       spec=cron.parse("0 9 1 1 *"), prompt="run",
+                       worktree=WT)
+    mem.cron_last[(project, "new-year")] = NOW - 30
+    acts = daemon.decide(_snap(tasks=[], mem=mem, crons=[job],
+                               trusted={project}))
+    assert daemon.CRON not in _kinds(acts), _kinds(acts)
+    print("ok: a job that is not due now is left alone")
+
+
+def test_fire_cron_opens_a_session_with_the_prompt() -> None:
+    calls: dict = {}
+    orig = (daemon.harness.sessions, daemon.harness.active_sessions,
+            daemon.harness.create_session, daemon.prompt_async)
+
+    def fake_sessions(port: int, directory: str | None = None) -> list:
+        return []
+
+    def fake_active(port: int) -> dict:
+        return {}
+
+    def fake_create(port: int, directory: str | None = None,
+                    title: str | None = None, agent: str | None = None,
+                    model=None) -> dict:
+        calls.update(port=port, directory=directory, title=title,
+                     agent=agent, model=model)
+        return {"id": "ses_cron"}
+
+    def fake_prompt(port: int, sid: str, text: str,
+                    delivery: str = "queue") -> None:
+        calls.update(prompt_to=sid, prompt=text)
+
+    daemon.harness.sessions = fake_sessions
+    daemon.harness.active_sessions = fake_active
+    daemon.harness.create_session = fake_create
+    daemon.prompt_async = fake_prompt
+    try:
+        job = cron.CronJob(project="/tmp/lab/lab.git", name="qa",
+                           schedule="0 9 * * *",
+                           spec=cron.parse("0 9 * * *"), prompt="Run QA",
+                           model="provider/model", agent="build", worktree=WT)
+        a = daemon.Action(daemon.CRON, "qa", "scheduled",
+                          project=job.project, worktree=WT, start=WT,
+                          port=4096, cron=job, slot=NOW // 60 * 60)
+        sup = daemon.Supervisor(dry_run=False)
+        sup._fire_hook = lambda *args, **kwargs: []  # type: ignore[method-assign]
+        log = "\n".join(sup.apply([a]))
+    finally:
+        (daemon.harness.sessions, daemon.harness.active_sessions,
+         daemon.harness.create_session, daemon.prompt_async) = orig
+    assert "opened" in log, log
+    assert calls["title"] == f"orch:cron:qa:{NOW // 60 * 60}"
+    assert calls["model"] == "provider/model"
+    assert calls["agent"] == "build"
+    assert calls["prompt"] == "Run QA"
+    assert calls["prompt_to"] == "ses_cron"
+    print("ok: firing a cron opens a session with the prompt, model and agent")
 
 
 def main() -> int:

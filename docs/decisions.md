@@ -187,6 +187,46 @@ in one source file has one place to check.
   It is a human act against the live service, not stored state; the daemon notices
   the unblock on its next scan.
 
+## `cron.py`
+
+- **Cron runs inside the one daemon, not system cron.** The supervisor already wakes
+  every second and reads each project's **committed** `.orchestration/config.json`, so
+  a scheduled job needs no per-job systemd unit, no second scheduler, and no extra
+  trust decision: it inherits the daemon's trust-bound project set. A project adds a
+  job by committing one object.
+- **The config key is `cron.jobs`.** It was briefly `cron.sessions`; the reader still
+  accepts that alias and every write migrates the block to `jobs`. A job is the thing
+  declared in config; the opencode session it opens is still a session.
+- **Only `name`, `schedule` and `prompt` are required.** `promptFile` is the alternative
+  to inline markdown (read from the committed copy first, then the working tree).
+  `model` and `agent` are optional and ride through to `POST /api/session`; orch does
+  not choose a model.
+- **Editing is one code path.** `orch cron list|add|update|remove` and the
+  `list_jobs`/`add_job`/`update_job`/`remove_job` custom tools share the same Python
+  edits (the tools are another `orch tasktool` op), so the CLI and an agent cannot
+  disagree about validation or messages. Both write the **base worktree's** config and
+  commit it by default, because the daemon only reads the committed copy.
+- **Never sweep up someone else's edit.** If `.orchestration/config.json` was already
+  dirty before the command, the change is written but not committed; the message says
+  so. A cron command must not fold a human's in-progress `verify` change into an orch
+  commit.
+- **Due is a crossing, not an equality.** Each tick compares the schedule against the
+  last time the job was *checked*. A restart or a slow verification pass that hides the
+  exact minute still sees the occurrence it crossed. A brand-new job starts with a
+  one-minute window, so declaring a daily 09:00 job at 15:00 does not replay this
+  morning; a daemon that was down at 09:00 fires once on restart.
+- **The session title is the record.** Titles are
+  `orch:cron:<name>:<epoch>`, so a restart, a duplicated tick, or a lost state file
+  cannot replay a slot. `~/.local/state/orch/cron.json` only holds `last_check` (so a
+  crossing can be found) and is written at most once a minute; it is a hint, never a
+  verdict.
+- **A cron job is not a task.** Its session opens on the base worktree, queues the
+  prompt as its first turn, and is never verified, merged, or archived. Its work stays
+  for a human or a follow-up task. A still-running previous run is skipped by default
+  (`"overlap": "allow"` opts into stacking).
+- **A bad entry is reported once and skipped.** One typo must not take the reconcile
+  loop — and therefore every task in every project — down with it.
+
 ## `dispatch.py`
 
 - **Claim is `git worktree add -b`.** The refusal to double-claim is the branch

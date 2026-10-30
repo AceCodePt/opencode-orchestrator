@@ -174,6 +174,95 @@ def test_scan_reports_dirty_and_diff() -> None:
     print("ok: dirty and diff derive from the worktree")
 
 
+def test_scan_reports_a_branch_behind_base() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    wt = _claim(root, "a-task")
+    (wt / "work.txt").write_text("task work")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "work")
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert not t.behind, "a branch level with base is not behind"
+
+    (root / "base.txt").write_text("base work")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base moves")
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert t.behind, "base has a commit the task branch lacks"
+    assert t.diff and not t.dirty, "the task still has its own committed work"
+    assert t.status == state.MERGE_READY, \
+        "being behind is not by itself a human hold"
+    tmp.cleanup()
+    print("ok: a branch behind base is detected without changing its status")
+
+
+def test_rebase_progress_tracks_the_step_not_the_edit() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    wt = _claim(root, "a-task")
+    (wt / "a.txt").write_text("task a\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "task a")
+    (wt / "b.txt").write_text("task b\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "task b")
+    (root / "a.txt").write_text("base a\n")
+    (root / "b.txt").write_text("base b\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base side")
+
+    p = subprocess.run(["git", "-C", str(wt), "rebase", "main"],
+                       capture_output=True, text=True, timeout=20)
+    assert p.returncode != 0, "the first commit must conflict"
+    first = state._rebase_progress(wt)
+    assert first is not None and first[0] == "1", first
+
+    # Editing the conflicted file is not progress: HEAD and the rebase step
+    # stay put until the agent continues.
+    (wt / "a.txt").write_text("edited but not continued\n")
+    assert state._rebase_progress(wt) == first
+
+    _git(wt, "add", "a.txt")
+    p = subprocess.run(["git", "-C", str(wt), "-c", "core.editor=true",
+                        "rebase", "--continue"], capture_output=True, text=True)
+    assert p.returncode != 0, "the second commit must conflict"
+    second = state._rebase_progress(wt)
+    assert second is not None and second[0] == "2", second
+    assert second != first, "continuing past a commit advances the signal"
+
+    _git(wt, "rebase", "--abort")
+    assert state._rebase_progress(wt) is None
+    tmp.cleanup()
+    print("ok: rebase progress is the rebase step and HEAD, not file edits or time")
+
+
+def test_scan_reports_a_rebase_in_progress() -> None:
+    root, tmp = _repo()
+    _task(root, "a-task")
+    wt = _claim(root, "a-task")
+    (wt / "clash.txt").write_text("task\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "task side")
+    (root / "clash.txt").write_text("base\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base side")
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert not t.rebasing, "no rebase has started"
+
+    p = subprocess.run(["git", "-C", str(wt), "rebase", "main"],
+                       capture_output=True, text=True, timeout=20)
+    assert p.returncode != 0, "the two sides must conflict"
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert t.rebasing, "a stopped rebase is visible from the task worktree"
+    assert t.dirty, "the conflicted files leave the tree dirty"
+
+    _git(wt, "rebase", "--abort")
+    t = next(x for x in _proj(root).scan() if x.name == "a-task")
+    assert not t.rebasing, "aborting the rebase clears the marker"
+    tmp.cleanup()
+    print("ok: an in-progress rebase in the task worktree is detected")
+
+
 def test_scan_clean_no_diff_needs_review() -> None:
     root, tmp = _repo()
     _task(root, "a-task")
@@ -452,7 +541,6 @@ def test_detached_excludes_a_pty_process() -> None:
 
 
 def test_scan_marks_a_mid_merge_conflict_as_needs_review() -> None:
-    from orch import merge as merge_mod
     root, tmp = _repo()
     _task(root, "a-task")
     wt = _claim(root, "a-task")
@@ -462,8 +550,9 @@ def test_scan_marks_a_mid_merge_conflict_as_needs_review() -> None:
     (root / "task.py").write_text("x = 2\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "conflict")
-    r = merge_mod.merge_and_cleanup(root, "a-task", "a-task", wt, "main")
-    assert r.conflicted, "the merge must be left in progress"
+    p = subprocess.run(["git", "-C", str(root), "merge", "--no-edit", "--no-ff",
+                        "a-task"], capture_output=True, text=True, timeout=20)
+    assert p.returncode != 0, "the merge must be left in progress"
     t = next(x for x in _proj(root).scan() if x.name == "a-task")
     assert t.conflicted, "the scan must derive the conflict from MERGE_HEAD"
     assert t.status == state.NEEDS_REVIEW, t.status

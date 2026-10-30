@@ -128,7 +128,33 @@ def test_merge_refuses_a_dirty_worktree() -> None:
     print("ok: a dirty worktree is never merged")
 
 
-def test_merge_conflict_is_left_for_a_human_and_marked() -> None:
+def test_merge_refuses_a_branch_behind_base_and_leaves_the_base_clean() -> None:
+    tmp = tempfile.TemporaryDirectory()
+    bare = _bare_repo(tmp)
+    wt = _claim_task(bare, "task-a")
+
+    main_wt = bare.parent / "main"
+    base_tip = _git(main_wt, "rev-parse", "HEAD")
+    (main_wt / "task.py").write_text("# conflicting")
+    _git(main_wt, "add", "-A")
+    _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
+    newer = _git(main_wt, "rev-parse", "HEAD")
+
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
+    assert not r.ok
+    assert r.retry, "a branch behind base must be caught up, not merged"
+    assert not r.conflicted, "the base must not be left mid-merge"
+    assert any("behind" in p for p in r.problems), r.problems
+    assert wt.exists(), "worktree should survive"
+    assert "task-a" in _git(main_wt, "branch", "--list"), "branch survives"
+    assert _git(main_wt, "rev-parse", "HEAD") == newer, "base is untouched"
+    assert not state._base_merging(bare, "main"), "no merge is left in progress"
+    assert base_tip != newer
+    tmp.cleanup()
+    print("ok: a branch behind base is refused for catch-up, base left clean")
+
+
+def test_rebase_catches_a_conflicting_branch_up_in_the_task_worktree() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
     wt = _claim_task(bare, "task-a")
@@ -137,17 +163,28 @@ def test_merge_conflict_is_left_for_a_human_and_marked() -> None:
     (main_wt / "task.py").write_text("# conflicting")
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
+    base_tip = _git(main_wt, "rev-parse", "HEAD")
 
-    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
-    assert not r.ok
-    assert r.conflicted, "a conflict must be marked, not silently retried"
-    assert any("conflicts" in p for p in r.problems), r.problems
-    assert wt.exists(), "worktree should survive a failed merge"
-    assert "task-a" in _git(main_wt, "branch", "--list"), "branch survives"
-    head = _git(main_wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")
-    assert head, "the merge is left in progress so the state is derivable"
+    r = merge.rebase_onto(wt, "main")
+    assert not r.ok and r.conflicted, r.problems
+    assert state._rebasing(wt), "the rebase is left in progress for the agent"
+    assert "<<<<<<<" in (wt / "task.py").read_text(), "conflict markers are present"
+    assert _git(main_wt, "rev-parse", "HEAD") == base_tip, "base is untouched"
+    assert not state._base_merging(bare, "main"), "the base is never mid-merge"
+
+    # The task's agent resolves in its own worktree.
+    (wt / "task.py").write_text("# resolved\n")
+    _git(wt, "add", "-A")
+    p = subprocess.run(["git", "-C", str(wt), "-c", "core.editor=true",
+                        "rebase", "--continue"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert not state._rebasing(wt)
+    assert not state._behind(bare, "main", "task-a"), "the branch is onto base"
+
+    r2 = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
+    assert r2.ok, r2.problems
     tmp.cleanup()
-    print("ok: a merge conflict is left in progress and marked, branch kept")
+    print("ok: a conflict is resolved in the task worktree, then fast-forwarded")
 
 
 def test_merge_refuses_while_the_base_is_mid_merge() -> None:
@@ -161,8 +198,12 @@ def test_merge_refuses_while_the_base_is_mid_merge() -> None:
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "conflicting change on main")
 
-    r1 = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
-    assert r1.conflicted
+    # A mid-merge base (a human or a legacy resolver left it) blocks merging.
+    p = subprocess.run(["git", "-C", str(main_wt), "merge", "--no-edit",
+                        "--no-ff", "task-a"], capture_output=True, text=True)
+    assert p.returncode != 0, "the merge must conflict"
+    assert state._base_merging(bare, "main"), "the base is mid-merge"
+
     r2 = merge.merge_and_cleanup(bare, "task-b", "task-b", wt2, "main")
     assert not r2.ok and any("mid-merge" in p for p in r2.problems), r2.problems
     assert wt2.exists(), "the second task must not be torn down either"
@@ -215,7 +256,6 @@ def test_reset_task_returns_to_todo_without_archiving() -> None:
 def test_pre_task_cleanup_hook_blocks() -> None:
     tmp = tempfile.TemporaryDirectory()
     bare = _bare_repo(tmp)
-    wt = _claim_task(bare, "task-a")
 
     main_wt = bare.parent / "main"
     hook = main_wt / ".orchestration" / "hooks" / "pre-task-cleanup"
@@ -224,6 +264,7 @@ def test_pre_task_cleanup_hook_blocks() -> None:
     _git(main_wt, "add", "-A")
     _git(main_wt, "commit", "-q", "-m", "add blocking hook")
 
+    wt = _claim_task(bare, "task-a")
     r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
     assert not r.ok
     assert any("blocked" in p for p in r.problems)

@@ -23,11 +23,14 @@ no generated backlog file: nothing can drift because there is nothing stored.
 task.md committed (base)  →  branch exists (claimed)  →  agent dispatched
      →  agent commits its work to the branch  →  session settles
      →  daemon runs the session-idle verification hook
-          → pass: the hook commits any stragglers  →  merge + archive + teardown
+          → pass: the hook commits any stragglers
+               → behind base: rebase in the task worktree (its agent resolves conflicts)
+               → re-verify the integrated tree  →  fast-forward merge + archive + teardown
           → fail:  daemon injects the failure back, bounded by retryCap
           → empty: branch committed nothing since its claim  →  held for review
-     →  needs-review: dirty work, an empty branch, retries exhausted, a missing
-        worktree, or a turn the user interrupted in the TUI (held, never auto-merged)
+     →  needs-review: dirty work, an empty branch, retries exhausted, an unresolved
+        rebase, a dirty base worktree, a missing worktree, or a turn the user
+        interrupted in the TUI (held, never auto-merged)
 ```
 
 **Done is a git state, and git is the only state.** The working agent declares the task
@@ -72,22 +75,31 @@ Walking one task through the whole loop, from a raw idea to archived work:
    committed `session-idle` verification hook.
 5. **Verify and merge.** The daemon runs the verification hook committed on the base
    branch (never the agent's working-tree copy). On a pass the hook also idempotently
-   commits any files the agent left uncommitted, and the daemon merges the branch
-   `--no-ff` into base, then removes the worktree and branch and archives the spec. On
-   a fail the failure is injected back into the agent's session via `prompt` and
-   it retries, bounded by `retryCap`; once the cap is spent the task is `needs-review`.
-   A project with no committed hook accepts work implicitly — absence of a hook is the
-   opt-in.
-6. **Conflict.** A merge that conflicts is left **in progress** (the scan reads
-   `MERGE_HEAD` and shows `needs-review (merge-conflict)`); it is never silently
-   retried. Who resolves it follows `wait_human_start`: a human-started task is resolved
-   by you in the base worktree (`git add`/`git commit`); a machine-started task gets an
-   agent dispatched into the base worktree — a server session titled
-   `<name>-merge-conflict` — to resolve and commit on its own, up to `retryCap` tries
-   before it escalates to you. The daemon detects an in-flight resolver by that session,
-   so it never spawns duplicates. Either way, once the merge lands the branch tip is
-   base's tip, so the daemon can no longer tell the resolved conflict from an empty
-   run: it holds the task for you to review and archive (`orch task archive`).
+   commits any files the agent left uncommitted. If base has advanced since the branch
+   was cut, the daemon rebases the branch onto base **in the task worktree**, asks the
+   task's own agent to resolve any conflict there, re-runs the verification hook on the
+   integrated tree (integration is exactly where a green branch can break), and then
+   merges the branch `--ff-only` into base, removes the worktree and branch, and
+   archives the spec. On a fail the failure is injected back into the agent's session
+   via `prompt` and it retries, bounded by `retryCap`; once the cap is spent the task is
+   `needs-review`. A project with no committed hook accepts work implicitly — absence of
+   a hook is the opt-in.
+6. **Catch up and conflict.** A branch behind its base is rebased there, never merged
+   into a divergent base. The base worktree is never left mid-merge by orch. If the
+   rebase conflicts, the session already bound to the task worktree is told to resolve
+   hunk by hunk — preserving both sides' intent, with the task spec authoritative — and
+   to `git rebase --continue`; no new resolver worktree or session is created. The
+   prompt is deduplicated while the rebase is in progress. Progress is read from git —
+   the rebase step (`msgnum`) and HEAD advance only on `git rebase --continue`, not while
+   the agent edits a conflicted file — so a new stop is nudged at once, while an idle,
+   unchanged rebase is re-nudged after a short grace;
+   after `retryCap` prompts the task escalates to `needs-review`. A dirty base worktree,
+   an empty branch, and any conflict the task's agent cannot finish are held for you.
+   Once the rebased branch verifies, it fast-forwards into base and the task is
+   archived normally, so a successful integration is never mistaken for an empty run.
+   A legacy base-side mid-merge (a human, or an older run) is still detected via
+   `MERGE_HEAD` and resolved in the base worktree by the existing `<name>-merge-conflict`
+   session path.
 7. **Archive.** `tasks/<name>/task.md` is `git mv`'d to `archive/<name>/task.md` (a
    reused slug whose earlier generation still occupies that path is archived to
    `archive/<name>/<utc-ts>/task.md` instead) and
@@ -136,6 +148,12 @@ orch task reset <name>       # delete branch+worktree -> back to todo (a human a
 orch task archive <name>     # close a reviewed needs-review task
 orch task merge <name>       # re-run a merge after a conflict
                              # (from the task's own worktree, omit <name> to merge that task)
+
+orch cron list               # the project's scheduled opencode jobs
+orch cron add [name] [--schedule "..."] [--prompt "..."] [--prompt-file ...] [--agent ...] [--model ...]
+                             # prompts for missing fields on a terminal; --no-commit leaves the config for review
+orch cron update <name> [--schedule ...] [--prompt ...] [--prompt-file ...] [--agent ...] [--model ...]
+orch cron remove <name>
 
 orch attach                  # attach the interactive TUI to the primary agent, or to a task's session from its worktree (created on first use)
 
@@ -362,6 +380,7 @@ in the conversation itself.
 | `update_task` | Amend a spec (committed or draft); only the fields you pass change. Commits the amendment unless the spec's `wait_human_start` is `true`. Refuses a **claimed** task and archived tasks. |
 | `archive_task` | `git mv` a declared, unclaimed task to `archive/`, unblocking anything that depends on it. Commits the move by default (`commit: false` leaves it staged). A slug is freely reusable: if `archive/<name>/task.md` is already occupied by an earlier generation, this one lands at `archive/<name>/<utc-ts>/task.md`. |
 | `delete_task` | Remove a task. Commits the removal by default (`commit: false` leaves it staged). Refuses claimed tasks and tasks other open tasks depend on. |
+| `list_jobs` / `add_job` / `update_job` / `remove_job` | List, add, amend, or remove a scheduled opencode job in `.orchestration/config.json`. `add_job` needs a name, a five-field schedule, and a prompt (or `promptFile`); `agent` and `model` are optional. They commit to base by default (`commit: false` leaves the change for review). |
 
 The tools are thin bridges to a Python backend (`orch tasktool` — a hidden
 dispatcher subcommand), so slugs, front matter, dependencies, and refusals are
@@ -441,6 +460,39 @@ scheduler only leaves those alone and never dispatches in an untrusted project. 
 `wait_human_merge: true` task is verified and committed but not merged — the human
 approves it with `orch task merge`.
 
+## Scheduled jobs (`cron`)
+
+`.orchestration/config.json` can declare jobs the daemon opens on a cron
+schedule — a daily QA pass, an hourly security check:
+
+```json
+"cron": {
+  "jobs": [
+    { "name": "qa", "schedule": "0 9 * * *",
+      "prompt": "Run the QA suite and report what failed." },
+    { "name": "security", "schedule": "0 * * * *",
+      "promptFile": ".orchestration/prompts/security.md",
+      "model": "opencode-go/deepseek-v4.1-flash", "agent": "build" }
+  ]
+}
+```
+
+`name`, `schedule`, and `prompt` (or `promptFile`) are required; `model` and
+`agent` are optional and go straight into opencode's session-create body.
+Schedules are standard five-field cron expressions (minute hour day-of-month
+month day-of-week) evaluated in the daemon's local timezone. When a slot comes
+due, the daemon opens a session on the project's base worktree and queues the
+prompt as its first turn.
+
+The daemon compares the slot against the last time it *checked* the job, so an
+occurrence that fell between two ticks — a restart, a slow verification pass —
+is still seen. A job fires once per slot: the session title is
+`orch:cron:<name>:<epoch>`, so a restart, a duplicate tick, or a lost state file
+cannot replay it. A still-running previous run is skipped unless the entry sets
+`"overlap": "allow"`. Only trusted projects fire, and a bad entry is logged and
+ignored rather than taking the loop down. `"enabled": false` disables the block
+or one entry.
+
 ## Global hooks (machine-level notifications)
 
 Same contract as the project hooks — named after what happened, executable, fired
@@ -449,7 +501,7 @@ to the machine owner, and no project agent can touch them. `orch init` writes an
 inert `*.example` template for every event; copy one to its real name and
 `chmod +x`, and the daemon and CLI fire it.
 
-Besides the ten machine events below, `orch init` also scaffolds a
+Besides the eleven machine events below, `orch init` also scaffolds a
 `*.example` per opencode server event (the vocabulary in `src/orch/opencode_events.py`,
 dots mapped to dashes — `session.idle` → `session-idle.example`). The daemon's
 SSE consumer reads the shared service's `GET /api/event` stream and fires a copied
@@ -464,7 +516,7 @@ nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
 | Event | Fired when |
 | --- | --- |
 | `alert` | a task is blocked on a permission/question, or a project is untrusted |
-| `needs-review` | a task needs a human (dirty work, an empty branch, retries exhausted, conflict, missing worktree) |
+| `needs-review` | a task needs a human (dirty work, an empty branch, retries exhausted, an unresolved rebase conflict, a dirty base worktree, a legacy merge conflict, a missing worktree) |
 | `merged` | verified work merged into base (daemon verification pass or `orch task merge`) |
 | `removed` | a diff-less branch cleaned up after a pass, or by `orch task archive` |
 | `dispatched` | a task agent dispatched (`orch task start` or the scheduler) |
@@ -473,6 +525,7 @@ nothing. Hook output goes to `~/.local/state/orch/hooks/<event>.log`.
 | `restart-server` | the shared opencode service restarted |
 | `reset` | `orch task reset` |
 | `archived` | `orch task archive` |
+| `cron-fired` | a scheduled session was opened from a project's `cron` config |
 
 Every global hook runs with the full environment (they are the machine owner's own
 code); project hooks run with the filtered environment (a project can opt into the
@@ -524,9 +577,10 @@ an OS-level sandbox — orch does not provide one.
 Working and exercised against live agents: `init`, `verify`, `doctor`, `server`,
 `project create`/`trust`/`untrust`/`list`, `ask`, and `task add`/`start`/`list`/
 `answer`/`reset`/`archive`/`merge`,
-and the daemon — including the full loop of settle → verify → commit-on-pass → merge →
-archive, the failure loop of verify-fail → inject → bounded retry → `needs-review`, the
-hold path of an empty branch (committed nothing) → `needs-review`, and the **scheduler** (auto-dispatch
+and the daemon — including the full loop of settle → verify → commit-on-pass → catch-up rebase →
+re-verify → fast-forward → archive, the failure loop of verify-fail → inject → bounded retry →
+`needs-review`, the conflict path of rebase-conflict → prompt the task's own session → resolve →
+verify, the hold path of an empty branch (committed nothing) → `needs-review`, and the **scheduler** (auto-dispatch
 of `todo` tasks, on by default for `init`/`create` and off for clones, trust-bound). Task intake via the machine's
 `create_task`/`update_task`/`archive_task`/`delete_task` custom tools is exercised
 against live agents (an agent calling the tools writes, amends, moves, and removes
@@ -541,16 +595,15 @@ only alert), the **env filter** (agents and verification hooks run without the o
 the **`.orchestration` deny** installed by `orch install`.
 
 `orch daemon` supervises: it settles tasks, runs the committed verification hook itself, retriggers
-failing agents up to `retryCap`, merges verified work, archives done work, restarts a
-dead or unresponsive shared opencode service, flags blocked permissions, and consumes the
-shared service's `/api/event` SSE stream to fire per-event hooks. A **merge conflict**
-is left in progress and the task reads `needs-review (merge-conflict)`. Who resolves it
-follows `wait_human_start`: a task a human had to start needs the human to resolve it
-in the base worktree (`git add`/`git commit`); a machine-started task gets an agent
-dispatched into the base
-worktree to resolve and commit on its own (up to `retryCap` tries, then it escalates to
-a human). Either way, once the merge lands the daemon archives the task. The policy is
-a pure function of a snapshot, so those cases are tested rather than hoped for.
+failing agents up to `retryCap`, rebases a behind branch onto base in the task worktree, hands a
+rebase conflict to the task's own session, re-verifies the integrated tree, fast-forwards verified
+work, archives done work, restarts a dead or unresponsive shared opencode service, flags blocked
+permissions, and consumes the shared service's `/api/event` SSE stream to fire per-event hooks. A
+**dirty base worktree** blocks the merge for a human. A legacy base-side **merge conflict** is left
+in progress and the task reads `needs-review (merge-conflict)`; who resolves it follows
+`wait_human_start`: a human-started task is resolved by you in the base worktree, a machine-started
+task gets an agent dispatched into the base worktree (up to `retryCap` tries, then a human). The
+policy is a pure function of a snapshot, so those cases are tested rather than hoped for.
 
 **Stopped, finished and done are different things, and all three are derived from git.**
 Stopped means the session is idle. The agent declares done by committing its work — a
@@ -562,7 +615,10 @@ own verification and was merged. A task with a dirty tree at settle time is the 
 agent did not commit — the daemon still verifies it, and the hook commits the stragglers on
 a pass.
 
-Not built yet: routing `needs-review` onwards or unblocking a parent agent.
+Not built yet: routing the other `needs-review` classes (empty branch, dirty work,
+worktree gone) onwards, or unblocking a parent agent. Integration catch-up itself is
+built: a behind branch rebases in its own worktree, its agent resolves conflicts, the
+integrated tree is re-verified, and the merge is a fast-forward.
 
 The per-event hooks are live: the daemon's SSE consumer reads the server's
 `GET /api/event` stream and fires a copied, executable hook per event type in

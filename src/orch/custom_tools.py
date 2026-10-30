@@ -4,11 +4,13 @@ import os
 import shutil
 from pathlib import Path
 
-# Sources shipped with orch: the task-intake bridge. In OpenCode 2 custom tools
-# are registered by a *plugin* (there is no `tools/` directory any more), so orch
-# installs one plugin whose `setup` registers create_task/update_task/
-# archive_task/delete_task through `ctx.tool.transform`. The drafting guidance
-# lives in the tool descriptions themselves - a skill would only drift from them.
+# Sources shipped with orch: the task-intake and cron-job bridge. In OpenCode 2
+# custom tools are registered by a *plugin* (there is no `tools/` directory any
+# more), so orch installs one plugin whose `setup` registers
+# create_task/update_task/archive_task/delete_task and
+# list_jobs/add_job/update_job/remove_job through `ctx.tool.transform`. The
+# drafting guidance lives in the tool descriptions themselves - a skill would
+# only drift from them.
 _TOOLS_SRC = Path(__file__).resolve().parent / "tools"
 
 # The global plugin directory OpenCode 2 discovers for every project.

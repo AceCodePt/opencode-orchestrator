@@ -519,10 +519,17 @@ def _delete_message(what: str, rel: str, committed, base: str,
     return f"{what} {rel}; commit on {base} or pass commit: true to make it real"
 
 
-OPS = {"create": create, "update": update, "archive": archive, "delete": delete}
+OPS = {"create": create, "update": update, "archive": archive, "delete": delete,
+       "cron_list": None, "cron_add": None, "cron_update": None,
+       "cron_remove": None}
 
 
 def _run(op: str, args: dict, dir_: Path) -> dict:
+    if op.startswith("cron_"):
+        from . import cron
+
+        return {"ok": True, "op": op,
+                **cron.run(op[len("cron_"):], args, dir_)}
     top, common, base = _project(dir_)
     handler = OPS[op]
     result = handler(top, common, base, args)

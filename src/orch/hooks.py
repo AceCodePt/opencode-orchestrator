@@ -35,6 +35,7 @@ GLOBAL_HOOKS = {
     "resolve-failed": "automatic conflict resolution failed",
     "reset": "a task was reset to todo",
     "archived": "a task was closed and archived",
+    "cron-fired": "a scheduled session was opened from a project's cron config",
 }
 
 TASK_HOOKS = {

@@ -30,7 +30,8 @@ def test_ensure_installs_the_plugin_with_the_backend_path_baked_in() -> None:
             line.startswith("import ") or line.startswith("from ")
             for line in body.splitlines()
         ), "the plugin must not import @opencode/plugin (it is not always resolvable)"
-        for name in ("create_task", "update_task", "archive_task", "delete_task"):
+        for name in ("create_task", "update_task", "archive_task", "delete_task",
+                     "list_jobs", "add_job", "update_job", "remove_job"):
             assert f'name: "{name}"' in body, name
         assert "wait_human_start" in body, \
             "the drafting guidance lives in the tool description"

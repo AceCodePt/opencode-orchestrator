@@ -243,6 +243,11 @@ string cannot do this job.
 | `orch task reset <name>` | delete branch + worktree → back to `todo` (a deliberate human act) |
 | `orch task archive <name>` | close a reviewed `needs-review` task (delete + archive the spec) |
 | `orch task merge <name>` | re-run a merge after a conflict (omit `<name>` from the task's own worktree to merge that task) |
+| `orch cron list` | list the project's scheduled jobs from the base worktree's `.orchestration/config.json` (`--json` for scripts) |
+| `orch cron add [name]` | add a job; on a terminal it prompts for name, schedule, prompt, agent and model. Required: name, schedule, prompt/promptFile; agent and model are optional. Writes the base worktree config and commits it by default (`--no-commit` leaves it for review) |
+| `orch cron update <name>` | amend a job partially; `--schedule`, `--prompt`, `--prompt-file`, `--agent`, `--model`, `--overlap`, `--enabled/--disabled` |
+| `orch cron remove <name>` | remove a job and commit the config by default |
+| `list_jobs`/`add_job`/`update_job`/`remove_job` | machine-global opencode custom tools for the same jobs; they share the CLI's backend, so validation and commit behaviour cannot drift |
 | `orch verify` | inspect whether the committed verification hook is trustworthy |
 | `orch doctor` | verify the contracts that fail silently |
 | `orch verify --run` | run the committed verification hook here and say why |
@@ -281,7 +286,8 @@ unverified project.
   worktree that owns the session. `session.idle` is the one exception:
   that name is the verification hook, so it keeps the verification template.
 - `config.json` — `baseBranch`, `verify.retryCap`, `scheduler`
-  (`enabled`/`maxConcurrent`). Like the verification hook, the **committed copy on
+  (`enabled`/`maxConcurrent`), and `cron.jobs` (scheduled opencode jobs).
+  Like the verification hook, the **committed copy on
   the base branch**
   is the authority for these values (`orch project scheduler` writes the working-tree
   copy for a human to commit). A machine-wide cap lives outside the repo in
@@ -415,6 +421,38 @@ until a human runs `orch task start`; `wait_human_merge: true` verifies and comm
 task but leaves it ready — only `orch task merge <name>` folds it in. Both default to
 false, and both are read from the **committed** copy on base — never the working tree —
 so neither an agent nor an uncommitted edit can auto-grant or auto-wait a task.
+
+## Flow A″ — scheduled jobs (`cron`)
+
+The same committed config can declare jobs the daemon opens itself, without a
+task or a human:
+
+```json
+"cron": {
+  "jobs": [
+    { "name": "qa", "schedule": "0 9 * * *", "prompt": "Run the QA suite." },
+    { "name": "security", "schedule": "0 * * * *",
+      "promptFile": ".orchestration/prompts/security.md",
+      "model": "provider/model", "agent": "build" }
+  ]
+}
+```
+
+`name`, `schedule`, and `prompt`/`promptFile` are required; `model` and `agent`
+are optional. Each cycle the daemon reads every project's `cron.jobs`,
+evaluates the five-field schedule in local time, and compares it with the last
+time it checked the job (`~/.local/state/orch/cron.json`). An occurrence in
+`(last_check, now]` becomes a session on the base worktree with the prompt
+queued as the first turn. The title is `orch:cron:<name>:<epoch>`: the server's
+session list is the record, so a restart, a duplicated tick, or a lost state
+file cannot replay a slot. A still-running previous run is skipped unless the
+entry sets `"overlap": "allow"`.
+
+Only trusted projects fire, exactly like the scheduler, and an invalid entry is
+reported once and skipped rather than taking the reconcile loop down. Cron
+sessions are conversational: they are not tasks, are not verified, and are
+never merged — their work stays in the base worktree for a human (or a
+subsequent task) to pick up.
 
 ## Flow B — the verification loop
 

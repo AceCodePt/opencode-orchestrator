@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, hooks, harness, merge, observe, server, sse, state, verify
+from . import agent, cron, dispatch, hooks, harness, merge, observe, server, sse, state, verify
 from .harness import prompt_async
 
 SETTLE_BUDGET_S = 30
@@ -30,8 +30,10 @@ RESOLVE = "resolve"
 ALERT = "alert"
 NOTE = "note"
 CLEAR_ORPHANED = "clear-orphaned"
+CRON = "cron"
 
 LOG_NAME = "daemon.log"
+CRON_STATE_NAME = "cron.json"
 
 # The persistent log is a convenience mirror of journald, which already rotates.
 # A bug that logs per tick must not be able to fill the disk, so the file is
@@ -87,6 +89,8 @@ class Action:
     start: str | None = None
     wait_human_merge: bool = False
     orphaned: list[dict] = field(default_factory=list)
+    cron: cron.CronJob | None = None
+    slot: int | None = None
 
 
 @dataclass
@@ -107,7 +111,14 @@ class LoopState:
     dispatch_escaped: set[tuple[str, str]] = field(default_factory=set)
     resolve_retries: dict[tuple[str, str], int] = field(default_factory=dict)
     resolve_at: dict[tuple[str, str], int] = field(default_factory=dict)
+    catchup_prompted: dict[tuple[str, str], int] = field(default_factory=dict)
+    catchup_progress: dict[tuple[str, str], tuple[str, ...] | None] = \
+        field(default_factory=dict)
+    catchup_retries: dict[tuple[str, str], int] = field(default_factory=dict)
     merge_held_notified: set[tuple[str, str]] = field(default_factory=set)
+    cron_last: dict[tuple[str, str], int] = field(default_factory=dict)
+    cron_slot: dict[tuple[str, str], int] = field(default_factory=dict)
+    cron_warned: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -123,6 +134,8 @@ class Snapshot:
     trusted: set[str] = field(default_factory=set)
     global_max: int | None = None
     settle_budget: int = SETTLE_BUDGET_S
+    crons: list[cron.CronJob] = field(default_factory=list)
+    cron_errors: list[str] = field(default_factory=list)
 
 
 def project_label(project: str) -> str:
@@ -431,6 +444,7 @@ def decide(snap: Snapshot) -> list[Action]:
         mem.settled_at.pop(key, None)
 
     _schedule(snap, actions)
+    _cron(snap, actions)
     return actions
 
 
@@ -475,6 +489,41 @@ def _schedule(snap: Snapshot, actions: list[Action]) -> None:
             global_in_flight += 1
 
 
+def _cron(snap: Snapshot, actions: list[Action]) -> None:
+    """Turn each due cron schedule into a session-create action.
+
+    `cron_last` is when the daemon last *checked* the job, so an occurrence
+    that fell between two ticks - a restart, a slow verification pass - is
+    still seen. A freshly declared job starts with a one-minute window rather
+    than replaying history. Only trusted projects fire, exactly like the task
+    scheduler.
+    """
+    for err in snap.cron_errors:
+        if err in snap.mem.cron_warned:
+            continue
+        snap.mem.cron_warned.add(err)
+        actions.append(Action(NOTE, None, "cron config ignored", err))
+
+    for job in snap.crons:
+        if job.project not in snap.trusted:
+            continue
+        key = (job.project, job.name)
+        prev = snap.mem.cron_last.get(key)
+        if prev is None:
+            prev = snap.now - 60
+        slot = cron.due_slot(job.spec, prev, snap.now)
+        snap.mem.cron_last[key] = snap.now
+        if slot is None:
+            continue
+        snap.mem.cron_slot[key] = slot
+        actions.append(Action(
+            CRON, job.name, f"scheduled {job.schedule}",
+            detail=time.strftime("%Y-%m-%d %H:%M", time.localtime(slot)),
+            project=job.project, worktree=job.worktree or None,
+            start=job.worktree or None, port=snap.port, cron=job, slot=slot,
+        ))
+
+
 def _deps_satisfied(tasks: list[state.TaskState], t: state.TaskState) -> bool:
     """A todo task dispatches only when every dependency is archived (or was
     never declared — a missing slug cannot block). An open task with the same
@@ -505,6 +554,60 @@ class Supervisor:
         self._verify_log: list[str] = []
         self._session_map: dict[str, tuple[str, str, str]] = {}
         self._watcher: sse.EventWatcher | None = None
+        self._cron_saved_minute = -1
+        self._load_cron_state()
+
+    def _load_cron_state(self) -> None:
+        """Restore each job's last-check/last-slot from orch's private state, so
+        a daemon restart can tell which occurrences it missed and which it
+        already fired. A missing or corrupt file is simply "nothing checked
+        yet" - the session title still prevents a replay."""
+        try:
+            raw = json.loads((server.state_dir() / CRON_STATE_NAME).read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        for project, jobs in raw.items():
+            if not isinstance(jobs, dict):
+                continue
+            for name, entry in jobs.items():
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    check = int(entry.get("last_check") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if check > 0:
+                    self.mem.cron_last[(str(project), str(name))] = check
+                try:
+                    slot = int(entry.get("last_slot") or 0)
+                except (TypeError, ValueError):
+                    slot = 0
+                if slot > 0:
+                    self.mem.cron_slot[(str(project), str(name))] = slot
+
+    def _save_cron_state(self, snap: Snapshot) -> None:
+        """Persist the jobs' last-check/last-slot in one atomic write. It is
+        written at most once a minute (or immediately after a fire) rather than
+        on every one-second tick."""
+        if not snap.crons and not self.mem.cron_last:
+            return
+        data: dict[str, dict[str, dict[str, int]]] = {}
+        for job in snap.crons:
+            key = (job.project, job.name)
+            entry = {"last_check": int(snap.mem.cron_last.get(key, snap.now))}
+            slot = snap.mem.cron_slot.get(key)
+            if slot:
+                entry["last_slot"] = int(slot)
+            data.setdefault(job.project, {})[job.name] = entry
+        path = server.state_dir() / CRON_STATE_NAME
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            tmp.replace(path)
+        except OSError:
+            pass
 
     def start_event_watcher(self) -> None:
         self._watcher = sse.EventWatcher(resolver=self._session_owner)
@@ -540,6 +643,8 @@ class Supervisor:
         tasks: list[state.TaskState] = []
         policies: dict[str, state.SchedulerPolicy] = {}
         session_map: dict[str, tuple[str, str, str]] = {}
+        crons: list[cron.CronJob] = []
+        cron_errors: list[str] = []
         for common, orch in self._discover().items():
             proj = state.Project(Path(common), orch,
                                  state.base_from_config(orch))
@@ -549,11 +654,15 @@ class Supervisor:
                 if t.worktree:
                     for sid in t.session_ids:
                         session_map.setdefault(sid, (common, proj.base, t.worktree))
-            pol = state.scheduler_from_config(
-                state.committed_config(common, proj.base))
+            cfg = state.committed_config(common, proj.base)
+            pol = state.scheduler_from_config(cfg)
             if pol.enabled:
                 pol.start = proj.base_worktree
             policies[str(common)] = pol
+            jobs, errors = cron.jobs_from_config(
+                cfg, str(common), proj.base_worktree, proj.base)
+            crons.extend(jobs)
+            cron_errors.extend(errors)
         self._session_map = session_map
 
         return Snapshot(
@@ -567,7 +676,158 @@ class Supervisor:
             trusted=state.trusted_projects(),
             global_max=state.machine_budget(),
             settle_budget=state.machine_settle_budget() or SETTLE_BUDGET_S,
+            crons=crons,
+            cron_errors=cron_errors,
         )
+
+    def _verify_failed(self, a: Action, v: verify.Result,
+                       log: list[str]) -> None:
+        """Count a verification failure, inject it into the task's own session
+        when there is one, and escalate to a human once the cap is spent."""
+        key = (a.project or "", a.task or "")
+        retries = self.mem.retries.get(key, 0) + 1
+        self.mem.retries[key] = retries
+        self.mem.fingerprint[key] = state.fingerprint(Path(a.worktree or ""))
+        self.mem.last_fail[key] = int(time.time())
+        self.mem.injected_at[key] = int(time.time())
+        cap = a.retry_cap or 3
+
+        if retries >= cap:
+            log.append(f"{a.task} -> needs-review (retries-exhausted "
+                       f"{retries}/{cap})")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self.mem.fingerprint.pop(key, None)
+            return
+
+        if not a.session_ids:
+            log.append(f"{a.task} -> needs-review (verification failed, no session left "
+                       f"to retrigger)")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            return
+
+        text = (
+            f"The `session-idle` verification hook failed (attempt {retries}/{cap}). "
+            f"Fix these, then continue:\n\n```\n{v.detail}\n```"
+        )
+        if not a.port:
+            log.append(f"{a.task} -> needs-review (no server to inject into)")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            return
+        try:
+            prompt_async(a.port, a.session_ids[0], text)
+            log.append(f"injected failure (attempt {retries}/{cap}) into "
+                       f"session {a.session_ids[0]}")
+        except Exception as e:  # noqa: BLE001
+            log.append(f"could not inject: {e}")
+            self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+
+    def _prompt_catchup(self, a: Action, log: list[str]) -> bool:
+        """Tell the agent that owns the task worktree to finish a rebase that
+        stopped on conflicts. It is the session already bound to that worktree;
+        a fresh one is created only when the task has none left."""
+        key = (a.project or "", a.task or "")
+        wt = Path(a.worktree or "")
+        if not a.port:
+            log.append("no shared server to tell the task's agent about the "
+                       "rebase conflict")
+            return False
+        sid = a.session_ids[0] if a.session_ids else ""
+        if not sid:
+            try:
+                sid = agent.ensure_task(a.port, wt, a.task or "")
+                log.append(f"task {a.task} has no live session; using {sid} "
+                           f"in its worktree")
+            except Exception as e:  # noqa: BLE001
+                log.append(f"could not find or create the task's session: {e}")
+                return False
+        try:
+            prompt_async(a.port, sid,
+                         dispatch.catchup_prompt(a.task or "", a.base or "main"))
+        except Exception as e:  # noqa: BLE001
+            log.append(f"could not prompt session {sid} about the rebase "
+                       f"conflict: {e}")
+            return False
+        attempts = self.mem.catchup_retries.get(key, 0) + 1
+        self.mem.catchup_retries[key] = attempts
+        self.mem.catchup_prompted[key] = int(time.time())
+        self.mem.catchup_progress[key] = state._rebase_progress(wt)
+        log.append(f"told session {sid} (attempt {attempts}/{a.retry_cap or 3}) "
+                   f"to resolve the rebase conflict in its worktree")
+        return True
+
+    def _catch_up(self, a: Action, log: list[str]) -> tuple[bool, bool]:
+        """Rebase the task branch onto base when base has moved ahead. Return
+        (carry_on, rebased). carry_on is False when this attempt must stop (a
+        conflict was left for the task's own agent, or the rebase failed)."""
+        key = (a.project or "", a.task or "")
+        wt = Path(a.worktree or "")
+        project = Path(a.project or "")
+        base = a.base or "main"
+        branch = a.branch or ""
+        if not branch or not wt.is_dir():
+            return True, False
+        if state._rebasing(wt):
+            cap = a.retry_cap or 3
+            now = int(time.time())
+            progress = state._rebase_progress(wt)
+            previous = self.mem.catchup_progress.get(key)
+            if previous is not None and progress != previous:
+                # The rebase step advanced: the agent committed a resolution or
+                # continued past a commit. That is progress, not a stuck prompt,
+                # so a fresh stop at the next conflict may prompt immediately.
+                log.append(f"{a.task} -> the rebase advanced; resetting the "
+                           f"stuck count")
+                self.mem.catchup_retries.pop(key, None)
+                self.mem.catchup_prompted.pop(key, None)
+            self.mem.catchup_progress[key] = progress
+
+            attempts = self.mem.catchup_retries.get(key, 0)
+            if attempts >= cap:
+                log.append(f"{a.task} -> needs-review (rebase conflict "
+                           f"unresolved after {attempts} prompt(s))")
+                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+                return False, False
+            last = self.mem.catchup_prompted.get(key, 0)
+            if last and now - last < RETRIGGER_GRACE_S:
+                # The session is idle (decide only gets here when it is), but
+                # give the queued turn a moment before nudging again.
+                log.append(f"{a.task} -> waiting for the task's agent to finish "
+                           f"the rebase")
+                self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+                return False, False
+            self._prompt_catchup(a, log)
+            self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+            return False, False
+
+        self.mem.catchup_prompted.pop(key, None)
+        self.mem.catchup_progress.pop(key, None)
+        self.mem.catchup_retries.pop(key, None)
+        if not state._diff(project, base, branch):
+            # Nothing of the task's own to carry: an empty branch is the
+            # existing "held for review" case, never a rebase.
+            return True, False
+        if not state._behind(project, base, branch):
+            return True, False
+        if state._dirty(wt):
+            log.append("the worktree became dirty; not rebasing")
+            self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+            return False, False
+
+        r = merge.rebase_onto(wt, base)
+        for s in r.steps:
+            log.append(s)
+        for p in r.problems:
+            log.append(f"! {p}")
+        if r.ok:
+            return True, True
+        if r.conflicted:
+            self._prompt_catchup(a, log)
+        self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+        return False, False
 
     def _verify(self, a: Action) -> None:
         key = (a.project or "", a.task or "")
@@ -575,6 +835,14 @@ class Supervisor:
         log: list[str] = []
         wt = Path(a.worktree or "")
         sid = a.session_ids[0] if a.session_ids else ""
+
+        # A rebase left in progress is not "dirty work to verify": the tree is
+        # mid-integration. Hand it back to the task's own agent and wait; never
+        # run the acceptance hook against half-resolved conflicts.
+        if state._rebasing(wt):
+            self._catch_up(a, log)
+            self._verify_log = log
+            return
 
         v = verify.run(wt, "session-idle", base=a.base or "main",
                        session_id=sid)
@@ -585,47 +853,7 @@ class Supervisor:
                        f"accepted without verification")
             _commit_dirty(wt, "orch: accepted without verification")
         elif not v.justifies_done:
-            retries = self.mem.retries.get(key, 0) + 1
-            self.mem.retries[key] = retries
-            self.mem.fingerprint[key] = state.fingerprint(wt)
-            self.mem.last_fail[key] = int(time.time())
-            self.mem.injected_at[key] = int(time.time())
-            cap = a.retry_cap or 3
-
-            if retries >= cap:
-                log.append(f"{a.task} -> needs-review (retries-exhausted "
-                           f"{retries}/{cap})")
-                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-                self.mem.fingerprint.pop(key, None)
-                self._verify_log = log
-                return
-
-            if not a.session_ids:
-                log.append(f"{a.task} -> needs-review (verification failed, no session left "
-                           f"to retrigger)")
-                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-                self._verify_log = log
-                return
-
-            text = (
-                f"The `session-idle` verification hook failed (attempt {retries}/{cap}). "
-                f"Fix these, then continue:\n\n```\n{v.detail}\n```"
-            )
-            if not a.port:
-                log.append(f"{a.task} -> needs-review (no server to inject into)")
-                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
-                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
-                self._verify_log = log
-                return
-            try:
-                prompt_async(a.port, a.session_ids[0], text)
-                log.append(f"injected failure (attempt {retries}/{cap}) into "
-                           f"session {a.session_ids[0]}")
-            except Exception as e:  # noqa: BLE001
-                log.append(f"could not inject: {e}")
-                self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+            self._verify_failed(a, v, log)
             self._verify_log = log
             return
 
@@ -658,6 +886,47 @@ class Supervisor:
             log.append(f"{a.task} -> awaiting your merge (wait_human_merge)")
             self._verify_log = log
             return
+
+        base_wt = state._base_worktree(Path(a.project or ""), a.base or "main")
+        if base_wt is not None and state._dirty(base_wt):
+            log.append("the base worktree has uncommitted work; refusing to "
+                       "catch up or merge over it")
+            log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+            self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+            self._verify_log = log
+            return
+
+        # Base may have advanced while the agent worked or while verification
+        # ran. Rebase onto it in the task worktree, then verify the integrated
+        # tree again: integration is exactly where a green branch can break.
+        carry_on, rebased = self._catch_up(a, log)
+        if not carry_on:
+            self._verify_log = log
+            return
+        if rebased:
+            if state._behind(Path(a.project or ""), a.base or "main",
+                             a.branch or "") or state._rebasing(wt):
+                log.append("the branch did not settle onto base; not merging")
+                self.mem.wait_until[key] = int(time.time()) + RETRIGGER_GRACE_S
+                self._verify_log = log
+                return
+            v2 = verify.run(wt, "session-idle", base=a.base or "main",
+                            session_id=sid)
+            log.append(f"verify (after catch-up) {v2.summary}")
+            if v2.outcome == verify.NO_VERIFY:
+                _commit_dirty(wt, "orch: accepted without verification")
+            elif not v2.justifies_done:
+                self._verify_failed(a, v2, log)
+                self._verify_log = log
+                return
+            if state._dirty(wt):
+                log.append("the work is still uncommitted after catch-up; "
+                           "reviewing rather than merging")
+                log.extend(self._fire_hook("needs-review", _hook_env(a), _hook_cwd(a)))
+                self.mem.wait_until[key] = int(time.time()) + REVIEW_BACKOFF_S
+                self._verify_log = log
+                return
+
         r = merge.merge_and_cleanup(Path(a.project or ""), a.task or "",
                                     a.branch or "", wt, a.base or "main")
         for s in r.steps:
@@ -665,10 +934,57 @@ class Supervisor:
         for p in r.problems:
             log.append(f"! {p}")
         if not r.ok:
-            self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
+            if r.retry:
+                log.append("base moved again; catching up on the next settle")
+            else:
+                self.mem.wait_until[key] = int(time.time()) + MERGE_BACKOFF_S
         else:
             log.extend(self._fire_hook("merged", _hook_env(a), _hook_cwd(a)))
         self._verify_log = log
+
+    def _fire_cron(self, a: Action) -> list[str]:
+        """Open a session for one due slot and queue its prompt. The title
+        carries the slot, so running this twice is harmless; an active previous
+        run is skipped unless the job explicitly allows overlap."""
+        log: list[str] = []
+        job = a.cron
+        if job is None:
+            return log
+        if not a.port:
+            log.append(f"-> {job.name}: no shared opencode service to open the session on")
+            return log
+        if not a.start or not os.path.isdir(a.start):
+            log.append(f"-> {job.name}: no base worktree to bind the session to")
+            return log
+        wt = os.path.realpath(a.start)
+        title = f"{cron.TITLE_PREFIX}{job.name}:{a.slot}"
+        sessions = harness.sessions(a.port, directory=wt)
+        if any(str(s.get("title") or "") == title for s in sessions):
+            log.append(f"-> {title} already exists; skipping")
+            return log
+        if job.overlap != "allow":
+            active = harness.active_sessions(a.port)
+            if any(str(s.get("title") or "").startswith(job.title_prefix)
+                   and str(s.get("id") or "") in active for s in sessions):
+                log.append(f"-> {job.name} is still running; skipping this slot")
+                return log
+        try:
+            sess = harness.create_session(a.port, wt, title=title,
+                                          agent=job.agent, model=job.model)
+            sid = str((sess or {}).get("id") or "")
+            if not sid:
+                raise harness.HarnessError("the server did not return a session id")
+            prompt_async(a.port, sid, job.prompt)
+        except Exception as e:  # noqa: BLE001
+            log.append(f"-> could not open {title}: {e}")
+            return log
+        log.append(f"-> opened {title} session={sid}")
+        log.extend(self._fire_hook(
+            "cron-fired",
+            _hook_env(a, {"ORCH_CRON_SLOT": str(a.slot)}),
+            _hook_cwd(a),
+        ))
+        return log
 
     def _dispatch(self, a: Action) -> list[str]:
         key = (a.project or "", a.task or "")
@@ -771,6 +1087,8 @@ class Supervisor:
                         log.append(f"  -> cleared orphaned ask {rid}")
                     except Exception as e:  # noqa: BLE001
                         log.append(f"  -> could not clear orphaned ask {rid}: {e}")
+            elif a.kind == CRON:
+                log.extend(f"  -> {l}" for l in self._fire_cron(a))
             elif a.kind == DISPATCH and a.project:
                 log.extend(f"  -> {l}" for l in self._dispatch(a))
             elif a.kind == RESOLVE and a.project:
@@ -804,7 +1122,15 @@ class Supervisor:
         return log
 
     def step(self) -> list[str]:
-        return self.apply(decide(self.snapshot()))
+        snap = self.snapshot()
+        actions = decide(snap)
+        log = self.apply(actions)
+        minute = snap.now // 60
+        if not self.dry_run and (minute != self._cron_saved_minute
+                                 or any(a.kind == CRON for a in actions)):
+            self._save_cron_state(snap)
+            self._cron_saved_minute = minute
+        return log
 
 
 def _stale_target() -> Path | None:

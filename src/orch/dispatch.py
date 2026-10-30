@@ -233,6 +233,23 @@ RESOLVE_PROMPT = (
 )
 
 
+def catchup_prompt(task: str, base: str) -> str:
+    """Tell the task's own agent to finish a rebase that stopped on conflicts
+    in its worktree. It knows the code it wrote; the base is untouched."""
+    return (
+        f"The base branch `{base}` moved ahead while task `{task}` was being "
+        f"worked on. This branch is being rebased onto `{base}` and the rebase "
+        f"stopped on a conflict. Resolve every conflict in this worktree hunk "
+        f"by hunk, preserving the intent of both sides: do not take one side "
+        f"wholesale (`git checkout --ours/--theirs`, `-X ours/theirs`, or `git "
+        f"rebase --skip`). Where the sides disagree about this task's own "
+        f"change, `tasks/{task}/task.md` stays authoritative. Run the project's "
+        f"checks, then `git add` the resolved files and `git rebase --continue`. "
+        f"Do not merge into the base branch and do not add unrelated changes. "
+        f"Leave the worktree clean when the rebase completes."
+    )
+
+
 def start_resolve(base_wt: Path, task: str) -> Result:
     """Start an agent to resolve <task>'s merge conflict in the base worktree,
     which is mid-merge (MERGE_HEAD set). The agent must resolve and commit."""

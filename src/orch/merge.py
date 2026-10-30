@@ -18,6 +18,7 @@ class MergeResult:
     steps: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     conflicted: bool = False
+    retry: bool = False
 
     def step(self, msg: str) -> None:
         self.steps.append(msg)
@@ -136,6 +137,31 @@ def _remove_worktree_and_branch(
     dispatch.run_hook(base_wt, "post-task-cleanup", env)
 
 
+def rebase_onto(worktree: Path, base: str) -> MergeResult:
+    """Rebase the task branch onto <base> inside its own worktree, so the base
+    is never left mid-merge. A conflict is left in progress: the task's agent
+    resolves it there, with the code it already knows, and the daemon verifies
+    the integrated tree before merging it forward."""
+    r = MergeResult()
+    wt = Path(worktree)
+    code, out = _git(wt, "rebase", base)
+    if code == 0:
+        r.step(f"rebased onto {base}")
+        return r
+    if state._rebasing(wt):
+        r.conflicted = True
+        r.fail(
+            "the rebase onto base conflicts. It is left in progress in the task "
+            "worktree: resolve the files, `git add` them, then `git rebase "
+            "--continue`. The base is untouched."
+        )
+        return r
+    # Not a conflict: undo any partial state so the worktree stays usable.
+    _git(wt, "rebase", "--abort")
+    r.fail(f"rebase onto {base} failed: {out[-1500:]}")
+    return r
+
+
 def merge_and_cleanup(
     common: Path,
     name: str,
@@ -156,6 +182,11 @@ def merge_and_cleanup(
                "finish or abort that merge first")
         return r
 
+    if state._dirty(base_wt):
+        r.fail(f"the base worktree {base_wt} has uncommitted work; commit or "
+               f"stash it before merging, so no human change is swept in")
+        return r
+
     if not wt.exists():
         r.fail(f"worktree {wt} no longer exists")
         return r
@@ -164,22 +195,27 @@ def merge_and_cleanup(
                f"branch is merged. The verification hook must have passed and committed.")
         return r
 
-    code, out = _git(base_wt, "merge", "--no-edit", "--no-ff", branch)
+    if state._behind(common, base, branch):
+        # A fast-forward cannot land a branch that is missing base commits. The
+        # daemon catches the branch up and re-verifies first; refuse rather than
+        # create a merge commit that nobody verified.
+        r.retry = True
+        r.fail(f"{branch} is behind {base}; catch it up (rebase) and verify the "
+               f"integrated tree before merging")
+        return r
+
+    code, out = _git(base_wt, "merge", "--ff-only", branch)
     if code != 0:
         _rc, head = _git(base_wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")
         if _rc == 0 and head:
-            r.conflicted = True
-            r.fail(
-                "the merge into base conflicts. It is left in progress so the task "
-                "shows needs-review (merge-conflict); resolve it in the base "
-                "worktree (fix the files, git add, git commit). Once the merge "
-                "lands, the daemon archives the task."
-            )
-        else:
             _git(base_wt, "merge", "--abort")
-            r.fail(f"merge failed: {out[-1500:]}")
-            r.fail(f"the branch {branch} was NOT merged and the worktree survives. "
-                   f"Resolve the conflict, then `orch task merge {name}`.")
+        if state._behind(common, base, branch):
+            r.retry = True
+            r.fail(f"{base} advanced while {branch} was being checked; catch it "
+                   f"up again and re-verify")
+        else:
+            r.fail(f"the merge into {base} is not a fast-forward: {out[-1500:]}. "
+                   f"The branch {branch} was NOT merged and the worktree survives.")
         return r
     r.step(f"merged {branch} into {base}")
 

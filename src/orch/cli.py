@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import agent as agent_mod
+from . import cron as cron_mod
 from . import daemon as daemon_mod
 from . import dispatch as dispatch_mod
 from . import doctor as doctor_mod
@@ -235,6 +236,10 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             state_info += " merge-wait"
         if t.dependencies:
             state_info += " deps=[" + ",".join(t.dependencies) + "]"
+        if t.rebasing:
+            state_info += " rebasing"
+        elif t.behind:
+            state_info += " behind"
         if t.dirty:
             state_info += " dirty"
         elif t.diff:
@@ -282,6 +287,9 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None) -> tuple[str | None
     if t.conflicted:
         return "needs-you", f"resolve the merge conflict in {_q(base_wt)}", \
             "merge conflict in progress"
+    if t.rebasing:
+        return "looks-done", None, \
+            "rebase in progress: the task's own agent is resolving it"
     if t.interrupted and (t.dirty or t.diff):
         return "needs-you", f"orch task archive -C {_q(base_wt)} {t.name}", \
             "interrupted: the turn was aborted (a user stop); the work is held for you to verify"
@@ -384,6 +392,8 @@ def _task_json(t: state.TaskState) -> dict:
         "worktree": t.worktree,
         "dirty": t.dirty,
         "diff": t.diff,
+        "behind": t.behind,
+        "rebasing": t.rebasing,
         "session": t.session,
         "session_ids": t.session_ids,
         "dispatch_alive": t.dispatch_alive,
@@ -1483,6 +1493,138 @@ def cmd_project_hooks_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cron_help(args: argparse.Namespace) -> int:
+    args._cparser.print_help()
+    return 0
+
+
+def _cron_start(args: argparse.Namespace) -> Path:
+    return Path(args.directory) if getattr(args, "directory", None) else Path.cwd()
+
+
+def cmd_cron_list(args: argparse.Namespace) -> int:
+    try:
+        r = cron_mod.list_jobs(_cron_start(args))
+    except cron_mod.CronToolError as e:
+        print(f"  ! {e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(r, indent=2))
+        return 0
+    print(f"cron: {'on' if r['enabled'] else 'off'}  ({r['path']})")
+    if not r["jobs"]:
+        print("  no jobs")
+    for j in r["jobs"]:
+        flags: list[str] = []
+        if j.get("agent"):
+            flags.append(f"agent={j['agent']}")
+        if j.get("model"):
+            flags.append(f"model={j['model']}")
+        if j.get("overlap") == "allow":
+            flags.append("overlap=allow")
+        if not j.get("enabled", True):
+            flags.append("disabled")
+        if not j.get("valid", True):
+            flags.append("INVALID")
+        line = f"  {j['name']:<24} {str(j.get('schedule') or '-'):<18} {' '.join(flags)}"
+        print(line.rstrip())
+    for e in r["errors"]:
+        print(f"  ! {e}", file=sys.stderr)
+    return 0
+
+
+def cmd_cron_add(args: argparse.Namespace) -> int:
+    interactive = _interactive()
+    name = args.name
+    schedule = args.schedule
+    prompt = args.prompt
+    prompt_file = args.prompt_file
+    agent = args.agent
+    model = args.model
+    if interactive:
+        if not name:
+            name = _prompt("job name: ") or None
+        if not schedule:
+            schedule = _prompt(
+                "cron schedule (minute hour day month weekday) [0 9 * * *]: ") \
+                or "0 9 * * *"
+        if not prompt and not prompt_file:
+            prompt = _prompt("prompt (inline markdown): ") or None
+        if not agent:
+            agent = _prompt("agent (optional): ") or None
+        if not model:
+            model = _prompt("model (optional, provider/model): ") or None
+    data: dict = {"name": name, "schedule": schedule, "prompt": prompt,
+                  "promptFile": prompt_file, "agent": agent, "model": model}
+    if args.overlap is not None:
+        data["overlap"] = args.overlap
+    try:
+        r = cron_mod.add_job(_cron_start(args), data, commit=not args.no_commit)
+    except cron_mod.CronToolError as e:
+        print(f"  ! {e}", file=sys.stderr)
+        return 1
+    print(f"  {r['message']}")
+    return 0
+
+
+def cmd_cron_update(args: argparse.Namespace) -> int:
+    start = _cron_start(args)
+    data: dict = {"name": args.name}
+    for key, value in (("schedule", args.schedule), ("prompt", args.prompt),
+                       ("promptFile", args.prompt_file), ("agent", args.agent),
+                       ("model", args.model), ("overlap", args.overlap),
+                       ("enabled", args.enabled)):
+        if value is not None:
+            data[key] = value
+    if len(data) == 1 and _interactive():
+        try:
+            listing = cron_mod.list_jobs(start)
+        except cron_mod.CronToolError as e:
+            print(f"  ! {e}", file=sys.stderr)
+            return 1
+        slug = dispatch_mod.slug(args.name)
+        job = next((j for j in listing["jobs"] if j["name"] == slug), None)
+        if job is None:
+            print(f"  ! no cron job named {args.name!r}", file=sys.stderr)
+            return 1
+        schedule = _prompt(f"schedule [{job.get('schedule')}]: ")
+        if schedule:
+            data["schedule"] = schedule
+        prompt = _prompt("prompt (blank keeps the current one; use "
+                         "--prompt-file for a file): ")
+        if prompt:
+            data["prompt"] = prompt
+        agent = _prompt(f"agent [{job.get('agent') or 'none'}]: ")
+        if agent:
+            data["agent"] = agent
+        model = _prompt(f"model [{job.get('model') or 'none'}]: ")
+        if model:
+            data["model"] = model
+    if len(data) == 1:
+        print("  ! nothing to change: pass --schedule, --prompt, --prompt-file, "
+              "--agent, --model, --overlap, --enabled/--disabled",
+              file=sys.stderr)
+        return 2
+    try:
+        r = cron_mod.update_job(start, data, commit=not args.no_commit)
+    except cron_mod.CronToolError as e:
+        print(f"  ! {e}", file=sys.stderr)
+        return 1
+    print(f"  {r['message']}")
+    return 0
+
+
+def cmd_cron_remove(args: argparse.Namespace) -> int:
+    try:
+        r = cron_mod.remove_job(_cron_start(args), {"name": args.name},
+                                commit=not args.no_commit)
+    except cron_mod.CronToolError as e:
+        print(f"  ! {e}", file=sys.stderr)
+        return 1
+    print(f"  {r['message']}")
+    return 0
+
+
 def cmd_version(_: argparse.Namespace) -> int:
     print(f"orch {__version__}")
     return 0
@@ -1754,6 +1896,59 @@ def build_parser() -> argparse.ArgumentParser:
     hkc.add_argument("--force", action="store_true",
                      help="overwrite an existing hook file")
     hkc.set_defaults(func=cmd_project_hooks_create)
+
+    cr = sub.add_parser("cron", help="manage scheduled opencode jobs")
+    cr.set_defaults(func=cmd_cron_help, _cparser=cr)
+    crsub = cr.add_subparsers(dest="cron_cmd", metavar="<command>",
+                              title="cron commands")
+
+    cl = crsub.add_parser("list", help="list the project's cron jobs")
+    cl.add_argument("-C", "--directory")
+    cl.add_argument("--json", action="store_true",
+                    help="machine-readable output")
+    cl.set_defaults(func=cmd_cron_list)
+
+    ca = crsub.add_parser("add", help="add a cron job")
+    ca.add_argument("name", nargs="?",
+                    help="job name (prompts when omitted on a terminal)")
+    ca.add_argument("--schedule",
+                    help="five-field cron: minute hour day month weekday")
+    ca.add_argument("--prompt", help="inline markdown prompt")
+    ca.add_argument("--prompt-file", dest="prompt_file",
+                    help="path to a committed markdown prompt file")
+    ca.add_argument("--agent", help="opencode agent name (optional)")
+    ca.add_argument("--model", help="provider/model (optional)")
+    ca.add_argument("--overlap", choices=["skip", "allow"],
+                    help="skip a still-running previous run (default) or allow it")
+    ca.add_argument("--no-commit", action="store_true",
+                    help="write the config but leave it uncommitted")
+    ca.add_argument("-C", "--directory")
+    ca.set_defaults(func=cmd_cron_add)
+
+    cu = crsub.add_parser("update", help="update a cron job")
+    cu.add_argument("name", help="the job to update")
+    cu.add_argument("--schedule",
+                    help="replacement five-field cron schedule")
+    cu.add_argument("--prompt", help="replacement inline markdown prompt")
+    cu.add_argument("--prompt-file", dest="prompt_file",
+                    help="replacement committed prompt file")
+    cu.add_argument("--agent", help="replacement opencode agent name")
+    cu.add_argument("--model", help="replacement provider/model")
+    cu.add_argument("--overlap", choices=["skip", "allow"])
+    cu.add_argument("--enabled", dest="enabled", action="store_true",
+                    default=None, help="enable the job")
+    cu.add_argument("--disabled", dest="enabled", action="store_false",
+                    help="pause the job")
+    cu.add_argument("--no-commit", action="store_true")
+    cu.add_argument("-C", "--directory")
+    cu.set_defaults(func=cmd_cron_update)
+
+    crr = crsub.add_parser("remove", help="remove a cron job")
+    crr.add_argument("name", help="the job to remove")
+    crr.add_argument("--no-commit", action="store_true",
+                     help="write the config but leave it uncommitted")
+    crr.add_argument("-C", "--directory")
+    crr.set_defaults(func=cmd_cron_remove)
 
     g = sub.add_parser("verify", help="can this project's verification hook be trusted")
     g.add_argument("-C", "--directory")

@@ -513,6 +513,72 @@ def _diff(common: Path, base: str, branch: str) -> bool:
     return rc == 0 and out.strip() not in ("", "0")
 
 
+def _behind(common: Path, base: str, branch: str) -> bool:
+    """True if <base> has commits <branch> does not contain. A task behind its
+    base has to be caught up before it can fast-forward into base."""
+    rc, out = _git(common, "rev-list", "--count", f"{branch}..{base}")
+    return rc == 0 and out.strip() not in ("", "0")
+
+
+def _rebase_state_dir(worktree: Path) -> Path | None:
+    """The directory holding an in-progress rebase's state, if any."""
+    for state_dir in ("rebase-merge", "rebase-apply"):
+        rc, out = _git(worktree, "rev-parse", "--git-path", state_dir)
+        path = out.strip()
+        if rc != 0 or not path:
+            continue
+        p = Path(path)
+        if not p.is_absolute():
+            p = worktree / p
+        if p.exists():
+            return p
+    return None
+
+
+def _rebasing(worktree: Path) -> bool:
+    """True if the task worktree is mid-rebase (either backend). That is how a
+    catch-up that hit conflicts is left: the task's own agent resolves it."""
+    return _rebase_state_dir(worktree) is not None
+
+
+def _rebase_progress(worktree: Path) -> tuple[str, ...] | None:
+    """How far an in-progress rebase has advanced. HEAD alone is not enough:
+    while the agent edits a conflicted tree, HEAD stays at the commit the rebase
+    stopped on. `msgnum` (merge backend) or `next` (apply backend) moves on
+    `git rebase --continue`, and `stopped-sha` names the commit that stopped.
+    None when there is no rebase."""
+    st = _rebase_state_dir(worktree)
+    if st is None:
+        return None
+
+    def read(name: str) -> str:
+        try:
+            return (st / name).read_text().strip()
+        except OSError:
+            return ""
+
+    if (st / "msgnum").exists():
+        count = (read("msgnum"), read("end"))
+    else:
+        count = (read("next"), read("last"))
+    _rc, head = _git(worktree, "rev-parse", "HEAD")
+    return (*count, read("stopped-sha"), head.strip())
+
+
+def _rebase_branch(worktree: Path) -> str | None:
+    """The branch a detached worktree is rebasing, read from the rebase state.
+    `git worktree list` reports no branch while HEAD is detached mid-rebase, so
+    this is what re-attaches the worktree to its task."""
+    st = _rebase_state_dir(worktree)
+    if st is None:
+        return None
+    try:
+        name = (st / "head-name").read_text().strip()
+    except OSError:
+        return None
+    return name.removeprefix("refs/heads/") or None
+
+
 def _pids() -> list[int]:
     _rc, out = _cmd(["pgrep", "-x", "opencode"])
     return [int(x) for x in out.split() if x.isdigit()]
@@ -610,6 +676,8 @@ class TaskState:
     worktree: str | None = None
     dirty: bool = False
     diff: bool = False
+    behind: bool = False
+    rebasing: bool = False
     session: str = SESSION_NONE
     session_ids: list[str] = field(default_factory=list)
     blocked: list[observe.Blocked] = field(default_factory=list)
@@ -656,7 +724,16 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
     base = proj.base
     declared = _names_in(common, base, TASKS_REL)
     archived = _names_in(common, base, ARCHIVE_REL)
-    wt_by_branch = {b: p for p, b in _worktrees(common)}
+    wts = _worktrees(common)
+    wt_by_branch = {b: p for p, b in wts if b}
+    # Mid-rebase the task worktree's HEAD is detached, so `worktree list`
+    # reports no branch at all. Re-attach it from the rebase state, or the scan
+    # would call the task's worktree missing and lose the rebase marker.
+    for path, branch in wts:
+        if branch is None:
+            rebasing = _rebase_branch(path)
+            if rebasing:
+                wt_by_branch.setdefault(rebasing, path)
     # A task claim is a branch that is either a known task slug (declared or
     # archived) or has a live worktree. A long-lived branch that is neither (a
     # project's `main` alongside a `preview` base, say) is not a task, and must
@@ -699,6 +776,8 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
         if wt is not None and wt.is_dir():
             st.dirty = _dirty(wt)
             st.diff = _diff(common, base, name)
+            st.behind = _behind(common, base, name)
+            st.rebasing = _rebasing(wt)
             if port:
                 tf = observe.look_task(port, str(wt))
                 if tf is not None:
