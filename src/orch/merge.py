@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, server, state, verify
+from . import dispatch, harness, server, state, verify
 
 TASKS_REL = "tasks"
 
@@ -72,6 +72,43 @@ def _kill_dispatch(worktree: Path) -> None:
             pass
 
 
+def _short(text: object, limit: int = 80) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _stop_location_workers(worktree: Path) -> list[str]:
+    """Terminate shell commands and PTYs the shared service is still running
+    for this worktree. They outlive the turn that started them (a background
+    shell makes the session idle), so removing the worktree underneath them
+    leaves processes with a deleted cwd. Only the location's live workers are
+    touched; the service and its sessions are left alone."""
+    info = server.current()
+    if info is None:
+        return []
+    location = str(worktree)
+    steps: list[str] = []
+    for sh in harness.shells(info.port, location):
+        if str(sh.get("status") or "") != "running":
+            continue
+        sid = str(sh.get("id") or "")
+        if not sid:
+            continue
+        harness.remove_shell(info.port, sid, location)
+        steps.append(f"stopped background shell {sid}: "
+                     f"{_short(sh.get('command'))}")
+    for pty in harness.ptys(info.port, location):
+        if str(pty.get("status") or "") != "running":
+            continue
+        pid = str(pty.get("id") or "")
+        if not pid:
+            continue
+        harness.remove_pty(info.port, pid, location)
+        steps.append(f"stopped PTY {pid}: "
+                     f"{_short(pty.get('title') or pty.get('command'))}")
+    return steps
+
+
 def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:
     steps: list[str] = []
     src = Path(TASKS_REL) / name / "task.md"
@@ -110,6 +147,9 @@ def _remove_worktree_and_branch(
     if not ok:
         r.fail("pre-task-cleanup blocked the cleanup; worktree survives")
         return
+
+    for step in _stop_location_workers(worktree):
+        r.step(step)
 
     code, out = _git(common, "worktree", "remove", str(worktree))
     if code != 0:
@@ -245,6 +285,8 @@ def reset_task(
         r.fail(f"no worktree on {base} found in {common}; cannot reset without one")
         return r
     _kill_dispatch(wt)
+    for step in _stop_location_workers(wt):
+        r.step(step)
     code, out = _git(common, "worktree", "remove", "--force", str(wt))
     if code != 0:
         r.fail(f"could not remove worktree {wt}: {out[:300]}")

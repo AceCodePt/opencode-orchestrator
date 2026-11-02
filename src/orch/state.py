@@ -689,6 +689,7 @@ class TaskState:
     conflicted: bool = False
     interrupted: bool = False
     orphaned: list[dict] = field(default_factory=list)
+    workers: list[observe.Worker] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -786,6 +787,14 @@ def scan_project(proj: Project, port: int | None = None) -> list[TaskState]:
                     st.blocked = tf.blocked
                     st.interrupted = tf.interrupted
                     st.orphaned = tf.orphaned
+                    st.workers = tf.workers
+                    background = [w for w in tf.workers if w.kind != "session"]
+                    if background:
+                        st.notes.append(
+                            "background work still running: "
+                            + ", ".join(f"{w.kind} {w.id}".strip()
+                                        for w in background)
+                        )
                     if tf.interrupted:
                         st.notes.append(
                             "interrupted: the task's turn was aborted (a user stop, "

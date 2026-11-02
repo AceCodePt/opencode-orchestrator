@@ -34,6 +34,8 @@ the stream — the stream is a trigger for advisory hooks only. The REST facts a
 | server info / version | `GET /api/info` (`{version, pid, urls, paths}`) |
 | sessions in a worktree | `GET /api/session?directory=<worktree>` |
 | busy sessions | `GET /api/session/active` (`{data: {ses_…: {type: "running"}}}`) |
+| running background shells | `GET /api/shell?location[directory]=<worktree>` (running only; `metadata.sessionID` ties it to the turn) |
+| live PTYs | `GET /api/pty?location[directory]=<worktree>` (filter `status == "running"`) |
 | pending permission asks | `GET /api/permission/request?location[directory]=<worktree>` |
 | pending questions (forms) | `GET /api/form?location[directory]=<worktree>` |
 | a session's turn outcome | `GET /api/session/{id}` (`outcome: succeeded\|failed\|interrupted`) |
@@ -53,6 +55,7 @@ garbage-collect the ask when the turn that created it is stopped.
 | `/api/permission/request`, `/api/form`, `/api/location` | location-scoped by an **object** query, `location[directory]=<path>`; `?directory=` is rejected |
 | `/api/session` | list scopes by a plain `?directory=`; **create** takes `location: {directory}` in the body |
 | `/api/session/{id}/prompt` | the V2 send; `delivery` is `steer` or `queue` |
+| `/api/shell` / `/api/pty` | location-scoped; `/api/shell` lists only running commands, `/api/pty` also lists exited PTYs until removal; `DELETE` on either terminates it |
 | reply to a permission | session-scoped: `POST /api/session/{sid}/permission/{rid}/reply` `{decision, message}` |
 | reply to a question | it is a form: `POST /api/session/{sid}/form/{fid}/reply` `{answer: {field: value}}` |
 | `/api/event` | envelope `{id, created, type, location, data}`; heartbeat is a `: heartbeat` comment |

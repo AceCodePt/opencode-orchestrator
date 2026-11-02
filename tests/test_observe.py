@@ -10,7 +10,8 @@ from orch import observe  # noqa: E402
 
 class _Fake:
     def __init__(self, sessions=None, active=None, perms=None, forms=None,
-                 messages=None, message_errors=None, outcome=None):
+                 messages=None, message_errors=None, outcome=None,
+                 shells=None, ptys=None):
         self.sessions = sessions or [{"id": "ses_1"}]
         self.active = active or {}
         self.perms = perms or []
@@ -18,9 +19,12 @@ class _Fake:
         self.messages = messages or []
         self.message_errors = message_errors or {}
         self.outcome = outcome
+        self.shells = shells or []
+        self.ptys = ptys or []
         self._orig = {}
         for name in ("sessions", "active_sessions", "permissions", "forms",
-                     "messages", "message_by_id", "session_info"):
+                     "messages", "message_by_id", "session_info", "shells",
+                     "ptys"):
             self._orig[name] = getattr(observe.harness, name)
 
     def install(self) -> None:
@@ -29,6 +33,8 @@ class _Fake:
         observe.harness.permissions = lambda port, worktree: self.perms
         observe.harness.forms = lambda port, worktree: self.forms
         observe.harness.messages = lambda port, sid, limit=None: self.messages
+        observe.harness.shells = lambda port, worktree: self.shells
+        observe.harness.ptys = lambda port, worktree: self.ptys
 
         def message_by_id(port, sid, mid):
             return {"id": mid, "type": "assistant",
@@ -149,6 +155,87 @@ def test_a_form_is_a_blocked_question() -> None:
     finally:
         fake.restore()
     print("ok: a V2 form reads as a blocked question")
+
+
+def test_a_running_child_session_holds_the_task() -> None:
+    """A background sub-agent is a child session: the parent idles while the
+    child drains, and the old primary-only watch missed it."""
+    fake = _Fake(
+        sessions=[{"id": "ses_1"},
+                  {"id": "ses_child", "parentID": "ses_1"}],
+        active={"ses_child": {"type": "running"}},
+        messages=[_msg(None)],
+    )
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.BUSY, tf.state
+        assert [w.id for w in tf.workers] == ["ses_child"], tf.workers
+        assert tf.session_ids[0] == "ses_1", \
+            "the parent stays first so prompts still target it"
+    finally:
+        fake.restore()
+    print("ok: a running child session holds the task")
+
+
+def test_a_running_background_shell_holds_the_task() -> None:
+    fake = _Fake(
+        shells=[{"id": "sh_1", "status": "running", "cwd": "/wt",
+                 "command": "npm run ingest",
+                 "metadata": {"sessionID": "ses_1"}}],
+        messages=[_msg(None)],
+    )
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.BUSY, tf.state
+        assert [(w.kind, w.id) for w in tf.workers] == [("shell", "sh_1")]
+        assert tf.workers[0].detail == "npm run ingest"
+    finally:
+        fake.restore()
+    print("ok: a running background shell holds the task")
+
+
+def test_a_running_pty_holds_the_task() -> None:
+    fake = _Fake(
+        ptys=[{"id": "pty_1", "status": "running", "cwd": "/wt/sub",
+               "title": "dev server"}],
+        messages=[_msg(None)],
+    )
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.BUSY, tf.state
+        assert [(w.kind, w.id) for w in tf.workers] == [("pty", "pty_1")]
+    finally:
+        fake.restore()
+    print("ok: a running PTY holds the task")
+
+
+def test_a_shell_elsewhere_or_exited_does_not_hold_the_task() -> None:
+    fake = _Fake(
+        shells=[
+            {"id": "sh_other", "status": "running", "cwd": "/elsewhere",
+             "command": "sleep 1", "metadata": {"sessionID": "ses_other"}},
+            {"id": "sh_done", "status": "exited", "cwd": "/wt",
+             "command": "true", "metadata": {"sessionID": "ses_1"}},
+        ],
+        ptys=[{"id": "pty_done", "status": "exited", "cwd": "/wt",
+               "title": "old"}],
+        messages=[_msg(None)],
+    )
+    fake.install()
+    try:
+        tf = observe.look_task(4096, "/wt")
+        assert tf is not None
+        assert tf.state == observe.IDLE, tf.state
+        assert tf.workers == []
+    finally:
+        fake.restore()
+    print("ok: an unrelated or exited worker does not hold the task")
 
 
 def main() -> int:

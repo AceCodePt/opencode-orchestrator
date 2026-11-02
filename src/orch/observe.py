@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from . import harness
@@ -20,6 +21,19 @@ class Blocked:
 
 
 @dataclass
+class Worker:
+    """One piece of work a task's session still has in flight. OpenCode reports
+    active sessions (including child/sub-agent sessions), but a backgrounded
+    shell or PTY makes the session idle while its process keeps running, so
+    these are read from their own endpoints."""
+
+    kind: str            # "session" | "shell" | "pty"
+    id: str
+    session_id: str | None = None
+    detail: str = ""
+
+
+@dataclass
 class TaskFact:
 
     worktree: str
@@ -29,6 +43,7 @@ class TaskFact:
     notes: list[str] = field(default_factory=list)
     interrupted: bool = False
     orphaned: list[dict] = field(default_factory=list)
+    workers: list[Worker] = field(default_factory=list)
 
     @property
     def needs_human(self) -> bool:
@@ -155,6 +170,62 @@ def _session_interrupted(port: int, session_id: str) -> bool:
     return bool(isinstance(s, dict) and s.get("outcome") == "interrupted")
 
 
+def _within(path: str | None, root: str) -> bool:
+    """Whether `path` is `root` or below it. Realpath is used so a symlinked
+    checkout still matches, and a deleted cwd keeps its recorded path."""
+    if not path:
+        return False
+    try:
+        p = os.path.realpath(str(path))
+        r = os.path.realpath(str(root))
+    except OSError:
+        return False
+    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
+
+
+def _workers(port: int, worktree: str, ids: list[str]) -> list[Worker]:
+    """Everything the task's sessions still have running: active sessions
+    (including child/sub-agent sessions), background shells, and live PTYs.
+
+    A shell/PTY is the task's when it names one of the task's sessions, or when
+    it is running inside the worktree. The latter also catches a worker whose
+    session record is gone. It deliberately does not inspect `/proc`: the
+    shared service owns these processes and is the authority on them."""
+    id_set = set(ids)
+    out: list[Worker] = []
+    active = harness.active_sessions(port)
+    for sid in ids:
+        if sid in active:
+            out.append(Worker(kind="session", id=sid, session_id=sid,
+                              detail="active agent session"))
+
+    for sh in harness.shells(port, worktree):
+        if str(sh.get("status") or "") != "running":
+            continue
+        sid = None
+        meta = sh.get("metadata")
+        if isinstance(meta, dict) and meta.get("sessionID"):
+            sid = str(meta["sessionID"])
+        if sid not in id_set and not _within(sh.get("cwd"), worktree):
+            continue
+        out.append(Worker(
+            kind="shell", id=str(sh.get("id") or ""), session_id=sid,
+            detail=str(sh.get("command") or ""),
+        ))
+
+    for pty in harness.ptys(port, worktree):
+        if str(pty.get("status") or "") != "running":
+            continue
+        sid = str(pty.get("sessionID") or "") or None
+        if sid not in id_set and not _within(pty.get("cwd"), worktree):
+            continue
+        out.append(Worker(
+            kind="pty", id=str(pty.get("id") or ""), session_id=sid,
+            detail=str(pty.get("title") or pty.get("command") or ""),
+        ))
+    return out
+
+
 def look_task(port: int, worktree: str) -> TaskFact | None:
     sess = harness.sessions(port, worktree)
     if not sess:
@@ -164,9 +235,12 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
     primary = [str(s.get("id")) for s in sess
                if s.get("id") and not s.get("parentID")]
     watch = primary or ids
+    # Primary sessions first so prompt/retrigger callers keep targeting the
+    # parent; child sessions still map their events to this worktree.
+    ordered = watch + [sid for sid in ids if sid not in watch]
 
-    active = harness.active_sessions(port)
-    busy = [sid for sid in watch if sid in active]
+    workers = _workers(port, worktree, ids)
+    busy = bool(workers)
 
     perms = [p for p in harness.permissions(port, worktree)
              if str(p.get("sessionID") or "") in set(ids)]
@@ -203,10 +277,11 @@ def look_task(port: int, worktree: str) -> TaskFact | None:
 
     return TaskFact(
         worktree=worktree,
-        session_ids=watch,
+        session_ids=ordered,
         state=state,
         interrupted=interrupted,
         orphaned=orphaned,
+        workers=workers,
         blocked=[_describe_permission(p) for p in live_perms]
         + [_describe_form(q) for q in live_forms],
     )

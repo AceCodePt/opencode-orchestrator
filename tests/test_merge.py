@@ -378,6 +378,45 @@ def test_merge_without_name_from_base_refuses() -> None:
     print("ok: `orch task merge` from the base worktree with no name refuses")
 
 
+def test_teardown_stops_running_shells_and_ptys() -> None:
+    import types
+    from orch import harness, server
+
+    saved_current = server.current
+    saved = {name: getattr(harness, name)
+             for name in ("shells", "ptys", "remove_shell", "remove_pty")}
+    calls: list[tuple[str, str, str]] = []
+    try:
+        server.current = lambda: types.SimpleNamespace(port=4096)
+        harness.shells = lambda port, d: [
+            {"id": "sh_live", "status": "running", "cwd": d,
+             "command": "npm run ingest"},
+            {"id": "sh_done", "status": "exited", "cwd": d,
+             "command": "true"},
+        ]
+        harness.ptys = lambda port, d: [
+            {"id": "pty_live", "status": "running", "cwd": d, "title": "dev"},
+            {"id": "pty_done", "status": "exited", "cwd": d, "title": "old"},
+        ]
+        harness.remove_shell = (
+            lambda port, sid, d: calls.append(("shell", sid, d)))
+        harness.remove_pty = (
+            lambda port, pid, d: calls.append(("pty", pid, d)))
+
+        steps = merge._stop_location_workers(Path("/wt"))
+        assert calls == [
+            ("shell", "sh_live", "/wt"),
+            ("pty", "pty_live", "/wt"),
+        ], calls
+        assert any("stopped background shell sh_live" in s for s in steps), steps
+        assert any("stopped PTY pty_live" in s for s in steps), steps
+    finally:
+        server.current = saved_current
+        for name, fn in saved.items():
+            setattr(harness, name, fn)
+    print("ok: teardown stops only the location's live shells and PTYs")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

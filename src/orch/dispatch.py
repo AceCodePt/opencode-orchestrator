@@ -12,6 +12,17 @@ HOOK_POST = "post-task-create"
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+# Appended to every dispatched prompt. The daemon now holds a task while a
+# background shell, PTY, or child session is still running, but a worker the
+# agent daemonizes itself (`nohup … &`) is invisible to both opencode and the
+# daemon. Finishing or stopping work is the only reliable signal this side.
+BACKGROUND_RULE = (
+    "Do not leave background work running when you declare done. Finish or stop "
+    "every background shell, PTY, and sub-agent you started before committing. "
+    "The daemon verifies, merges, and removes this worktree as soon as your turn "
+    "goes idle."
+)
+
 
 def slug(text: str) -> str:
     return SLUG_RE.sub("-", text.strip().lower()).strip("-")
@@ -105,8 +116,11 @@ def plan(
         text, err = _prompt_from_task_file(dispatcher, name, base)
         if err:
             return None, err
+    text = (text or "").rstrip()
+    if BACKGROUND_RULE not in text:
+        text = f"{text}\n\n{BACKGROUND_RULE}" if text else BACKGROUND_RULE
     return Plan(task=name, branch=br, worktree=wt, project=str(project),
-                dispatcher=dispatcher, base=base, prompt=text or "",
+                dispatcher=dispatcher, base=base, prompt=text,
                 model=model, agent=agent), None
 
 

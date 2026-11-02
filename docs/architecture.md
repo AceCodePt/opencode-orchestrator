@@ -23,7 +23,7 @@ backlog file. Nothing can drift because there is nothing to drift from.
 | worktree / branch | `git worktree list` |
 | dirty / diff | `git status --porcelain` in the worktree; `rev-list --count base..branch` |
 | session state | the shared opencode service: `/api/session?directory=<worktree>` |
-| dispatch alive | a session bound to the worktree that is busy or blocked — task agents are server sessions, not subprocesses |
+| dispatch alive | a session bound to the worktree that is busy or blocked, or a shell/PTY it left running |
 | dispatch orchestrated | the task has a session on the shared opencode service (every task session is created by `orch task start` or the scheduler via `POST /api/session`) |
 | which projects exist | a live scan of `$HOME`, `/mnt`, and orch's dev root `/tmp/opencode` (env `ORCH_ROOTS` overrides) for `.orchestration/` dirs |
 | retries, settle timers | **in-memory in the daemon only** — lost on restart, accepted |
@@ -82,7 +82,13 @@ Every task agent is a session on the shared opencode service bound to its worktr
 dispatch subprocess to inspect. The daemon reads three signals from the server:
 
 - **busy** — the session appears in `/api/session/active` (opencode reports `running` for the
-  whole agent loop, including long-running tool calls); the agent is working.
+  whole agent loop, including long-running tool calls); the agent is working. Child
+  sessions (background sub-agents) are checked too, so a parent that idles while a
+  child drains is still busy.
+- **working in the background** — a running shell in `/api/shell` or a live PTY in
+  `/api/pty` that names one of the task's sessions (or runs inside its worktree). A
+  backgrounded tool call lets the session idle while the process keeps running, so
+  this is checked separately; the task stays running until the worker is gone.
 - **blocked** — a live pending ask for that worktree in `/permission` or `/question`; the
   agent is waiting on a human.
 - **interrupted** — the session's last assistant message was aborted (`MessageAbortedError`,
@@ -103,7 +109,7 @@ Per claimed task, each cycle:
    the human; an interrupted task with no produced work (`dirty` and `diff` both false)
    falls through to the empty-branch hold below, so it is held too.
 2. **Blocked** on a live permission/question → alert (deduped by request id, in-memory).
-3. **Busy** session, or an orchestrated run process alive → running; nothing. (A run
+3. **Busy** session, running background shell/PTY, or an orchestrated run process alive → running; nothing. (A run
    client stuck alive past `MAX_ORCHESTRATED_S` is escaped, so it can never stall a
    task forever.)
 4. **Settled** (session idle or gone) past a settle budget (~30s):
@@ -497,8 +503,11 @@ no side inside the agent's server that reports a verdict at all.
   The verification is the daemon's own run, so a branch that merges after a crash is
   verified
   work, not an unexamined claim.
-- **Kill by pid, never by pattern.** The dispatch process is identified by its exact
-  cmdline (`opencode run … --dir <worktree>`) and killed by that pid.
+- **Kill by pid, never by pattern.** A legacy dispatch process is identified by its
+  exact cmdline (`opencode run … --dir <worktree>`) and killed by that pid. Teardown
+  also asks the shared service to delete the location's running shells and PTYs
+  before removing the worktree: a backgrounded command outlives the turn, and
+  removing its cwd would leave it running against a deleted directory.
 
 ## Flow D — routing, and the human switch
 
@@ -540,8 +549,9 @@ built on the daemon's log + scan rather than on a verdict table.
 7. The agent declares done by committing; only a committed, diffing branch can merge,
    and it merges only after the daemon's own verification run passed it (or, when no
    hook is committed, after the daemon's implicit acceptance commit).
-8. A dispatch is a server session, never a subprocess — there is nothing to detach
-   or kill; liveness is the session's state in the shared service.
+8. A dispatch is a server session, never a subprocess. Liveness is the session's
+   state in the shared service plus the background shells/PTYs it owns; teardown
+   stops those workers before removing the worktree.
 9. Unavailability never produces a pass. Store gone (there is none), server down,
    verification hook timed out, worktree gone: each lands on `needs-review`.
 10. Every project-specific decision is a hook or config value, never daemon or CLI

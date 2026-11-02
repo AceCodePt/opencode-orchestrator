@@ -106,15 +106,27 @@ in one source file has one place to check.
   re-derives the state from the worktree.
 - **Actions carry their project** (the common-dir), because one daemon supervises
   every project and task names are unique only within one.
-- **"Busy" is the session status, and it is enough.** opencode's
-  `GET /api/session/active` reports `running` for the whole agent loop (LLM turns
-  and long-running tool calls) and omits idle sessions; a pending
+- **"Busy" is the session status, the child sessions, and live background workers.**
+  opencode's `GET /api/session/active` reports `running` for the whole agent loop
+  (LLM turns and long-running tool calls) and omits idle sessions, and it covers
+  child sessions too; `observe.look_task` checks every session in the worktree, not
+  just the parent, so a background sub-agent keeps the task running after the parent
+  idles. A backgrounded shell or PTY is the second gap: the tool call returns, the
+  session idles, and the process keeps running. `GET /api/shell` and `GET /api/pty`
+  name the running worker (and the shell's `metadata.sessionID` ties it back to the
+  turn), so a task is busy while either is live for its worktree. A pending
   `/api/permission/request` or a form for the worktree is `blocked`. Dispatch no
   longer spawns an `opencode run` process, so there is no process-based signal to
-  hold settling on — the session state plus the worktree state and the
+  hold settling on — the session state, the live workers, the worktree state and the
   verification hook are the truth. Blocked asks stay pending until a human
   answers them: the headless `opencode run` loop used to auto-reject (or
   auto-approve with `--auto`) every ask before a human could see it.
+- **Teardown stops the location's workers before removing its worktree.** The only
+  remaining process to kill is a legacy dispatch, but shells and PTYs are owned by
+  the shared service, not orch. `merge._remove_worktree_and_branch` and
+  `reset_task` delete the location's running shells/PTYs first, so a backgrounded
+  ingest cannot survive with a deleted cwd (the class of orphan this fixed). The
+  service and its sessions are left alone.
 - **A user interrupt and an orphaned ask are derived from the session record,
   never stored.** V2 records the turn's `outcome` on the session
   (`succeeded`/`failed`/`interrupted`) and on its trailing idle message, so a

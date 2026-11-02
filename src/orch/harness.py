@@ -190,6 +190,46 @@ def delete_session(port: int, session_id: str) -> Any:
     return delete(port, f"/api/session/{session_id}")
 
 
+def shells(port: int, directory: str | None = None) -> list[dict]:
+    """Running shell commands for a location. OpenCode keeps these out of the
+    session loop: a backgrounded tool call makes the session idle while the
+    process keeps running, and `Shell.Info.metadata.sessionID` is what ties it
+    back to the turn that started it. Exited shells are not listed."""
+    path = "/api/shell"
+    q = _location_query(directory)
+    if q:
+        path += f"?{q}"
+    return _as_list(get(port, path))
+
+
+def remove_shell(port: int, shell_id: str, directory: str | None = None) -> Any:
+    """Terminate a shell command and drop its retained output. Used at
+    teardown, before the worktree it runs in is removed."""
+    path = f"/api/shell/{shell_id}"
+    q = _location_query(directory)
+    if q:
+        path += f"?{q}"
+    return delete(port, path)
+
+
+def ptys(port: int, directory: str | None = None) -> list[dict]:
+    """PTY sessions for a location. Unlike shells this includes exited PTYs
+    retained until removal, so callers must filter on `status == "running"`."""
+    path = "/api/pty"
+    q = _location_query(directory)
+    if q:
+        path += f"?{q}"
+    return _as_list(get(port, path))
+
+
+def remove_pty(port: int, pty_id: str, directory: str | None = None) -> Any:
+    path = f"/api/pty/{pty_id}"
+    q = _location_query(directory)
+    if q:
+        path += f"?{q}"
+    return delete(port, path)
+
+
 def _model_ref(model: Any) -> Any:
     if isinstance(model, dict):
         return model

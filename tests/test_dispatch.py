@@ -68,6 +68,7 @@ def test_committed_task_file_plans_fine() -> None:
     assert err is None and p is not None
     assert p.task == "probe" and p.branch == "probe" and p.base == "main"
     assert "tasks/probe/task.md" in p.prompt
+    assert dispatch.BACKGROUND_RULE in p.prompt
     tmp.cleanup()
     print("ok: a committed task file plans cleanly")
 
@@ -77,7 +78,8 @@ def test_missing_task_file_needs_an_explicit_prompt() -> None:
     p, err = dispatch.plan(root, "ad-hoc")
     assert p is None and err and "no --prompt" in err
     p, err = dispatch.plan(root, "ad-hoc", prompt="just do this")
-    assert err is None and p is not None and p.prompt == "just do this"
+    assert err is None and p is not None and p.prompt.startswith("just do this")
+    assert dispatch.BACKGROUND_RULE in p.prompt
     tmp.cleanup()
     print("ok: ad-hoc dispatch requires an explicit prompt")
 

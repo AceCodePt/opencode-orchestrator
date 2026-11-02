@@ -244,6 +244,10 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             state_info += " dirty"
         elif t.diff:
             state_info += " diff"
+        background = [w for w in t.workers if w.kind != "session"]
+        if background:
+            state_info += " background=[" + ",".join(
+                f"{w.kind}:{w.id}" for w in background) + "]"
         print(f"  {t.status:12} {t.name:34} {branch:<34} {where}{state_info}")
         for n in t.notes:
             print(f"    ! {n}")
@@ -396,6 +400,11 @@ def _task_json(t: state.TaskState) -> dict:
         "rebasing": t.rebasing,
         "session": t.session,
         "session_ids": t.session_ids,
+        "workers": [
+            {"kind": w.kind, "id": w.id, "session_id": w.session_id,
+             "detail": w.detail}
+            for w in t.workers
+        ],
         "dispatch_alive": t.dispatch_alive,
         "dispatch_orchestrated": t.dispatch_orchestrated,
         "wait_human_start": t.wait_human_start,
