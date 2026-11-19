@@ -39,14 +39,32 @@ def _git(cwd: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
         return 1, str(e)
 
 
-def _hook_env(name: str, branch: str, worktree: Path, base: str) -> dict[str, str]:
+def _hook_env(name: str, branch: str, worktree: Path | None,
+              base: str) -> dict[str, str]:
     return {
         "TASK_NAME": name,
         "BRANCH_NAME": branch,
-        "WORKTREE_PATH": str(worktree),
-        "WORKTREE_NAME": worktree.name,
+        "WORKTREE_PATH": str(worktree or ""),
+        "WORKTREE_NAME": worktree.name if worktree else name,
         "BASE_BRANCH": base,
     }
+
+
+def _branch_exists(cwd: Path, branch: str) -> bool:
+    code, _ = _git(cwd, "rev-parse", "--verify", "--quiet",
+                   f"refs/heads/{branch}")
+    return code == 0
+
+
+def _merged_into_head(cwd: Path, branch: str) -> bool:
+    """True when <branch> is reachable from cwd's HEAD.
+
+    `git branch -d` checks the branch's *upstream*, not HEAD, so a branch that
+    was just fast-forwarded into base still refuses deletion when its own
+    upstream is behind ("not fully merged"). Deletion after a merge must look
+    at HEAD instead."""
+    code, _ = _git(cwd, "merge-base", "--is-ancestor", branch, "HEAD")
+    return code == 0
 
 
 def _kill_dispatch(worktree: Path) -> None:
@@ -75,6 +93,14 @@ def _kill_dispatch(worktree: Path) -> None:
 def _short(text: object, limit: int = 80) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _real_worktree(worktree: Path | None) -> Path | None:
+    """Normalise the empty-path value callers use for "no worktree"."""
+    if worktree is None:
+        return None
+    wt = Path(worktree)
+    return None if str(wt) in ("", ".") else wt
 
 
 def _stop_location_workers(worktree: Path) -> list[str]:
@@ -136,37 +162,52 @@ def _archive(common: Path, base_wt: Path, name: str, base: str) -> list[str]:
 
 
 def _remove_worktree_and_branch(
-    common: Path, base_wt: Path, name: str, branch: str, worktree: Path,
+    common: Path, base_wt: Path, name: str, branch: str,
+    worktree: Path | None,
     base: str, r: MergeResult, force_delete: bool = False,
 ) -> None:
-    _kill_dispatch(worktree)
+    worktree = _real_worktree(worktree)
     env = _hook_env(name, branch, worktree, base)
 
-    ok, msg = dispatch.run_hook(worktree, "pre-task-cleanup", env)
-    r.step(msg)
-    if not ok:
-        r.fail("pre-task-cleanup blocked the cleanup; worktree survives")
-        return
+    if worktree is not None and worktree.exists():
+        _kill_dispatch(worktree)
+        ok, msg = dispatch.run_hook(worktree, "pre-task-cleanup", env)
+        r.step(msg)
+        if not ok:
+            r.fail("pre-task-cleanup blocked the cleanup; worktree survives")
+            return
 
-    for step in _stop_location_workers(worktree):
-        r.step(step)
+        for step in _stop_location_workers(worktree):
+            r.step(step)
 
-    code, out = _git(common, "worktree", "remove", str(worktree))
-    if code != 0:
-        code, out = _git(common, "worktree", "remove", "--force", str(worktree))
-    if code != 0:
-        r.fail(f"could not remove worktree {worktree}: {out[:300]}")
-        return
-    r.step(f"removed worktree {worktree}")
+        code, out = _git(common, "worktree", "remove", str(worktree))
+        if code != 0:
+            code, out = _git(common, "worktree", "remove", "--force",
+                             str(worktree))
+        if code != 0:
+            r.fail(f"could not remove worktree {worktree}: {out[:300]}")
+            return
+        r.step(f"removed worktree {worktree}")
+    else:
+        # The worktree vanished before cleanup ran (a manual removal, a crash,
+        # or a previous cleanup that stopped half-way). There is nothing left
+        # to tear down there; the branch and the spec still need closing.
+        r.step(f"worktree {worktree or name} already gone")
+        _git(common, "worktree", "prune")
 
-    env["WORKTREE_PATH"] = str(worktree)
     ok, msg = dispatch.run_hook(base_wt, "pre-branch-delete", env)
     r.step(msg)
     if not ok:
         r.fail(f"pre-branch-delete blocked; branch {branch} survives")
         return
 
-    flag = "-D" if force_delete else "-d"
+    if not _branch_exists(base_wt, branch):
+        r.step(f"branch {branch} already gone")
+        _git(common, "worktree", "prune")
+        dispatch.run_hook(base_wt, "post-task-cleanup", env)
+        return
+
+    flag = "-D" if (force_delete or _merged_into_head(base_wt, branch)) else "-d"
     code, out = _git(base_wt, "branch", flag, branch)
     if code != 0:
         r.fail(f"could not delete branch {branch}: {out[:300]}")
@@ -273,30 +314,37 @@ def reset_task(
     common: Path,
     name: str,
     branch: str,
-    worktree: Path,
+    worktree: Path | None,
     base: str = "main",
 ) -> MergeResult:
     """Return a claimed task to `todo`: delete the worktree and branch, keep
     the spec in tasks/. A deliberate human action - the branch may hold work."""
     r = MergeResult()
-    wt = Path(worktree)
     base_wt = state._base_worktree(common, base)
     if base_wt is None:
         r.fail(f"no worktree on {base} found in {common}; cannot reset without one")
         return r
-    _kill_dispatch(wt)
-    for step in _stop_location_workers(wt):
-        r.step(step)
-    code, out = _git(common, "worktree", "remove", "--force", str(wt))
-    if code != 0:
-        r.fail(f"could not remove worktree {wt}: {out[:300]}")
-        return r
-    r.step(f"removed worktree {wt}")
-    code, out = _git(base_wt, "branch", "-D", branch)
-    if code != 0:
-        r.fail(f"could not delete branch {branch}: {out[:300]}")
-        return r
-    r.step(f"deleted branch {branch}")
+    worktree = _real_worktree(worktree)
+    if worktree is not None and worktree.exists():
+        wt = worktree
+        _kill_dispatch(wt)
+        for step in _stop_location_workers(wt):
+            r.step(step)
+        code, out = _git(common, "worktree", "remove", "--force", str(wt))
+        if code != 0:
+            r.fail(f"could not remove worktree {wt}: {out[:300]}")
+            return r
+        r.step(f"removed worktree {wt}")
+    else:
+        r.step(f"worktree {worktree or name} already gone")
+    if _branch_exists(base_wt, branch):
+        code, out = _git(base_wt, "branch", "-D", branch)
+        if code != 0:
+            r.fail(f"could not delete branch {branch}: {out[:300]}")
+            return r
+        r.step(f"deleted branch {branch}")
+    else:
+        r.step(f"branch {branch} already gone")
     _git(common, "worktree", "prune")
     return r
 
@@ -305,11 +353,10 @@ def remove_task(
     common: Path,
     name: str,
     branch: str,
-    worktree: Path,
+    worktree: Path | None,
     base: str = "main",
 ) -> MergeResult:
     r = MergeResult()
-    wt = Path(worktree)
     base_wt = state._base_worktree(common, base)
     if base_wt is None:
         r.fail(f"no worktree on {base} found in {common}; cannot clean up without one")
@@ -321,7 +368,7 @@ def remove_task(
                "finish or abort that merge first")
         return r
 
-    _remove_worktree_and_branch(common, base_wt, name, branch, wt, base, r,
+    _remove_worktree_and_branch(common, base_wt, name, branch, worktree, base, r,
                                 force_delete=True)
     if not r.ok:
         return r

@@ -417,6 +417,106 @@ def test_teardown_stops_running_shells_and_ptys() -> None:
     print("ok: teardown stops only the location's live shells and PTYs")
 
 
+def test_merge_deletes_a_merged_branch_that_is_ahead_of_its_upstream() -> None:
+    """A task branch often has an unpushed tip. `git branch -d` checks the
+    branch's upstream, not HEAD, so a branch that was just fast-forwarded into
+    base still refuses deletion. The merge already landed: cleanup must delete
+    it with -D and archive the spec instead of leaving a phantom claimed task."""
+    tmp = tempfile.TemporaryDirectory()
+    bare = _bare_repo(tmp)
+    wt = _claim_task(bare, "task-a")
+    main_wt = bare.parent / "main"
+
+    # The bare repo has `origin` = the seed checkout, but a bare clone carries
+    # no fetch refspec. Add one so the pushed branch gets a tracking ref, then
+    # add a commit the upstream never sees.
+    _git(bare, "config", "remote.origin.fetch",
+         "+refs/heads/*:refs/remotes/origin/*")
+    _git(bare, "push", "-q", "-u", "origin", "task-a")
+    _git(bare, "fetch", "-q", "origin")
+
+    # One local commit the upstream never saw.
+    (wt / "second.py").write_text("# second")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "unpushed work")
+    assert _git(bare, "rev-parse", "task-a") != \
+        _git(bare, "rev-parse", "origin/task-a"), \
+        "the upstream must be behind the branch tip"
+
+    r = merge.merge_and_cleanup(bare, "task-a", "task-a", wt, "main")
+    assert r.ok, r.problems
+    assert "task-a" not in _git(main_wt, "branch", "--list")
+    assert (main_wt / "archive" / "task-a" / "task.md").exists(), \
+        "the spec must be archived even though the upstream was behind"
+    assert "unpushed work" in _git(main_wt, "log", "--oneline")
+    tmp.cleanup()
+    print("ok: a merged branch ahead of its upstream is deleted and archived")
+
+
+def test_archive_closes_a_task_whose_worktree_is_already_gone() -> None:
+    import argparse
+    from orch import cli
+
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        bare = _bare_repo(tmp)
+        wt = _claim_task(bare, "task-a")
+        main_wt = bare.parent / "main"
+        _git(bare, "worktree", "remove", "--force", str(wt))
+        _git(bare, "worktree", "prune")
+
+        rc = cli.cmd_task_archive(
+            argparse.Namespace(directory=str(main_wt), name="task-a"))
+        assert rc == 0, rc
+        assert _git(bare, "branch", "--list", "task-a").strip() == ""
+        assert (main_wt / "archive" / "task-a" / "task.md").exists()
+        assert not (main_wt / "tasks" / "task-a").exists()
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: `orch task archive` closes a task whose worktree vanished")
+
+
+def test_reset_closes_a_task_whose_worktree_is_already_gone() -> None:
+    import argparse
+    from orch import cli
+
+    saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        os.environ["XDG_CONFIG_HOME"] = tmp.name
+        os.environ["XDG_STATE_HOME"] = str(Path(tmp.name) / "state")
+        bare = _bare_repo(tmp)
+        wt = _claim_task(bare, "task-a")
+        main_wt = bare.parent / "main"
+        _git(bare, "worktree", "remove", "--force", str(wt))
+        _git(bare, "worktree", "prune")
+
+        rc = cli.cmd_task_reset(
+            argparse.Namespace(directory=str(main_wt), name="task-a",
+                               force=False))
+        assert rc == 0, rc
+        assert _git(bare, "branch", "--list", "task-a").strip() == ""
+        assert (main_wt / "tasks" / "task-a" / "task.md").exists(), \
+            "reset keeps the spec in the backlog"
+        assert not (main_wt / "archive" / "task-a").exists()
+    finally:
+        tmp.cleanup()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: `orch task reset` closes a task whose worktree vanished")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

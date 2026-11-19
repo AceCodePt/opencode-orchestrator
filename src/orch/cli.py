@@ -287,7 +287,17 @@ def _classify_wait(t: state.TaskState, base_wt: Path | None) -> tuple[str | None
     if base_wt is None:
         return "needs-you", f"orch doctor -C {_q(t.project)}", "no base worktree"
     if not t.worktree or not Path(t.worktree).is_dir():
-        return "needs-you", f"orch task reset -C {_q(base_wt)} {t.name}", "worktree missing"
+        # No worktree means no merge can run, but the branch can still be
+        # closed. If its tip is already in base the work landed and only the
+        # bookkeeping is left; otherwise resetting returns it to the backlog.
+        merged = bool(t.branch) and state._merged_into_base(
+            Path(t.project), t.base, t.branch) is True
+        if merged:
+            return "needs-you", \
+                f"orch task archive -C {_q(base_wt)} {t.name}", \
+                "worktree missing; its branch is already merged"
+        return "needs-you", f"orch task reset -C {_q(base_wt)} {t.name}", \
+            "worktree missing"
     if t.conflicted:
         return "needs-you", f"resolve the merge conflict in {_q(base_wt)}", \
             "merge conflict in progress"
@@ -426,7 +436,7 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
     if t is None:
         print(f"no such task: {args.name}", file=sys.stderr)
         return 2
-    if not t.claimed or not t.worktree or not t.branch:
+    if not t.claimed or not t.branch:
         print(f"{args.name} is not claimed (status {t.status}); nothing to reset",
               file=sys.stderr)
         return 1
@@ -442,8 +452,9 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
             )
             return 1
     from . import merge as merge_mod
-    r = merge_mod.reset_task(proj.common, args.name, t.branch,
-                             Path(t.worktree), proj.base)
+    worktree = Path(t.worktree) if t.worktree else None
+    r = merge_mod.reset_task(proj.common, args.name, t.branch, worktree,
+                             proj.base)
     for s in r.steps:
         print(f"  {s}")
     for p in r.problems:
@@ -451,7 +462,7 @@ def cmd_task_reset(args: argparse.Namespace) -> int:
     print(f"{args.name}: -> todo (branch and worktree deleted)")
     if r.ok:
         _fire_task_global("reset", proj, t.name, branch=t.branch,
-                          worktree=Path(t.worktree))
+                          worktree=worktree)
     return 0 if r.ok else 1
 
 
@@ -466,13 +477,14 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
     if t is None:
         print(f"no such task: {args.name}", file=sys.stderr)
         return 2
-    if not t.claimed or not t.worktree or not t.branch:
+    if not t.claimed or not t.branch:
         print(f"{args.name} is not claimed (status {t.status}); nothing to archive",
               file=sys.stderr)
         return 1
     from . import merge as merge_mod
-    r = merge_mod.remove_task(proj.common, args.name, t.branch,
-                              Path(t.worktree), proj.base)
+    worktree = Path(t.worktree) if t.worktree else None
+    r = merge_mod.remove_task(proj.common, args.name, t.branch, worktree,
+                              proj.base)
     for s in r.steps:
         print(f"  {s}")
     for p in r.problems:
@@ -480,7 +492,7 @@ def cmd_task_archive(args: argparse.Namespace) -> int:
     print(f"{args.name}: closed and archived")
     if r.ok:
         _fire_task_global("archived", proj, t.name, branch=t.branch,
-                          worktree=Path(t.worktree))
+                          worktree=worktree)
     return 0 if r.ok else 1
 
 

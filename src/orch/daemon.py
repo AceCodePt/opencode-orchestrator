@@ -871,7 +871,9 @@ class Supervisor:
         if not state._diff(Path(a.project or ""), a.base or "main",
                            a.branch or ""):
             r = merge.remove_task(Path(a.project or ""), a.task or "",
-                                  a.branch or "", wt, a.base or "main")
+                                  a.branch or "",
+                                  Path(a.worktree) if a.worktree else None,
+                                  a.base or "main")
             for s in r.steps:
                 log.append(s)
             for p in r.problems:
@@ -1111,7 +1113,8 @@ class Supervisor:
                         int(time.time()) + MERGE_BACKOFF_S
             elif a.kind == REMOVE and a.project:
                 r = merge.remove_task(Path(a.project), a.task or "",
-                                      a.branch or "", Path(a.worktree or ""),
+                                      a.branch or "",
+                                      Path(a.worktree) if a.worktree else None,
                                       a.base or "main")
                 for s in r.steps:
                     log.append(f"  -> {s}")

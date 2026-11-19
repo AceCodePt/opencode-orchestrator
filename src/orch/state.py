@@ -513,6 +513,19 @@ def _diff(common: Path, base: str, branch: str) -> bool:
     return rc == 0 and out.strip() not in ("", "0")
 
 
+def _merged_into_base(common: Path, base: str, branch: str) -> bool | None:
+    """True when <branch> is already contained in <base>.
+
+    None means the repo or a ref could not be resolved; an error must never be
+    read as "merged" by a caller deciding whether work is already on base."""
+    for ref in (branch, base):
+        rc, _ = _git(common, "rev-parse", "--verify", "--quiet",
+                     f"refs/heads/{ref}")
+        if rc != 0:
+            return None
+    return not _diff(common, base, branch)
+
+
 def _behind(common: Path, base: str, branch: str) -> bool:
     """True if <base> has commits <branch> does not contain. A task behind its
     base has to be caught up before it can fast-forward into base."""
